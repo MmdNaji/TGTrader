@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox,
     QCheckBox, QFileDialog, QMessageBox, QGroupBox, QFormLayout, QPlainTextEdit, QHeaderView, QSplitter,
-    QProgressDialog,
+    QProgressDialog, QTextBrowser,
 )
 
 from .. import __version__
@@ -22,6 +22,7 @@ from ..config import Settings
 from ..db import Database
 from ..engine import Engine
 from ..knowledge.skills import load_seed_skills, add_extracted, active_skills
+from .help_fa import HELP_HTML
 
 DARK = """
 QWidget { background:#0b0e13; color:#e6e6e6; font-size:13px; }
@@ -88,6 +89,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._learn_tab(), "یادگیری")
         tabs.addTab(self._backtest_tab(), "بک‌تست")
         tabs.addTab(self._settings_tab(), "تنظیمات")
+        tabs.addTab(self._help_tab(), "📖 راهنما")
         self.setCentralWidget(tabs)
         self.tabs = tabs
 
@@ -259,8 +261,13 @@ class MainWindow(QMainWindow):
         self._on_event(f"[update] version {rel.version} is available")
         if manual:
             self._offer_update(rel)
+        elif self.settings.auto_update and updater.is_frozen() and rel.asset_url:
+            if self.engine and self.engine.running():
+                self._on_event("[update] engine is running - will install when it is stopped (or press the update button)")
+            else:
+                self._offer_update(rel, auto=True)
 
-    def _offer_update(self, rel):
+    def _offer_update(self, rel, auto: bool = False):
         notes = (rel.notes[:800] + "…") if len(rel.notes) > 800 else rel.notes
         if not updater.is_frozen():
             QMessageBox.information(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} منتشر شده.\n{notes}\n\nاین نسخه از سورس اجرا شده؛ با git pull به‌روز کن یا نصب‌کننده را از این‌جا بگیر:\n{rel.page_url}")
@@ -269,9 +276,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} فایل نصب ویندوز ندارد:\n{rel.page_url}"); return
         if self.engine and self.engine.running():
             QMessageBox.warning(self, "به‌روزرسانی", "اول موتور معامله را متوقف کن، بعد به‌روزرسانی کن."); return
-        if QMessageBox.question(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} دانلود و نصب شود؟ برنامه بسته و دوباره باز می‌شود.\n\n{notes}") != QMessageBox.Yes:
+        if not auto and QMessageBox.question(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} دانلود و نصب شود؟ برنامه بسته و دوباره باز می‌شود.\n\n{notes}") != QMessageBox.Yes:
             return
-        dlg = QProgressDialog("در حال دانلود…", "لغو", 0, 100, self); dlg.setWindowTitle("به‌روزرسانی"); dlg.setAutoClose(False); dlg.setMinimumDuration(0)
+        self._on_event(f"[update] downloading {rel.version}" + (" automatically" if auto else ""))
+        dlg = QProgressDialog(f"در حال دانلود نسخه‌ی {rel.version}…", "لغو", 0, 100, self); dlg.setWindowTitle("به‌روزرسانی خودکار" if auto else "به‌روزرسانی"); dlg.setAutoClose(False); dlg.setMinimumDuration(0)
         w = Worker(lambda: updater.download(rel, progress=lambda d, t: w.progress.emit(d, t)))
 
         def on_prog(d, t):
@@ -512,6 +520,14 @@ class MainWindow(QMainWindow):
             self._fill(self.tbl_bt, [[t.strategy, t.side, f"{t.entry:.6g}", f"{t.exit:.6g}", f"{t.pnl:+.4f}", f"{t.r:+.2f}", t.reason] for t in res.trades])
         self._run_bg(job, done)
 
+    # ------------------------------------------------------------ help
+    def _help_tab(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w)
+        tb = QTextBrowser(); tb.setOpenExternalLinks(True); tb.setHtml(HELP_HTML)
+        tb.setStyleSheet("QTextBrowser{background:#0f131a;border:1px solid #2a2f3a;padding:12px}")
+        v.addWidget(tb)
+        return w
+
     # ------------------------------------------------------------ settings
     def _settings_tab(self) -> QWidget:
         w = QWidget(); outer = QVBoxLayout(w)
@@ -524,7 +540,8 @@ class MainWindow(QMainWindow):
         self.s_effort = QComboBox(); self.s_effort.addItems(["low", "medium", "high", "xhigh", "max"]); self.s_effort.setCurrentText(s.effort)
         self.s_llm = QCheckBox("تصمیم نهایی با Claude (با مهارت‌ها)"); self.s_llm.setChecked(s.use_llm_for_decisions)
         bt = QPushButton("تست اتصال"); bt.clicked.connect(self._test_llm)
-        f1.addRow("API key", self.s_key); f1.addRow("مدل", self.s_model); f1.addRow("دقت (effort)", self.s_effort); f1.addRow("", self.s_llm); f1.addRow("", bt)
+        self.s_autoupd = QCheckBox("به‌روزرسانی خودکار موقع باز شدن برنامه"); self.s_autoupd.setChecked(s.auto_update)
+        f1.addRow("API key", self.s_key); f1.addRow("مدل", self.s_model); f1.addRow("دقت (effort)", self.s_effort); f1.addRow("", self.s_llm); f1.addRow("", bt); f1.addRow("", self.s_autoupd)
         grid.addWidget(g1, 0, 0)
 
         g2 = QGroupBox("بازار و صرافی"); f2 = QFormLayout(g2)
@@ -575,7 +592,7 @@ class MainWindow(QMainWindow):
     def _save_settings(self):
         s = self.settings
         s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText(); s.effort = self.s_effort.currentText()
-        s.use_llm_for_decisions = self.s_llm.isChecked()
+        s.use_llm_for_decisions = self.s_llm.isChecked(); s.auto_update = self.s_autoupd.isChecked()
         s.mode = self.s_mode.currentText(); s.market = self.s_market.currentText()
         s.exchange.exchange_id = self.s_exchange.text().strip().lower()
         s.exchange.api_key = self.s_ex_key.text().strip(); s.exchange.secret = self.s_ex_secret.text().strip()

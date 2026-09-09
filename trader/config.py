@@ -79,6 +79,7 @@ class Settings:
     model: str = "claude-opus-5"
     effort: str = "high"          # low | medium | high | xhigh | max
     use_llm_for_decisions: bool = True
+    auto_update: bool = True
 
     # --- trading ---
     mode: str = "paper"           # paper | live
