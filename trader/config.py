@@ -27,6 +27,10 @@ def data_dir() -> Path:
     return p
 
 
+# Exchanges we can read prices from but that publish no trading API: orders go through screen control.
+NO_API_EXCHANGES = ("kcex",)
+
+
 @dataclass
 class RiskSettings:
     # Hard ceiling on the capital the bot may ever put to work (quote currency).
@@ -157,7 +161,9 @@ class Settings:
         if not (0 < self.risk.max_daily_loss <= 0.5):
             problems.append("max_daily_loss must be between 0 and 0.5")
         if self.mode == "live" and self.market == "crypto" and not self.computer.enabled:
-            if not (self.exchange.api_key and self.exchange.secret):
+            if self.exchange.exchange_id.lower() in NO_API_EXCHANGES:
+                problems.append(f"{self.exchange.exchange_id} has no trading API - enable screen control (Settings -> Screen control) for live orders")
+            elif not (self.exchange.api_key and self.exchange.secret):
                 problems.append("live crypto trading needs the exchange API key and secret")
         if not self.symbols:
             problems.append("at least one symbol is required")

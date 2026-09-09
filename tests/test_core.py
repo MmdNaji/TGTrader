@@ -151,3 +151,13 @@ def test_updater_version_compare():
     assert updater._vtuple("1.0") > updater._vtuple("0.99.99")
     assert updater._vtuple("0.1.0") == updater._vtuple("v0.1.0")
     assert not updater.configured() or "/" in updater.UPDATE_REPO
+
+
+def test_kcex_symbol_and_intervals():
+    from trader.market.kcex import kcex_symbol, INTERVALS
+    assert kcex_symbol("BTC/USDT") == "BTC_USDT" and kcex_symbol("eth/usdt:usdt") == "ETH_USDT"
+    assert INTERVALS["1d"][0] == "Day1" and INTERVALS["1h"][1] == 3600
+    s = Settings(); s.mode = "live"; s.exchange.exchange_id = "kcex"; s.computer.enabled = False
+    assert any("screen control" in p for p in s.validate())
+    s.computer.enabled = True
+    assert not any("screen control" in p for p in s.validate())

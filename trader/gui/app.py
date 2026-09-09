@@ -547,7 +547,10 @@ class MainWindow(QMainWindow):
         g2 = QGroupBox("بازار و صرافی"); f2 = QFormLayout(g2)
         self.s_mode = QComboBox(); self.s_mode.addItems(["paper", "live"]); self.s_mode.setCurrentText(s.mode)
         self.s_market = QComboBox(); self.s_market.addItems(["crypto", "forex"]); self.s_market.setCurrentText(s.market)
-        self.s_exchange = QLineEdit(s.exchange.exchange_id)
+        self.s_exchange = QComboBox(); self.s_exchange.setEditable(True)
+        self.s_exchange.addItems(["bybit", "binance", "kucoin", "okx", "mexc", "gateio", "bitget", "htx", "kcex"])
+        self.s_exchange.setCurrentText(s.exchange.exchange_id)
+        self.s_exchange.currentTextChanged.connect(self._exchange_changed)
         self.s_ex_key = QLineEdit(s.exchange.api_key); self.s_ex_secret = QLineEdit(s.exchange.secret); self.s_ex_secret.setEchoMode(QLineEdit.Password)
         self.s_ex_pass = QLineEdit(s.exchange.password); self.s_ex_pass.setEchoMode(QLineEdit.Password)
         self.s_proxy = QLineEdit(s.exchange.proxy)
@@ -555,7 +558,8 @@ class MainWindow(QMainWindow):
         self.s_tf = QComboBox(); self.s_tf.addItems(["5m", "15m", "30m", "1h", "4h", "1d"]); self.s_tf.setCurrentText(s.timeframe)
         self.s_loop = QSpinBox(); self.s_loop.setRange(10, 3600); self.s_loop.setValue(s.loop_seconds)
         self.s_paper_bal = QDoubleSpinBox(); self.s_paper_bal.setRange(1, 1e9); self.s_paper_bal.setValue(s.paper_start_balance)
-        f2.addRow("حالت", self.s_mode); f2.addRow("بازار", self.s_market); f2.addRow("صرافی (ccxt id)", self.s_exchange)
+        self.lbl_exchange_note = QLabel(""); self.lbl_exchange_note.setWordWrap(True); self.lbl_exchange_note.setStyleSheet("color:#E9C46A")
+        f2.addRow("حالت", self.s_mode); f2.addRow("بازار", self.s_market); f2.addRow("صرافی", self.s_exchange); f2.addRow("", self.lbl_exchange_note)
         f2.addRow("API key صرافی", self.s_ex_key); f2.addRow("Secret", self.s_ex_secret); f2.addRow("Passphrase", self.s_ex_pass)
         f2.addRow("پروکسی", self.s_proxy); f2.addRow("نمادها", self.s_symbols); f2.addRow("تایم‌فریم", self.s_tf)
         f2.addRow("فاصله بررسی (ثانیه)", self.s_loop); f2.addRow("موجودی کاغذی", self.s_paper_bal)
@@ -587,14 +591,27 @@ class MainWindow(QMainWindow):
 
         bs = QPushButton("💾 ذخیره تنظیمات"); bs.setObjectName("gold"); bs.clicked.connect(self._save_settings)
         outer.addWidget(bs)
+        self._exchange_changed(self.s_exchange.currentText())
         return w
+
+    def _exchange_changed(self, ex: str):
+        from ..config import NO_API_EXCHANGES
+        if ex.strip().lower() in NO_API_EXCHANGES:
+            self.lbl_exchange_note.setText(f"{ex} API معاملاتی ندارد: قیمت و کندل مستقیم از سایت {ex} خوانده می‌شود و سفارش‌ها با «کنترل صفحه» ثبت می‌شوند. کلید API لازم نیست؛ سایت را در مرورگر باز و لاگین بگذار.")
+            if ex.strip().lower() == "kcex" and not self.s_cu_notes.toPlainText().strip():
+                from ..market.kcex import KCEX_SCREEN_NOTES
+                self.s_cu_notes.setPlainText(KCEX_SCREEN_NOTES)
+            if self.s_mode.currentText() == "live":
+                self.s_cu_on.setChecked(True)
+        else:
+            self.lbl_exchange_note.setText("")
 
     def _save_settings(self):
         s = self.settings
         s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText(); s.effort = self.s_effort.currentText()
         s.use_llm_for_decisions = self.s_llm.isChecked(); s.auto_update = self.s_autoupd.isChecked()
         s.mode = self.s_mode.currentText(); s.market = self.s_market.currentText()
-        s.exchange.exchange_id = self.s_exchange.text().strip().lower()
+        s.exchange.exchange_id = self.s_exchange.currentText().strip().lower()
         s.exchange.api_key = self.s_ex_key.text().strip(); s.exchange.secret = self.s_ex_secret.text().strip()
         s.exchange.password = self.s_ex_pass.text().strip(); s.exchange.proxy = self.s_proxy.text().strip()
         s.symbols = [x.strip().upper() for x in self.s_symbols.text().split(",") if x.strip()]

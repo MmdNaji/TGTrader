@@ -157,6 +157,11 @@ class Engine:
         if stop_distance <= 0:
             return
         min_qty, step = self.broker.limits(symbol)
+        if getattr(self.market, "is_kcex", False) and not (min_qty or step):
+            try:
+                min_qty, step = self.market.kcex.limits(symbol)
+            except Exception:
+                pass
         sizing = self.risk.size(side, price, stop_distance, equity, min_qty, step)
         if sizing is None:
             self.db.add_decision(symbol, "hold", decision["confidence"], "risk",

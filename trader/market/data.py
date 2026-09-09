@@ -46,7 +46,19 @@ class MarketData:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._ex = None
+        self._kcex = None
         self._cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+
+    @property
+    def is_kcex(self) -> bool:
+        return self.settings.market == "crypto" and self.settings.exchange.exchange_id.lower() == "kcex"
+
+    @property
+    def kcex(self):
+        if self._kcex is None:
+            from .kcex import KcexData
+            self._kcex = KcexData(proxy=self.settings.exchange.proxy)
+        return self._kcex
 
     @property
     def exchange(self):
@@ -63,6 +75,8 @@ class MarketData:
             return cached[1].tail(limit)
         if self.settings.market == "forex":
             df = self._mt5_candles(symbol, tf, limit)
+        elif self.is_kcex:
+            df = self.kcex.candles(symbol, tf, limit)
         else:
             rows = self.exchange.fetch_ohlcv(symbol, tf, limit=limit)
             df = ohlcv_to_frame(rows)
@@ -74,6 +88,8 @@ class MarketData:
             import MetaTrader5 as mt5  # type: ignore
             tick = mt5.symbol_info_tick(symbol.replace("/", ""))
             return float((tick.bid + tick.ask) / 2)
+        if self.is_kcex:
+            return self.kcex.price(symbol)
         t = self.exchange.fetch_ticker(symbol)
         return float(t["last"] or t["close"])
 
