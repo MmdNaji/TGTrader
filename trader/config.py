@@ -78,9 +78,12 @@ class ComputerSettings:
 
 @dataclass
 class Settings:
-    # --- Claude ---
+    # --- AI ---
+    ai_provider: str = "claude"   # claude | openai
     anthropic_api_key: str = ""
     model: str = "claude-opus-5"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5"
     effort: str = "high"          # low | medium | high | xhigh | max
     use_llm_for_decisions: bool = True
     auto_update: bool = True
@@ -148,6 +151,11 @@ class Settings:
 
     # ---------------------------------------------------------------- helpers
     def has_llm(self) -> bool:
+        if self.ai_provider == "openai":
+            return bool(self.openai_api_key or os.environ.get("OPENAI_API_KEY"))
+        return bool(self.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY"))
+
+    def has_claude(self) -> bool:
         return bool(self.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY"))
 
     def validate(self) -> list[str]:
@@ -167,4 +175,6 @@ class Settings:
                 problems.append("live crypto trading needs the exchange API key and secret")
         if not self.symbols:
             problems.append("at least one symbol is required")
+        if self.mode == "live" and self.computer.enabled and not self.has_claude():
+            problems.append("screen control needs the Claude (Anthropic) API key, whichever AI makes the decisions")
         return problems

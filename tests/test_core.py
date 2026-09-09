@@ -157,7 +157,26 @@ def test_kcex_symbol_and_intervals():
     from trader.market.kcex import kcex_symbol, INTERVALS
     assert kcex_symbol("BTC/USDT") == "BTC_USDT" and kcex_symbol("eth/usdt:usdt") == "ETH_USDT"
     assert INTERVALS["1d"][0] == "Day1" and INTERVALS["1h"][1] == 3600
-    s = Settings(); s.mode = "live"; s.exchange.exchange_id = "kcex"; s.computer.enabled = False
-    assert any("screen control" in p for p in s.validate())
+    s = Settings(); s.mode = "live"; s.exchange.exchange_id = "kcex"; s.computer.enabled = False; s.anthropic_api_key = "k"
+    assert any("has no trading API" in p for p in s.validate())
     s.computer.enabled = True
-    assert not any("screen control" in p for p in s.validate())
+    assert not any("has no trading API" in p for p in s.validate())
+
+
+def test_provider_selection_and_chart_widget():
+    from trader.brain import make_brain
+    s = Settings(); s.ai_provider = "openai"; s.openai_api_key = "x"
+    assert make_brain(s).name == "openai" and s.has_llm() and not s.has_claude()
+    s.mode = "live"; s.computer.enabled = True
+    assert any("Claude" in p for p in s.validate())
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QImage
+    from trader.gui.chart import CandleChart
+    app = QApplication.instance() or QApplication([])
+    ch = CandleChart(); ch.resize(900, 500)
+    ch.set_data(enrich(synth(300)), "X/Y", "1h", {"side": "long", "entry_price": 100.0, "stop_price": 95.0, "take_profit": 110.0},
+                [{"side": "long", "opened_at": 0, "entry_price": 1, "closed_at": 0, "exit_price": 1}])
+    img = QImage(900, 500, QImage.Format_ARGB32); ch.render(img)
+    assert img.pixelColor(450, 200).isValid()   # rendered without raising

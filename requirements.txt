@@ -1,4 +1,5 @@
 anthropic>=1.4
+openai>=1.50
 ccxt>=4.5
 pandas>=2.2
 numpy>=1.26

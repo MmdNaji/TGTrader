@@ -23,6 +23,8 @@ from ..db import Database
 from ..engine import Engine
 from ..knowledge.skills import load_seed_skills, add_extracted, active_skills
 from .help_fa import HELP_HTML
+from .chart import CandleChart
+from ..brain import make_brain, claude_client
 
 DARK = """
 QWidget { background:#0b0e13; color:#e6e6e6; font-size:13px; }
@@ -84,6 +86,7 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         tabs.addTab(self._dashboard_tab(), "داشبورد")
+        tabs.addTab(self._chart_tab(), "چارت")
         tabs.addTab(self._trades_tab(), "معاملات")
         tabs.addTab(self._skills_tab(), "مهارت‌ها")
         tabs.addTab(self._learn_tab(), "یادگیری")
@@ -178,14 +181,13 @@ class MainWindow(QMainWindow):
         try:
             brain = None
             if self.settings.use_llm_for_decisions and self.settings.has_llm():
-                from ..brain.claude import Brain
-                brain = Brain(self.settings)
+                brain = make_brain(self.settings)
             broker = None
             if self.settings.computer.enabled and self.settings.mode == "live":
                 from ..execution.computer import ComputerBroker
-                if brain is None:
-                    raise RuntimeError("کنترل صفحه به کلید Claude نیاز دارد")
-                broker = ComputerBroker(self.settings, brain.client, confirm=self._confirm_blocking,
+                if not self.settings.has_claude():
+                    raise RuntimeError("کنترل صفحه به کلید Claude نیاز دارد (حتی اگر تصمیم‌ها با OpenAI باشد)")
+                broker = ComputerBroker(self.settings, claude_client(self.settings), confirm=self._confirm_blocking,
                                         on_step=lambda s: self.bridge.event.emit("[screen] " + s))
             self.engine = Engine(self.settings, self.db, broker=broker, brain=brain,
                                  on_event=self.bridge.event.emit)
@@ -236,7 +238,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ updates
     def _check_update(self, manual: bool):
         if self._pending_update and manual:
-            self._offer_update(self._pending_update); return
+            self._offer_update(self._pending_update, auto=True); return
         if not updater.configured():
             if manual:
                 QMessageBox.information(self, "به‌روزرسانی", "این نسخه از سورس اجرا شده و مخزن به‌روزرسانی تنظیم نشده است.")
@@ -260,7 +262,7 @@ class MainWindow(QMainWindow):
         self.btn_update.setObjectName("gold"); self.btn_update.style().unpolish(self.btn_update); self.btn_update.style().polish(self.btn_update)
         self._on_event(f"[update] version {rel.version} is available")
         if manual:
-            self._offer_update(rel)
+            self._offer_update(rel, auto=True)
         elif self.settings.auto_update and updater.is_frozen() and rel.asset_url:
             if self.engine and self.engine.running():
                 self._on_event("[update] engine is running - will install when it is stopped (or press the update button)")
@@ -313,6 +315,48 @@ class MainWindow(QMainWindow):
         w.failed.connect(lambda m: (dlg.close(), QMessageBox.critical(self, "MetaTrader 5", m.splitlines()[0])))
         w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
         self._workers.append(w); w.start(); dlg.exec()
+
+    # ------------------------------------------------------------ chart
+    def _chart_tab(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w)
+        h = QHBoxLayout()
+        self.ch_symbol = QComboBox(); self.ch_symbol.setEditable(True); self.ch_symbol.addItems(self.settings.symbols)
+        self.ch_tf = QComboBox(); self.ch_tf.addItems(["5m", "15m", "30m", "1h", "4h", "1d"]); self.ch_tf.setCurrentText(self.settings.timeframe)
+        b = QPushButton("⟳ بروزرسانی"); b.clicked.connect(self.refresh_chart)
+        self.ch_auto = QCheckBox("خودکار هر ۶۰ ثانیه"); self.ch_auto.setChecked(True)
+        for lab, wid in (("نماد", self.ch_symbol), ("تایم‌فریم", self.ch_tf)):
+            h.addWidget(QLabel(lab)); h.addWidget(wid)
+        h.addWidget(b); h.addWidget(self.ch_auto); h.addStretch()
+        v.addLayout(h)
+        self.chart = CandleChart(); v.addWidget(self.chart, 1)
+        self.lbl_hover = QLabel("چرخ ماوس: زوم · کشیدن: جابه‌جایی · ▲▼ ورود/خروج معاملات · خط‌چین: قیمت آخر، ورود، حد ضرر، هدف")
+        self.lbl_hover.setStyleSheet("color:#9aa3b2"); self.chart.hovered.connect(self.lbl_hover.setText)
+        v.addWidget(self.lbl_hover)
+        self.ch_symbol.currentTextChanged.connect(lambda _: self.refresh_chart()); self.ch_tf.currentTextChanged.connect(lambda _: self.refresh_chart())
+        self._chart_last = 0.0
+        QTimer.singleShot(800, self.refresh_chart)
+        return w
+
+    def refresh_chart(self):
+        from ..market.data import MarketData
+        from ..market.indicators import enrich
+        sym, tf = self.ch_symbol.currentText().strip().upper(), self.ch_tf.currentText()
+        if not sym:
+            return
+        self._chart_last = time.time()
+        md = self.engine.market if self.engine else MarketData(self.settings)
+
+        def job():
+            return enrich(md.candles(sym, tf, limit=500))
+
+        def done(df):
+            pos = next((dict(r) for r in self.db.open_trades(self.settings.mode) if r["symbol"] == sym), None)
+            trades = [dict(r) for r in self.db.closed_trades(self.settings.mode, 300) if r["symbol"] == sym]
+            self.chart.set_data(df, sym, tf, pos, trades)
+        w = Worker(job); w.done.connect(done)
+        w.failed.connect(lambda m: self.lbl_hover.setText("خطا در دریافت داده: " + m.splitlines()[0]))
+        w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
+        self._workers.append(w); w.start()
 
     # ------------------------------------------------------------ trades
     def _trades_tab(self) -> QWidget:
@@ -439,7 +483,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "", "اول یک سند انتخاب کن"); return
         if not self.settings.has_llm():
             QMessageBox.warning(self, "", "کلید Claude در تنظیمات وارد نشده"); return
-        from ..brain.claude import Brain
+        Brain = make_brain
         doc = self.db.one("SELECT * FROM knowledge_docs WHERE id=?", (doc_id,))
         text = "\n\n".join(self.db.doc_chunks(doc_id))
         self.txt_chat.appendPlainText(f"… در حال خواندن «{doc['title']}» ({len(text):,} حرف). چند دقیقه طول می‌کشد.")
@@ -467,7 +511,7 @@ class MainWindow(QMainWindow):
             return
         if not self.settings.has_llm():
             QMessageBox.warning(self, "", "کلید Claude در تنظیمات وارد نشده"); return
-        from ..brain.claude import Brain
+        Brain = make_brain
         self.in_chat.clear()
         self.txt_chat.appendPlainText(f"شما: {msg}")
         self.teach_history.append({"role": "user", "content": msg})
@@ -534,14 +578,22 @@ class MainWindow(QMainWindow):
         grid = QGridLayout(); outer.addLayout(grid)
         s = self.settings
 
-        g1 = QGroupBox("Claude"); f1 = QFormLayout(g1)
+        g1 = QGroupBox("هوش مصنوعی"); f1 = QFormLayout(g1)
+        self.s_provider = QComboBox(); self.s_provider.addItems(["claude", "openai"]); self.s_provider.setCurrentText(s.ai_provider)
+        self.s_oai_key = QLineEdit(s.openai_api_key); self.s_oai_key.setEchoMode(QLineEdit.Password)
+        self.s_oai_model = QLineEdit(s.openai_model)
         self.s_key = QLineEdit(s.anthropic_api_key); self.s_key.setEchoMode(QLineEdit.Password)
         self.s_model = QComboBox(); self.s_model.addItems(["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1"]); self.s_model.setCurrentText(s.model)
         self.s_effort = QComboBox(); self.s_effort.addItems(["low", "medium", "high", "xhigh", "max"]); self.s_effort.setCurrentText(s.effort)
         self.s_llm = QCheckBox("تصمیم نهایی با Claude (با مهارت‌ها)"); self.s_llm.setChecked(s.use_llm_for_decisions)
         bt = QPushButton("تست اتصال"); bt.clicked.connect(self._test_llm)
         self.s_autoupd = QCheckBox("به‌روزرسانی خودکار موقع باز شدن برنامه"); self.s_autoupd.setChecked(s.auto_update)
-        f1.addRow("API key", self.s_key); f1.addRow("مدل", self.s_model); f1.addRow("دقت (effort)", self.s_effort); f1.addRow("", self.s_llm); f1.addRow("", bt); f1.addRow("", self.s_autoupd)
+        f1.addRow("تصمیم‌گیرنده", self.s_provider)
+        f1.addRow("Claude API key", self.s_key); f1.addRow("مدل Claude", self.s_model)
+        f1.addRow("OpenAI API key", self.s_oai_key); f1.addRow("مدل OpenAI", self.s_oai_model)
+        f1.addRow("دقت (effort)", self.s_effort); f1.addRow("", self.s_llm); f1.addRow("", bt); f1.addRow("", self.s_autoupd)
+        note = QLabel("کنترل صفحه (صرافی بدون API) همیشه با Claude انجام می‌شود؛ حتی اگر تصمیم‌گیرنده OpenAI باشد، کلید Claude برای آن لازم است."); note.setWordWrap(True); note.setStyleSheet("color:#9aa3b2")
+        f1.addRow("", note)
         grid.addWidget(g1, 0, 0)
 
         g2 = QGroupBox("بازار و صرافی"); f2 = QFormLayout(g2)
@@ -608,6 +660,7 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         s = self.settings
+        s.ai_provider = self.s_provider.currentText(); s.openai_api_key = self.s_oai_key.text().strip(); s.openai_model = self.s_oai_model.text().strip() or "gpt-5"
         s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText(); s.effort = self.s_effort.currentText()
         s.use_llm_for_decisions = self.s_llm.isChecked(); s.auto_update = self.s_autoupd.isChecked()
         s.mode = self.s_mode.currentText(); s.market = self.s_market.currentText()
@@ -629,9 +682,10 @@ class MainWindow(QMainWindow):
                                 + "\n\nاگر موتور در حال اجراست، برای اعمال تغییرات آن را متوقف و دوباره شروع کن.")
 
     def _test_llm(self):
-        from ..brain.claude import Brain
-        self.settings.anthropic_api_key = self.s_key.text().strip(); self.settings.model = self.s_model.currentText()
-        self._run_bg(lambda: Brain(self.settings).ping(), lambda r: QMessageBox.information(self, "Claude", f"پاسخ: {r}"))
+        s = self.settings
+        s.ai_provider = self.s_provider.currentText(); s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText()
+        s.openai_api_key = self.s_oai_key.text().strip(); s.openai_model = self.s_oai_model.text().strip() or "gpt-5"
+        self._run_bg(lambda: make_brain(s).ping(), lambda r: QMessageBox.information(self, s.ai_provider, f"پاسخ: {r}"))
 
     # ------------------------------------------------------------ periodic refresh
     def refresh(self):
@@ -668,6 +722,8 @@ class MainWindow(QMainWindow):
                                       f"{r['exit_price']:g}" if r["exit_price"] else "", f"{r['pnl']:+.4f}" if r["pnl"] is not None else "",
                                       f"{r['r_multiple']:+.2f}" if r["r_multiple"] is not None else "", r["strategy"], r["reason"]]
                                      for r in self.db.closed_trades(mode, 200)])
+        if getattr(self, "ch_auto", None) and self.ch_auto.isChecked() and time.time() - self._chart_last > 60 and self.tabs.currentWidget() is self.chart.parentWidget():
+            self.refresh_chart()
         if self.tbl_skills.rowCount() == 0:
             self.refresh_skills()
         if self.tbl_docs.rowCount() == 0:

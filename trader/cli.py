@@ -42,8 +42,8 @@ def cmd_paper(a):
     db = Database()
     brain = None
     if s.use_llm_for_decisions and s.has_llm():
-        from .brain.claude import Brain
-        brain = Brain(s)
+        from .brain import make_brain
+        brain = make_brain(s)
     eng = Engine(s, db, brain=brain, on_event=print)
     eng.start()
     print("paper engine running - Ctrl+C to stop")
@@ -68,7 +68,7 @@ def cmd_ingest(a):
 
 
 def cmd_learn(a):
-    from .brain.claude import Brain
+    from .brain import make_brain as Brain
     from .knowledge.skills import add_extracted
     s = Settings.load()
     db = Database()
@@ -98,7 +98,7 @@ def cmd_status(a):
 
 
 def cmd_teach(a):
-    from .brain.claude import Brain
+    from .brain import make_brain as Brain
     from .knowledge.skills import add_extracted, active_skills
     s = Settings.load()
     db = Database()
