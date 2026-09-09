@@ -91,7 +91,7 @@ class CandleChart(QWidget):
         p = QPainter(self); p.setRenderHint(QPainter.Antialiasing); p.setFont(self._font)
         p.fillRect(self.rect(), BG)
         if self.df is None or len(self.df) < 2:
-            p.setPen(TEXT); p.drawText(self.rect(), Qt.AlignCenter, "no data - press refresh")
+            p.setPen(TEXT); p.drawText(self.rect(), Qt.AlignCenter, "در حال دریافت داده…")
             return
         win = self._window()
         plot, vol = self._plot_rect(), self._vol_rect()
@@ -218,10 +218,12 @@ class CandleChart(QWidget):
         # title
         p.setPen(GOLD); p.setFont(QFont("Segoe UI", 10, QFont.Bold))
         chg = (last / float(win["open"].iloc[0]) - 1) * 100
-        p.drawText(QRectF(plot.left() + 4, 2, 600, 20), Qt.AlignLeft | Qt.AlignVCenter,
-                   f"{self.symbol}  {self.timeframe}   {self._fmt(last)}   {chg:+.2f}% over {n} bars")
-        p.setFont(self._font); p.setPen(GOLD); p.drawText(QRectF(plot.right() - 160, 2, 60, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA20")
-        p.setPen(BLUE); p.drawText(QRectF(plot.right() - 90, 2, 60, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA50")
+        title = f"{self.symbol}  {self.timeframe}   {self._fmt(last)}   {chg:+.2f}%"
+        if plot.width() > 620:
+            title += f"  ({n} bars)"
+        p.drawText(QRectF(plot.left() + 4, 2, plot.width() - 170, 20), Qt.AlignLeft | Qt.AlignVCenter, title)
+        p.setFont(self._font); p.setPen(GOLD); p.drawText(QRectF(plot.right() - 150, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA20")
+        p.setPen(BLUE); p.drawText(QRectF(plot.right() - 75, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA50")
 
     @staticmethod
     def _fmt(v: float) -> str:
