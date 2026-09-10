@@ -64,6 +64,42 @@ class Bridge(QObject):
     confirm_request = Signal(str)
 
 
+class PriceFeed(QThread):
+    """Streams the latest price for the watched symbols about once a second, so the chart,
+    the stop/target zones and the floating P&L move live. One second is the fastest that is
+    safe against an exchange's request limits - true millisecond ticks are not possible over
+    a REST price API and the price does not actually change that often."""
+    tick = Signal(dict)
+
+    def __init__(self, settings, symbols_fn):
+        super().__init__()
+        self._settings = settings
+        self._symbols_fn = symbols_fn
+        self._stop = threading.Event()
+
+    def run(self):
+        from ..market.data import MarketData
+        try:
+            md = MarketData(self._settings)
+        except Exception:
+            return
+        while not self._stop.is_set():
+            out = {}
+            for sym in self._symbols_fn():
+                if self._stop.is_set():
+                    break
+                try:
+                    out[sym] = md.price(sym)
+                except Exception:
+                    pass
+            if out:
+                self.tick.emit(out)
+            self._stop.wait(1.0)
+
+    def stop(self):
+        self._stop.set()
+
+
 # ---------------------------------------------------------------- main window
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -103,6 +139,9 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(1500)
         self.refresh()
         self.goto("dashboard")
+        self._live: dict[str, float] = {}
+        self._feed: PriceFeed | None = None
+        self._start_feed()
         QTimer.singleShot(4000, lambda: self._check_update(manual=False))
 
     # ------------------------------------------------------------ frame: sidebar + topbar
@@ -873,7 +912,7 @@ class MainWindow(QMainWindow):
         for combo in (self.ch_symbol, self.bt_symbol):
             cur = combo.currentText(); combo.blockSignals(True); combo.clear(); combo.addItems(s.symbols)
             combo.setCurrentText(cur if cur in s.symbols else (s.symbols[0] if s.symbols else "")); combo.blockSignals(False)
-        self._market = None; self._dash_chart_last = 0; self.refresh()
+        self._market = None; self._dash_chart_last = 0; self._start_feed(); self.refresh()
         QMessageBox.information(self, "ذخیره شد", "تنظیمات ذخیره شد." + ("\n\nهشدار:\n" + "\n".join(problems) if problems else ""))
 
     def _probe_proxy(self):
@@ -957,7 +996,64 @@ class MainWindow(QMainWindow):
         if self.tbl_skills.rowCount() == 0 and not self.sk_search.text():
             self.refresh_skills()
 
+    # ------------------------------------------------------------ live price feed
+    def _watch_symbols(self) -> list[str]:
+        syms = list(self.settings.symbols)
+        try:
+            cs = self.ch_symbol.currentText().strip().upper()
+            if cs and cs not in syms:
+                syms.append(cs)
+        except Exception:
+            pass
+        return syms
+
+    def _start_feed(self):
+        self._stop_feed()
+        self._feed = PriceFeed(self.settings, self._watch_symbols)
+        self._feed.tick.connect(self._on_tick)
+        self._feed.start()
+
+    def _stop_feed(self):
+        if getattr(self, "_feed", None):
+            self._feed.stop()
+            self._feed.wait(1500)
+            self._feed = None
+
+    def _on_tick(self, prices: dict):
+        self._live.update(prices)
+        if self.engine:
+            self.engine.last_prices.update(prices)
+        # live price on both charts (only shows on the newest bar)
+        try:
+            cs = self.ch_symbol.currentText().strip().upper()
+            if cs in self._live:
+                self.chart.set_live_price(self._live[cs])
+        except Exception:
+            pass
+        if self.settings.symbols and self.settings.symbols[0] in self._live:
+            self.dash_chart.set_live_price(self._live[self.settings.symbols[0]])
+        # live floating P&L on the open positions + equity, without a full DB refresh cycle
+        try:
+            opens = [dict(r) for r in self.db.open_trades(self.settings.mode)]
+        except Exception:
+            return
+        rows = []
+        for r in opens:
+            px = self._live.get(r["symbol"])
+            fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
+            rows.append([r["symbol"], r["side"], f"{r['qty']:g}", f"{r['entry_price']:g}", f"{px:g}" if px else "",
+                         f"{r['stop_price']:g}", f"{r['take_profit']:g}" if r["take_profit"] else "",
+                         f"{fl:+.4f}" if fl is not None else "", r["strategy"]])
+        fill(self.tbl_positions, rows, tones={7: "pnl"})
+        self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
+        if self.engine:
+            try:
+                self.kpi_equity.set(f"{self.engine.broker.equity(self._live):,.2f}")
+            except Exception:
+                pass
+
     def closeEvent(self, ev):
+        self._stop_feed()
         if self.engine and self.engine.running():
             if QMessageBox.question(self, "خروج", "موتور در حال اجراست. با بستن برنامه معامله متوقف می‌شود (پوزیشن‌های باز روی صرافی می‌مانند). خارج شوم؟") != QMessageBox.Yes:
                 ev.ignore(); return

@@ -31,6 +31,7 @@ class CandleChart(QWidget):
         self.trades: list[dict[str, Any]] = []
         self.visible = 120
         self.offset = 0          # bars hidden on the right (0 = latest bar visible)
+        self.live_price: float | None = None   # last streamed price, overrides the closing tick
         self._mouse: QPointF | None = None
         self._drag_x: float | None = None
         self.setMouseTracking(True)
@@ -38,6 +39,11 @@ class CandleChart(QWidget):
         self._font = QFont("Segoe UI", 8)
 
     # ------------------------------------------------------------ data
+    def set_live_price(self, price: float) -> None:
+        """A freshly streamed price; only shown when the newest bar is in view."""
+        self.live_price = float(price)
+        self.update()
+
     def set_data(self, df: pd.DataFrame, symbol: str, timeframe: str,
                  position: dict[str, Any] | None = None, trades: list[dict[str, Any]] | None = None) -> None:
         self.df, self.symbol, self.timeframe = df, symbol, timeframe
@@ -76,7 +82,7 @@ class CandleChart(QWidget):
 
     # ------------------------------------------------------------ geometry
     def _plot_rect(self) -> QRectF:
-        return QRectF(8, 24, self.width() - 72, self.height() * 0.72 - 24)
+        return QRectF(8, 24, self.width() - 86, self.height() * 0.72 - 24)
 
     def _vol_rect(self) -> QRectF:
         p = self._plot_rect()
@@ -165,23 +171,52 @@ class CandleChart(QWidget):
                         path.lineTo(pt)
                 p.setPen(QPen(col, 1.4)); p.drawPath(path)
 
-        # last price
-        last = float(win["close"].iloc[-1])
-        pen = QPen(WHITE, 1, Qt.DashLine); p.setPen(pen)
-        p.drawLine(QPointF(plot.left(), y(last)), QPointF(plot.right(), y(last)))
-        p.fillRect(QRectF(plot.right() + 2, y(last) - 8, 68, 16), QBrush(WHITE))
-        p.setPen(BG); p.drawText(QRectF(plot.right() + 4, y(last) - 8, 66, 16), Qt.AlignLeft | Qt.AlignVCenter, self._fmt(last))
+        # right-axis price pill (TradingView style)
+        def pill(price_y: float, color: QColor, text: str, sub: str = ""):
+            h = 30 if sub else 18
+            box = QRectF(plot.right() + 2, price_y - h / 2, 74, h)
+            path = QPainterPath(); path.addRoundedRect(box, 4, 4)
+            p.fillPath(path, color)
+            p.setPen(QColor("#ffffff")); f = QFont(self._font); f.setBold(True); p.setFont(f)
+            if sub:
+                p.drawText(QRectF(box.left() + 5, box.top() + 2, 66, 15), Qt.AlignLeft | Qt.AlignVCenter, text)
+                p.setFont(self._font)
+                p.drawText(QRectF(box.left() + 5, box.top() + 15, 66, 13), Qt.AlignLeft | Qt.AlignVCenter, sub)
+            else:
+                p.drawText(box.adjusted(6, 0, -4, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
+            p.setFont(self._font)
 
-        # open position lines
+        # take-profit / stop zones for the open position, drawn translucent over the candles
         if self.position:
-            for k, col, name in (("entry_price", WHITE, "entry"), ("stop_price", DOWN, "stop"), ("take_profit", UP, "target")):
-                v = self.position.get(k)
-                if not v:
-                    continue
-                yy = y(float(v)); p.setPen(QPen(col, 1.2, Qt.DotLine))
-                p.drawLine(QPointF(plot.left(), yy), QPointF(plot.right(), yy))
-                p.setPen(col); p.drawText(QRectF(plot.left() + 4, yy - 16, 200, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                                          f"{name} {self._fmt(float(v))} ({self.position.get('side','')})")
+            entry = float(self.position.get("entry_price") or 0)
+            tp = float(self.position.get("take_profit") or 0)
+            stop = float(self.position.get("stop_price") or 0)
+            zx = plot.left() + plot.width() * 0.55   # start the band partway across, like TV
+            if entry and tp:
+                g = QColor(46, 204, 113, 45)
+                p.fillRect(QRectF(zx, min(y(entry), y(tp)), plot.right() - zx, abs(y(entry) - y(tp))), g)
+            if entry and stop:
+                rr = QColor(231, 76, 60, 45)
+                p.fillRect(QRectF(zx, min(y(entry), y(stop)), plot.right() - zx, abs(y(entry) - y(stop))), rr)
+            for v, col in ((tp, UP), (entry, QColor("#8a94a7")), (stop, DOWN)):
+                if v:
+                    yy = y(v); p.setPen(QPen(col, 1, Qt.DotLine))
+                    p.drawLine(QPointF(zx, yy), QPointF(plot.right(), yy))
+
+        # last price (streamed value when the latest bar is on screen)
+        last = float(self.live_price) if (self.live_price and self.offset == 0) else float(win["close"].iloc[-1])
+        prev_close = float(win["close"].iloc[-2]) if n > 1 else last
+        live_col = UP if last >= prev_close else DOWN
+        p.setPen(QPen(live_col, 1, Qt.DotLine))
+        p.drawLine(QPointF(plot.left(), y(last)), QPointF(plot.right(), y(last)))
+
+        # right-axis pills: TP (green), entry (grey), stop (red), then the live price + countdown
+        if self.position:
+            if self.position.get("take_profit"):
+                pill(y(float(self.position["take_profit"])), UP, self._fmt(float(self.position["take_profit"])))
+            if self.position.get("stop_price"):
+                pill(y(float(self.position["stop_price"])), DOWN, self._fmt(float(self.position["stop_price"])))
+        pill(y(last), live_col, self._fmt(last), self._countdown())
 
         # closed-trade markers
         if self.trades and n:
@@ -224,6 +259,18 @@ class CandleChart(QWidget):
         p.drawText(QRectF(plot.left() + 4, 2, plot.width() - 170, 20), Qt.AlignLeft | Qt.AlignVCenter, title)
         p.setFont(self._font); p.setPen(GOLD); p.drawText(QRectF(plot.right() - 150, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA20")
         p.setPen(BLUE); p.drawText(QRectF(plot.right() - 75, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA50")
+
+    _TF_SEC = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+
+    def _countdown(self) -> str:
+        """Time left until the current candle closes, as m:ss or h:mm."""
+        sec = self._TF_SEC.get(self.timeframe or "", 0)
+        if not sec:
+            return ""
+        rem = int(sec - (time.time() % sec))
+        if rem >= 3600:
+            return f"{rem // 3600}:{(rem % 3600) // 60:02d}:{rem % 60:02d}"
+        return f"{rem // 60:02d}:{rem % 60:02d}"
 
     @staticmethod
     def _fmt(v: float) -> str:
