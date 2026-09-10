@@ -119,6 +119,8 @@ class MainWindow(QMainWindow):
         self._pending_update: updater.Release | None = None
         self._chart_last = 0.0
         self._dash_chart_last = 0.0
+        self._pos_data: list[dict] = []
+        self._detail_symbol: str | None = None
         self._market = None          # shared MarketData so exchange metadata loads once
 
         root = QWidget(); self.setCentralWidget(root)
@@ -249,7 +251,22 @@ class MainWindow(QMainWindow):
         self.tbl_positions.setTextElideMode(Qt.ElideNone)
         self.tbl_positions.setMinimumHeight(160)
         self.empty_pos = Empty("پوزیشن بازی نیست. وقتی شرایط ورود جور شود، این‌جا ظاهر می‌شود.")
+        self.tbl_positions.setToolTip("روی یک ردیف بزن تا جزئیات کامل باز شود")
+        self.tbl_positions.cellClicked.connect(lambda r, _c: self._show_pos_detail(r))
+        self.tbl_positions.cellDoubleClicked.connect(lambda r, _c: self._open_pos_chart(r))
         c3.add(self.tbl_positions); c3.add(self.empty_pos)
+        self.pos_detail = QFrame(); self.pos_detail.setObjectName("card")
+        pd = QVBoxLayout(self.pos_detail); pd.setContentsMargins(12, 10, 12, 10); pd.setSpacing(8)
+        self.pos_detail_lbl = QLabel(""); self.pos_detail_lbl.setWordWrap(True); self.pos_detail_lbl.setTextFormat(Qt.RichText)
+        pd.addWidget(self.pos_detail_lbl)
+        pdbtn = QHBoxLayout()
+        self.btn_pos_chart = button("📈 نمایش چارت این ارز", "primary", self._detail_to_chart)
+        self.btn_pos_close = button("✕ بستن این پوزیشن", "danger", self._detail_close_pos)
+        pdbtn.addWidget(self.btn_pos_chart); pdbtn.addWidget(self.btn_pos_close); pdbtn.addStretch()
+        b_hide = button("▲ بستن جزئیات", "ghost", lambda: self._hide_pos_detail()); pdbtn.addWidget(b_hide)
+        pd.addLayout(pdbtn)
+        self.pos_detail.hide()
+        c3.add(self.pos_detail)
         c3.add_action(button("بستن همه", "danger", self.close_all)); c3.add_action(button("ریست کاغذی", "ghost", self.reset_paper))
         c4 = Card("آخرین تصمیم‌ها", "نگه‌داشتن هم یک تصمیم است؛ دلیلش را بخوان")
         self.tbl_decisions = table(["زمان", "نماد", "اقدام", "اطمینان", "منبع", "دلیل"]); self.tbl_decisions.setMinimumHeight(160)
@@ -1011,7 +1028,9 @@ class MainWindow(QMainWindow):
             rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
                          f"{px:g}" if px else "—", f"{r['stop_price']:g}",
                          f"{r['take_profit']:g}" if r["take_profit"] else "—", f"{fl:+.4f}" if fl is not None else "—"])
+        self._pos_data = [dict(x) for x in opens]
         fill(self.tbl_positions, rows, tones={6: "pnl"}); self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
+        self._render_pos_detail()
         decs = self.db.recent_decisions(30)
         fa = {"buy": "خرید", "sell": "فروش", "hold": "نگه‌دار", "close": "بستن"}
         fill(self.tbl_decisions, [[self._ts(d["ts"]), d["symbol"], fa.get(d["action"], d["action"]), f"{d['confidence']:.2f}" if d["confidence"] is not None else "",
@@ -1034,6 +1053,75 @@ class MainWindow(QMainWindow):
             self.refresh_chart()
         if self.tbl_skills.rowCount() == 0 and not self.sk_search.text():
             self.refresh_skills()
+
+    # ------------------------------------------------------------ position detail
+    def _show_pos_detail(self, row: int):
+        if 0 <= row < len(self._pos_data):
+            self._detail_symbol = self._pos_data[row]["symbol"]
+            self._render_pos_detail()
+
+    def _hide_pos_detail(self):
+        self._detail_symbol = None
+        self.pos_detail.hide()
+
+    def _render_pos_detail(self):
+        sym = self._detail_symbol
+        r = next((p for p in self._pos_data if p["symbol"] == sym), None) if sym else None
+        if not r:
+            self.pos_detail.hide()
+            return
+        side = r["side"]; entry = float(r["entry_price"]); stop = float(r["stop_price"] or 0)
+        tp = float(r["take_profit"] or 0); qty = float(r["qty"])
+        px = self._live.get(sym) or (self.engine.last_prices.get(sym) if self.engine else None) or entry
+        fl = ((px - entry) if side == "long" else (entry - px)) * qty
+        rdist = abs(entry - stop) if stop else 0
+        r_now = (fl / (qty * rdist)) if rdist else 0.0
+        to_stop = (px - stop) / px * 100 if stop else 0
+        to_tp = (tp - px) / px * 100 if tp else 0
+        col = theme.SUCCESS if fl >= 0 else theme.DANGER
+        fa_side = "خرید (long)" if side == "long" else "فروش (short)"
+        opened = self._ts(r.get("opened_at"))
+        html = (
+            f"<div style='font-size:15px;color:{theme.ACCENT};font-weight:700'>{sym} &nbsp; <span style='color:{theme.MUTED};font-size:12px'>{fa_side} · {r.get('strategy','')}</span></div>"
+            f"<table cellpadding='3' style='font-size:13px'>"
+            f"<tr><td style='color:{theme.MUTED}'>مقدار</td><td>{qty:g}</td>"
+            f"<td style='color:{theme.MUTED}'>&nbsp;&nbsp;قیمت ورود</td><td>{entry:g}</td>"
+            f"<td style='color:{theme.MUTED}'>&nbsp;&nbsp;قیمت فعلی</td><td>{px:g}</td></tr>"
+            f"<tr><td style='color:{theme.MUTED}'>حد ضرر</td><td style='color:{theme.DANGER}'>{stop:g} ({to_stop:+.2f}%)</td>"
+            f"<td style='color:{theme.MUTED}'>&nbsp;&nbsp;هدف</td><td style='color:{theme.SUCCESS}'>{tp:g} ({to_tp:+.2f}%)</td>"
+            f"<td style='color:{theme.MUTED}'>&nbsp;&nbsp;زمان</td><td>{opened}</td></tr>"
+            f"<tr><td style='color:{theme.MUTED}'>سود/زیان شناور</td><td style='color:{col};font-weight:700'>{fl:+.4f}</td>"
+            f"<td style='color:{theme.MUTED}'>&nbsp;&nbsp;R فعلی</td><td style='color:{col}'>{r_now:+.2f}R</td>"
+            f"<td colspan='2'></td></tr>"
+            f"</table>"
+            f"<div style='color:{theme.MUTED};font-size:12px'>دلیل ورود: {r.get('reason','')}</div>"
+        )
+        self.pos_detail_lbl.setText(html)
+        self.pos_detail.show()
+
+    def _open_pos_chart(self, row: int):
+        if 0 <= row < len(self._pos_data):
+            self._detail_symbol = self._pos_data[row]["symbol"]
+            self._detail_to_chart()
+
+    def _detail_to_chart(self):
+        if not self._detail_symbol:
+            return
+        sym = self._detail_symbol
+        self.goto("chart")
+        self.ch_symbol.setCurrentText(sym)
+        self.refresh_chart()
+
+    def _detail_close_pos(self):
+        r = next((p for p in self._pos_data if p["symbol"] == self._detail_symbol), None)
+        if not r:
+            return
+        if QMessageBox.question(self, "", f"پوزیشن {r['symbol']} با قیمت بازار بسته شود؟") != QMessageBox.Yes:
+            return
+        if not self.engine:
+            QMessageBox.information(self, "", "موتور فعال نیست"); return
+        px = self._live.get(r["symbol"]) or self.engine.last_prices.get(r["symbol"]) or float(r["entry_price"])
+        self._run_bg(lambda: self.engine.close_position(dict(r), px, "manual"), lambda _: (self._hide_pos_detail(), self.refresh()))
 
     # ------------------------------------------------------------ live price feed
     def _watch_symbols(self) -> list[str]:
@@ -1083,8 +1171,10 @@ class MainWindow(QMainWindow):
             rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
                          f"{px:g}" if px else "—", f"{r['stop_price']:g}",
                          f"{r['take_profit']:g}" if r["take_profit"] else "—", f"{fl:+.4f}" if fl is not None else "—"])
+        self._pos_data = [dict(x) for x in opens]
         fill(self.tbl_positions, rows, tones={6: "pnl"})
         self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
+        self._render_pos_detail()
         if self.engine:
             try:
                 self.kpi_equity.set(f"{self.engine.broker.equity(self._live):,.2f}")
