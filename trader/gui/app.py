@@ -780,6 +780,18 @@ class MainWindow(QMainWindow):
     def _page_settings(self) -> QWidget:
         s = self.settings
         inner = QWidget(); v = QVBoxLayout(inner); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(14)
+
+        cp = Card("حالت‌های آماده", "یک کلیک، همه‌ی تنظیمات با هم", accent=True)
+        prow = QHBoxLayout(); prow.setSpacing(10)
+        prow.addWidget(button("⚡ هوشمند چندارزی", "primary", lambda: self._preset("smart")))
+        prow.addWidget(button("🐢 جدی و صبور (پول واقعی)", "", lambda: self._preset("serious")))
+        prow.addWidget(button("🎯 اسکالپ (فقط تماشا)", "ghost", lambda: self._preset("scalp")))
+        prow.addStretch()
+        cp.add_layout(prow)
+        cp.add(hint("«هوشمند چندارزی»: ۸ ارز، Claude با دقت max و ۸۶ مهارت، تا ۸ پوزیشن، تایم‌فریم ۵ دقیقه، موجودی کاغذی ۱۰۰۰. "
+                    "برای دیدن معامله‌ی زیاد روی ارزهای مختلف. یادت باشد سود تضمینی نیست."))
+        v.addWidget(cp)
+
         grid = QGridLayout(); grid.setSpacing(14)
 
         c1 = Card("هوش مصنوعی", "چه کسی تصمیم می‌گیرد و از کتاب‌ها یاد می‌گیرد")
@@ -876,6 +888,31 @@ class MainWindow(QMainWindow):
         self.s_exchange.currentTextChanged.connect(self._exchange_changed); self.s_mode.currentTextChanged.connect(lambda _: self._exchange_changed(self.s_exchange.currentText()))
         self._exchange_changed(self.s_exchange.currentText())
         return self._scroll(inner)
+
+    def _preset(self, kind: str):
+        """One click that fills every field for a coherent mode, saves, and asks for a restart."""
+        if kind == "smart":
+            self.s_agg.setCurrentText("high"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
+            self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT, DOGE/USDT, ADA/USDT, AVAX/USDT")
+            self.s_maxpos.setValue(8); self.s_tf.setCurrentText("5m")
+            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_loop.setValue(3)
+            msg = "حالت هوشمند چندارزی اعمال شد: ۸ ارز، دقت max، تا ۸ پوزیشن."
+        elif kind == "serious":
+            self.s_agg.setCurrentText("normal"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
+            self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT")
+            self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60)
+            msg = "حالت جدی و صبور اعمال شد: روزانه، normal، برای پول واقعی."
+        else:  # scalp
+            self.s_agg.setCurrentText("scalp"); self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT")
+            self.s_maxpos.setValue(6); self.s_tf.setCurrentText("1m"); self.s_loop.setValue(2)
+            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000)
+            msg = "حالت اسکالپ اعمال شد: پرتعداد و سریع، فقط برای تماشا (در بلندمدت ضرر می‌دهد)."
+        self._save_settings()
+        if self.settings.mode == "paper":
+            from ..execution.paper import PaperBroker
+            PaperBroker(self.settings.paper_start_balance).reset(self.settings.paper_start_balance)
+        QMessageBox.information(self, "اعمال شد", msg + "\n\nحالا برو داشبورد و «توقف» بعد «شروع» را بزن تا فعال شود.")
+        self.goto("dashboard")
 
     def _exchange_changed(self, ex: str):
         ex = ex.strip().lower()
