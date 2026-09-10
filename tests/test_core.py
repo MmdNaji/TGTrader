@@ -150,7 +150,8 @@ def test_updater_version_compare():
     assert updater._vtuple("v0.2.0") > updater._vtuple("0.1.9")
     assert updater._vtuple("1.0") > updater._vtuple("0.99.99")
     assert updater._vtuple("0.1.0") == updater._vtuple("v0.1.0")
-    assert not updater.configured() or "/" in updater.UPDATE_REPO
+    assert updater.configured() and updater.UPDATE_URL.startswith("http")
+    updater.mark_attempt("9.9.9"); assert updater.attempted_recently("9.9.9") and not updater.attempted_recently("1.0.0")
 
 
 def test_kcex_symbol_and_intervals():

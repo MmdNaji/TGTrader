@@ -307,6 +307,12 @@ class MainWindow(QMainWindow):
         self.btn_update.setText(f"🔄 نصب {rel.version}"); self.btn_update.setObjectName("primary")
         self.btn_update.style().unpolish(self.btn_update); self.btn_update.style().polish(self.btn_update)
         self._on_event(f"[update] version {rel.version} is available")
+        if not manual and updater.attempted_recently(rel.version):
+            self._on_event(f"[update] {rel.version} was already attempted recently and did not apply - see {updater.log_path()}; press the update button to retry")
+            QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} چند دقیقه پیش نصب شد ولی اعمال نشد (برنامه هنوز {__version__} است).\n"
+                                f"لاگ نصب: {updater.log_path()}\nپوشه‌ی برنامه: {updater.install_dir()}\n\n"
+                                f"برای تلاش دوباره دکمه‌ی 🔄 را بزن، یا نصب دستی:\n{rel.asset_url}")
+            return
         if manual or (self.settings.auto_update and updater.is_frozen() and rel.asset_url):
             if self.engine and self.engine.running() and not manual:
                 self._on_event("[update] engine is running - will install when it is stopped"); return
@@ -319,7 +325,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} فایل نصب ویندوز ندارد:\n{rel.page_url}"); return
         if self.engine and self.engine.running():
             QMessageBox.warning(self, "به‌روزرسانی", "اول موتور معامله را متوقف کن، بعد به‌روزرسانی کن."); return
-        self._on_event(f"[update] downloading {rel.version}")
+        self._on_event(f"[update] downloading {rel.version} from {rel.source}: {rel.asset_url}")
         dlg = QProgressDialog(f"در حال دانلود نسخه‌ی {rel.version}…", "لغو", 0, 100, self)
         dlg.setWindowTitle("به‌روزرسانی خودکار"); dlg.setAutoClose(False); dlg.setMinimumDuration(0)
         w = Worker(lambda: updater.download(rel, progress=lambda d, t: w.progress.emit(d, t)))
@@ -333,9 +339,11 @@ class MainWindow(QMainWindow):
             if dlg.wasCanceled():
                 return
             try:
+                updater.mark_attempt(rel.version)
                 updater.install(path)
             except Exception as exc:
-                QMessageBox.critical(self, "به‌روزرسانی", str(exc)); return
+                QMessageBox.critical(self, "به‌روزرسانی", f"{exc}\n\nنصب دستی: فایل دانلودشده در\n{path}"); return
+            self._on_event(f"[update] installer started for {rel.version} into {updater.install_dir()}; closing")
             QApplication.instance().quit()
 
         w.progress.connect(on_prog); w.done.connect(done)
