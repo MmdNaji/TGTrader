@@ -49,6 +49,12 @@ class Release:
     page_url: str
     sha256: str = ""
     source: str = "server"
+    kind: str = "exe"          # exe = full installer | code = zip overlay, applied in seconds
+
+
+def base_version() -> str:
+    """Version of the code bundled inside the exe (the overlay may be newer)."""
+    return os.environ.get("TGTRADER_BASE_VERSION") or __version__
 
 
 def _vtuple(v: str) -> tuple[int, ...]:
@@ -73,9 +79,19 @@ def _check_server(timeout: float) -> Release | None:
     r = httpx.get(UPDATE_URL, timeout=timeout, headers=UA)
     r.raise_for_status()
     d = r.json()
-    return Release(version=str(d["version"]), tag=str(d.get("tag", "")), notes=str(d.get("notes", "")).strip(),
-                   asset_url=d.get("setup_url"), asset_size=int(d.get("setup_size") or 0),
-                   page_url=str(d.get("page_url", "")), sha256=str(d.get("setup_sha256", "")), source="server")
+    exe = Release(version=str(d["version"]), tag=str(d.get("tag", "")), notes=str(d.get("notes", "")).strip(),
+                  asset_url=d.get("setup_url"), asset_size=int(d.get("setup_size") or 0),
+                  page_url=str(d.get("page_url", "")), sha256=str(d.get("setup_sha256", "")), source="server", kind="exe")
+    code = d.get("code") or {}
+    if code.get("version") and code.get("url") and is_frozen():
+        needs = str(code.get("requires_base") or "0")
+        if _vtuple(base_version()) >= _vtuple(needs) and _vtuple(code["version"]) > _vtuple(__version__) \
+                and _vtuple(code["version"]) >= _vtuple(exe.version):
+            return Release(version=str(code["version"]), tag="code", notes=str(code.get("notes", "")).strip(),
+                           asset_url=str(code["url"]), asset_size=int(code.get("size") or 0), page_url=exe.page_url,
+                           sha256=str(code.get("sha256", "")), source="server", kind="code")
+    # a full exe is only worth installing when its bundled code is newer than what we run
+    return exe
 
 
 def _check_github(timeout: float) -> Release | None:
@@ -112,11 +128,48 @@ def check(timeout: float = 20.0) -> Release | None:
     return rel if _vtuple(rel.version) > _vtuple(__version__) else None
 
 
+# ---------------------------------------------------------------- code overlay
+def overlay_dir() -> Path:
+    from .config import data_dir
+    return data_dir() / "code"
+
+
+def apply_code(zip_path: Path) -> Path:
+    """Extract a code zip into <data>/code.new, sanity-check it, swap it in. Returns the overlay dir."""
+    import shutil
+    import zipfile
+    dest = overlay_dir(); new = dest.with_name("code.new"); old = dest.with_name("code.old")
+    shutil.rmtree(new, ignore_errors=True)
+    with zipfile.ZipFile(zip_path) as z:
+        for n in z.namelist():
+            if n.startswith("/") or ".." in n.split("/"):
+                raise RuntimeError("unsafe path in update archive")
+        z.extractall(new)
+    if not (new / "trader" / "__init__.py").exists():
+        shutil.rmtree(new, ignore_errors=True)
+        raise RuntimeError("update archive has no trader package")
+    shutil.rmtree(old, ignore_errors=True)
+    if dest.exists():
+        dest.rename(old)
+    new.rename(dest)
+    shutil.rmtree(old, ignore_errors=True)
+    return dest
+
+
+def restart_app() -> None:
+    """Start a fresh copy of this app; the caller quits right after."""
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if is_frozen():
+        subprocess.Popen([sys.executable], close_fds=True, creationflags=flags)
+    else:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent.parent / "run.py")], close_fds=True, creationflags=flags)
+
+
 # ---------------------------------------------------------------- download
 def download(rel: Release, progress: Callable[[int, int], None] | None = None) -> Path:
     if not rel.asset_url:
         raise RuntimeError("this release has no Windows installer attached")
-    dest = Path(tempfile.gettempdir()) / f"TGTrader-Setup-{rel.version}.exe"
+    dest = Path(tempfile.gettempdir()) / (f"TGTrader-code-{rel.version}.zip" if rel.kind == "code" else f"TGTrader-Setup-{rel.version}.exe")
     done = 0
     h = hashlib.sha256()
     with httpx.stream("GET", rel.asset_url, follow_redirects=True, timeout=120, headers=UA) as r:

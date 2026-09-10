@@ -121,7 +121,8 @@ class MainWindow(QMainWindow):
                 v.addSpacing(10)
         v.addStretch()
         self.side_status = pill("متوقف", "muted"); v.addWidget(self.side_status, 0, Qt.AlignHCenter)
-        foot = QLabel(f"نسخه {__version__}"); foot.setObjectName("sideFoot"); foot.setAlignment(Qt.AlignCenter); v.addWidget(foot)
+        base = updater.base_version()
+        foot = QLabel(f"نسخه {__version__}" + (f" (exe {base})" if base != __version__ else "")); foot.setObjectName("sideFoot"); foot.setAlignment(Qt.AlignCenter); v.addWidget(foot)
         return side
 
     def _topbar(self) -> QWidget:
@@ -322,11 +323,11 @@ class MainWindow(QMainWindow):
         if not updater.is_frozen():
             QMessageBox.information(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} منتشر شده.\n\nاین نسخه از سورس اجرا شده؛ با git pull به‌روز کن یا نصب‌کننده را بگیر:\n{rel.page_url}"); return
         if not rel.asset_url:
-            QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} فایل نصب ویندوز ندارد:\n{rel.page_url}"); return
+            QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} فایل نصب ندارد:\n{rel.page_url}"); return
         if self.engine and self.engine.running():
             QMessageBox.warning(self, "به‌روزرسانی", "اول موتور معامله را متوقف کن، بعد به‌روزرسانی کن."); return
         self._on_event(f"[update] downloading {rel.version} from {rel.source}: {rel.asset_url}")
-        dlg = QProgressDialog(f"در حال دانلود نسخه‌ی {rel.version}…", "لغو", 0, 100, self)
+        dlg = QProgressDialog(f"در حال دانلود نسخه‌ی {rel.version} ({'کد، چند ثانیه' if rel.kind == 'code' else 'نصب کامل'})…", "لغو", 0, 100, self)
         dlg.setWindowTitle("به‌روزرسانی خودکار"); dlg.setAutoClose(False); dlg.setMinimumDuration(0)
         w = Worker(lambda: updater.download(rel, progress=lambda d, t: w.progress.emit(d, t)))
 
@@ -340,10 +341,15 @@ class MainWindow(QMainWindow):
                 return
             try:
                 updater.mark_attempt(rel.version)
-                updater.install(path)
+                if rel.kind == "code":
+                    updater.apply_code(path)
+                    self._on_event(f"[update] code {rel.version} applied to {updater.overlay_dir()}; restarting")
+                    updater.restart_app()
+                else:
+                    updater.install(path)
+                    self._on_event(f"[update] installer started for {rel.version} into {updater.install_dir()}; closing")
             except Exception as exc:
-                QMessageBox.critical(self, "به‌روزرسانی", f"{exc}\n\nنصب دستی: فایل دانلودشده در\n{path}"); return
-            self._on_event(f"[update] installer started for {rel.version} into {updater.install_dir()}; closing")
+                QMessageBox.critical(self, "به‌روزرسانی", f"{exc}\n\nفایل دانلودشده:\n{path}"); return
             QApplication.instance().quit()
 
         w.progress.connect(on_prog); w.done.connect(done)
