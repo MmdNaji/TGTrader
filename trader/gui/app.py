@@ -1449,6 +1449,11 @@ class MainWindow(QMainWindow):
                     "موتور در حال اجراست. با بستن برنامه معامله متوقف می‌شود (پوزیشن‌های باز روی صرافی می‌مانند). خارج شوم؟") != QMessageBox.Yes:
                 ev.ignore(); return
             self.engine.stop()
+        # Only now, once the quit is certain. Stopping the feed before the question meant that
+        # cancelling the quit left the window open with dead prices and no way back short of a
+        # restart - and an edit that was supposed to re-add this line silently did not apply,
+        # so for one release the feed was never stopped at all and Qt aborted on every exit.
+        self._stop_feed()
         # Background workers must be joined before the window goes: Qt aborts the process with
         # "QThread: Destroyed while thread is still running" if one is alive at teardown, which
         # the user sees as the app crashing on exit.

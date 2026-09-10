@@ -90,7 +90,12 @@ class MarketData:
             import ccxt
             cls = getattr(ccxt, ex_id)
             from ..net import ccxt_proxy_params
-            params: dict = {"enableRateLimit": True, "timeout": 20000, "options": {"defaultType": "spot"}}
+            # fetchMarkets is limited to spot on purpose. load_markets() is called implicitly by
+            # the first price/candle request, and on bybit it otherwise walks spot, linear,
+            # inverse AND option markets - each request up to the 20s timeout, so ONE price call
+            # could block a thread for minutes. This app only trades spot.
+            params: dict = {"enableRateLimit": True, "timeout": 20000,
+                            "options": {"defaultType": "spot", "fetchMarkets": ["spot"]}}
             params.update(ccxt_proxy_params(self.settings))
             self._exs[ex_id] = cls(params)
         return self._exs[ex_id]
