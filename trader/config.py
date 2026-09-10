@@ -31,6 +31,22 @@ def data_dir() -> Path:
 NO_API_EXCHANGES = ("kcex",)
 
 
+# The label each setting carries in the window. An advisory that names a field has to use the
+# name the user can actually see: the first version of those messages said «حداکثر پوزیشن
+# همزمان» when the field is called «حداکثر پوزیشن باز», and pointed at a percentage that had no
+# field at all. Both are read from here now, and a test checks the window uses the same strings.
+LABELS = {
+    "capital_limit": "سقف سرمایه‌ی ربات",
+    "risk_per_trade": "ریسک هر معامله",
+    "position_pct": "درصد سرمایه در هر معامله",
+    "max_open_risk": "سقف ریسک همزمان همه‌ی پوزیشن‌ها",
+    "max_daily_loss": "حداکثر زیان روزانه",
+    "max_open_positions": "حداکثر پوزیشن باز",
+    "max_position_frac": "بزرگ‌ترین پوزیشن (٪ سرمایه)",
+    "symbols": "نمادها",
+}
+
+
 @dataclass
 class RiskSettings:
     # Hard ceiling on the capital the bot may ever put to work (quote currency).
@@ -213,22 +229,27 @@ class Settings:
         """
         out: list[str] = []
         r = self.risk
+        L = LABELS
         if r.max_open_risk > 0 and r.risk_per_trade > r.max_open_risk:
             out.append(
-                f"ریسک هر معامله ({r.risk_per_trade*100:.1f}%) از سقف ریسک همزمان "
-                f"({r.max_open_risk*100:.1f}%) بیشتر است. یعنی بعد از اولین معامله، بودجه‌ی "
-                f"ریسک تمام می‌شود و بقیه رد می‌شوند.")
+                f"«{L['risk_per_trade']}» {r.risk_per_trade*100:.1f}٪ است ولی "
+                f"«{L['max_open_risk']}» {r.max_open_risk*100:.1f}٪ - یعنی بعد از اولین معامله "
+                f"بودجه‌ی ریسک تمام می‌شود و بقیه رد می‌شوند. "
+                f"«{L['risk_per_trade']}» را روی {r.max_open_risk*100/3:.0f}٪ یا کمتر بگذار."
+                f"   (تنظیمات ← ریسک)")
         if r.max_position_frac > 0 and r.max_open_positions > 1:
             fits = int(1 / r.max_position_frac)
             if fits < r.max_open_positions:
                 out.append(
-                    f"«حداکثر پوزیشن همزمان» {r.max_open_positions} است ولی هر پوزیشن تا "
-                    f"{r.max_position_frac*100:.0f}٪ سرمایه می‌گیرد، پس نقدینگی فقط به حدود "
-                    f"{fits} پوزیشن می‌رسد. برای {r.max_open_positions} پوزیشن، این عدد را حدود "
-                    f"{100//max(r.max_open_positions,1)}٪ بگذار.")
+                    f"«{L['max_open_positions']}» {r.max_open_positions} است ولی "
+                    f"«{L['max_position_frac']}» {r.max_position_frac*100:.0f}٪ - نقدینگی فقط به "
+                    f"حدود {fits} پوزیشن می‌رسد. برای {r.max_open_positions} پوزیشن، "
+                    f"«{L['max_position_frac']}» را حدود {100//max(r.max_open_positions,1)}٪ بگذار."
+                    f"   (تنظیمات ← ریسک)")
         if len(self.symbols) > r.max_open_positions:
-            out.append(f"{len(self.symbols)} نماد داری ولی حداکثر {r.max_open_positions} پوزیشن "
-                       f"همزمان مجاز است - بقیه فقط بررسی می‌شوند.")
+            out.append(f"{len(self.symbols)} نماد در «{L['symbols']}» داری ولی "
+                       f"«{L['max_open_positions']}» {r.max_open_positions} است - بقیه فقط "
+                       f"بررسی می‌شوند و معامله‌ای رویشان باز نمی‌شود.   (تنظیمات ← ریسک)")
         return out
 
     def validate(self) -> list[str]:

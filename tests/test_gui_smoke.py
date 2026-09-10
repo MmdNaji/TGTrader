@@ -366,3 +366,50 @@ def test_the_price_feed_does_not_ask_one_exchange_for_everything_every_second(wi
     assert per_cycle <= 4, f"{per_cycle} requests per cycle is still too many"
     # and every symbol is still reached within a few cycles
     assert per_cycle * (len(rest) or 1) >= len(win._watch_symbols())
+
+
+def test_every_field_an_advisory_names_actually_exists_on_the_settings_page(win):
+    """An advisory told the owner to change a percentage that had NO field in the window, and
+    called another field by a name it does not have. "I can't find it" was the correct answer.
+    Every name an advisory can print must be a label the settings page really shows."""
+    import re
+    from PySide6.QtWidgets import QLabel
+    from trader.config import LABELS, Settings
+
+    win.goto("settings")
+    QApplication.instance().processEvents()
+    on_screen = {lbl.text().strip() for lbl in win.findChildren(QLabel)}
+
+    # every label the advisories can quote is on the settings page
+    missing = [k for k, v in LABELS.items() if v not in on_screen and k != "symbols"]
+    assert not missing, f"these settings have a name but no field: {missing}"
+
+    # and every «quoted» name in a real advisory is one of those labels
+    s = Settings()
+    s.risk.capital_limit = 1000; s.risk.risk_per_trade = 0.10
+    s.risk.max_open_risk = 0.06; s.risk.max_open_positions = 20
+    s.risk.max_position_frac = 0.5
+    s.symbols = ["BTC/USDT"] * 30
+    advice = s.advisories()
+    assert advice, "this configuration should produce advisories"
+    quoted = {q for a in advice for q in re.findall(r"«([^»]+)»", a)}
+    assert quoted, "an advisory that names no field cannot be acted on"
+    unknown = quoted - set(LABELS.values())
+    assert not unknown, f"advisories quote names that are not settings labels: {unknown}"
+    # and each one is genuinely rendered
+    not_rendered = [q for q in quoted if q not in on_screen and q != LABELS["symbols"]]
+    assert not not_rendered, f"quoted but not on the page: {not_rendered}"
+
+
+def test_the_settings_page_writes_back_the_largest_position_field(win):
+    win.goto("settings")
+    QApplication.instance().processEvents()
+    win.s_posfrac.setValue(20.0)
+    win.s_maxpos.setValue(5)
+    win._save_settings()
+    QApplication.instance().processEvents()
+    assert win.settings.risk.max_position_frac == 0.2, "the new field must actually be saved"
+    from trader.config import Settings as _S
+    assert _S.load().risk.max_position_frac == 0.2, "and survive a reload"
+    assert not [a for a in win.settings.advisories() if "بزرگ‌ترین پوزیشن" in a], \
+        "5 positions at 20% each is consistent - it must stop warning"

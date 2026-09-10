@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, updater
 from ..brain import make_brain, claude_client
-from ..config import Settings, NO_API_EXCHANGES
+from ..config import Settings, LABELS, NO_API_EXCHANGES
 from ..db import Database
 from ..engine import Engine
 from ..knowledge.skills import load_seed_skills, add_extracted, active_skills
@@ -1193,23 +1193,32 @@ class MainWindow(QMainWindow):
         self.s_openrisk.setValue(getattr(s.risk, "max_open_risk", 0.06) * 100)
         self.s_dl = QDoubleSpinBox(); self.s_dl.setRange(0.5, 50); self.s_dl.setSuffix(" %"); self.s_dl.setValue(s.risk.max_daily_loss * 100)
         self.s_maxpos = QSpinBox(); self.s_maxpos.setRange(1, 20); self.s_maxpos.setValue(s.risk.max_open_positions)
+        # This one had NO field at all, while an advisory told the owner to change it - so the
+        # answer to "where do I change it?" was "nowhere".
+        self.s_posfrac = QDoubleSpinBox(); self.s_posfrac.setRange(1, 100); self.s_posfrac.setSuffix(" %")
+        self.s_posfrac.setValue(getattr(s.risk, "max_position_frac", 0.25) * 100)
         self.s_atr = QDoubleSpinBox(); self.s_atr.setRange(0.5, 6); self.s_atr.setValue(s.risk.atr_stop_mult)
         self.s_rr = QDoubleSpinBox(); self.s_rr.setRange(0.5, 10); self.s_rr.setValue(s.risk.reward_risk)
         self.s_trail = QDoubleSpinBox(); self.s_trail.setRange(0, 5); self.s_trail.setValue(s.risk.trail_after_r)
-        c3.add(FormRow("سقف سرمایه‌ی ربات", self.s_cap, "ربات هرگز بیش از این مبلغ را درگیر نمی‌کند"))
-        c3.add(FormRow("ریسک هر معامله", self.s_rpt, "حداکثر ضرر یک معامله، درصدی از سقف. ۱٪ = با سقف ۱۰۰ دلار، ۱ دلار"))
-        c3.add(FormRow("درصد سرمایه در هر معامله", self.s_pospct,
+        c3.add(FormRow(LABELS["capital_limit"], self.s_cap, "ربات هرگز بیش از این مبلغ را درگیر نمی‌کند"))
+        c3.add(FormRow(LABELS["risk_per_trade"], self.s_rpt, "حداکثر ضرر یک معامله، درصدی از سقف. ۱٪ = با سقف ۱۰۰ دلار، ۱ دلار"))
+        c3.add(FormRow(LABELS["position_pct"], self.s_pospct,
                        "چند درصد پول در هر معامله گذاشته شود. ۰ = خودکار (اندازه از روی فاصله‌ی حد ضرر).\n"
                        "⚠ این حالت فاصله‌ی حد ضرر را نادیده می‌گیرد، پس معامله‌ای با حد ضرر دور "
                        "چند برابر بقیه ریسک می‌کند — سود و ضرر هر دو بزرگ‌تر می‌شوند.\n"
                        "در شبیه‌سازی خودِ موتور روی یک حساب مشترک با ۸ ارز، عدد ۲۰ به‌جای ۰ نتیجه را "
                        "از ‎-۶.۴٪‎ به ‎-۲۹.۹٪‎ برد و بیشترین افت را از ۱۸.۶٪ به ۳۶.۹٪ رساند. "
                        "با ۳ ارز هم +۰.۵٪ را به ‎-۰.۱٪‎ برد. ۰ توصیه می‌شود."))
-        c3.add(FormRow("سقف ریسک همزمان همه‌ی پوزیشن‌ها", self.s_openrisk,
+        c3.add(FormRow(LABELS["max_open_risk"], self.s_openrisk,
                        "اگر همه‌ی پوزیشن‌های باز با هم حد ضرر بخورند، حداکثر چند درصد سرمایه از دست می‌رود. "
                        "۰ = بدون سقف. با ۶٪ و ریسک ۱٪ در هر معامله، حدود ۶ پوزیشن همزمان جا می‌شود."))
-        c3.add(FormRow("حداکثر زیان روزانه", self.s_dl, "با رسیدن به آن، تا فردا معامله‌ی جدیدی باز نمی‌شود"))
-        c3.add(FormRow("حداکثر پوزیشن باز", self.s_maxpos))
+        c3.add(FormRow(LABELS["max_daily_loss"], self.s_dl, "با رسیدن به آن، تا فردا معامله‌ی جدیدی باز نمی‌شود"))
+        c3.add(FormRow(LABELS["max_open_positions"], self.s_maxpos,
+                       "چند معامله می‌تواند هم‌زمان باز باشد. برای اینکه واقعاً به این عدد برسد، "
+                       "«بزرگ‌ترین پوزیشن» باید حدود ۱۰۰ تقسیم بر همین عدد باشد."))
+        c3.add(FormRow(LABELS["max_position_frac"], self.s_posfrac,
+                       "یک معامله حداکثر چند درصد از سقف سرمایه را می‌گیرد. این عدد تعیین می‌کند "
+                       "نقدینگی به چند پوزیشن می‌رسد: ۵۰٪ یعنی فقط ۲ تا، ۲۵٪ یعنی ۴ تا، ۲۰٪ یعنی ۵ تا."))
         c3.add(FormRow("حد ضرر (ATR ×)", self.s_atr, "۲ = دو برابر نوسان معمول یک کندل"))
         c3.add(FormRow("نسبت سود به ضرر", self.s_rr, "هدف = این عدد × فاصله‌ی حد ضرر"))
         c3.add(FormRow("تریل بعد از (R)", self.s_trail, "۱ = بعد از یک برابر ریسک سود، حد ضرر به نقطه‌ی ورود می‌آید. ۰ = خاموش"))
@@ -1322,6 +1331,7 @@ class MainWindow(QMainWindow):
         s.position_pct = self.s_pospct.value()
         s.risk.max_open_positions = self.s_maxpos.value(); s.risk.atr_stop_mult = self.s_atr.value(); s.risk.reward_risk = self.s_rr.value()
         s.risk.max_open_risk = self.s_openrisk.value() / 100
+        s.risk.max_position_frac = self.s_posfrac.value() / 100
         s.risk.trail_after_r = self.s_trail.value()
         s.computer.enabled = self.s_cu_on.isChecked(); s.computer.confirm_before_submit = self.s_cu_confirm.isChecked()
         s.computer.exchange_notes = self.s_cu_notes.toPlainText()
