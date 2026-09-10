@@ -36,6 +36,7 @@ NAV = [
     ("skills", "🧠", "مهارت‌ها", "قوانینی که ربات با آن‌ها معامله می‌کند"),
     ("learn", "📚", "یادگیری", "کتاب، مقاله یا چت: به ربات قانون یاد بده"),
     ("backtest", "⏮", "بک‌تست", "قوانین پایه روی داده‌ی گذشته"),
+    ("selftest", "🧪", "تست سیستم", "همه‌ی بخش‌ها را روی همین سیستم امتحان کن و گزارش را کپی کن"),
     ("settings", "⚙", "تنظیمات", "هوش مصنوعی، صرافی، ریسک، کنترل صفحه"),
     ("help", "📖", "راهنما", "همه چیز از نصب تا معامله‌ی واقعی"),
 ]
@@ -93,7 +94,7 @@ class MainWindow(QMainWindow):
         self.pages: dict[str, QWidget] = {}
         builders = {"dashboard": self._page_dashboard, "chart": self._page_chart, "trades": self._page_trades,
                     "skills": self._page_skills, "learn": self._page_learn, "backtest": self._page_backtest,
-                    "settings": self._page_settings, "help": self._page_help}
+                    "settings": self._page_settings, "help": self._page_help, "selftest": self._page_selftest}
         for key, *_ in NAV:
             w = builders[key](); self.pages[key] = w; self.stack.addWidget(w)
         col.addWidget(self.stack, 1)
@@ -116,7 +117,7 @@ class MainWindow(QMainWindow):
             b = QPushButton(f"{icon}   {label}"); b.setObjectName("navBtn"); b.setCheckable(True); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _, k=key: self.goto(k))
             self.nav_group.addButton(b); v.addWidget(b); self.nav_buttons[key] = b
-            if key == "backtest":
+            if key == "backtest" or key == "selftest":
                 v.addSpacing(10)
         v.addStretch()
         self.side_status = pill("متوقف", "muted"); v.addWidget(self.side_status, 0, Qt.AlignHCenter)
@@ -651,6 +652,69 @@ class MainWindow(QMainWindow):
         def fail(m):
             self.btn_bt.setEnabled(True); self.lbl_bt_verdict.setText("خطا: " + m.splitlines()[0])
         self._run_bg(job, done, fail)
+
+    # ============================================================ SELF-TEST
+    def _page_selftest(self) -> QWidget:
+        inner = QWidget(); v = QVBoxLayout(inner); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(14)
+        c = Card("تست کامل سیستم", "تنظیمات، پایگاه داده، داده‌ی صرافی، KCEX، قوانین، ریسک، بک‌تست، Claude، OpenAI، یک تصمیم واقعی، یادگیری، چت، کنترل صفحه، به‌روزرسانی")
+        h = QHBoxLayout()
+        self.st_ai = QCheckBox("تست‌های هوش مصنوعی هم (چند سنت هزینه دارد)"); self.st_ai.setChecked(True)
+        self.btn_st = button("🧪 اجرای تست", "primary", self._run_selftest)
+        self.btn_st_copy = button("📋 کپی گزارش", "", self._copy_selftest); self.btn_st_copy.setEnabled(False)
+        self.btn_st_save = button("💾 ذخیره گزارش", "ghost", self._save_selftest); self.btn_st_save.setEnabled(False)
+        h.addWidget(self.btn_st); h.addWidget(self.st_ai); h.addStretch(); h.addWidget(self.btn_st_copy); h.addWidget(self.btn_st_save)
+        c.add_layout(h)
+        self.lbl_st_progress = hint("هنوز اجرا نشده. بعد از اجرا، «کپی گزارش» را بزن و متن را برای سازنده بفرست."); c.add(self.lbl_st_progress)
+        v.addWidget(c)
+        c2 = Card("نتیجه")
+        self.tbl_st = table(["وضعیت", "بخش", "زمان (ms)", "جزئیات"])
+        from PySide6.QtWidgets import QHeaderView
+        for col in (0, 1, 2):
+            self.tbl_st.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.tbl_st.setMinimumHeight(360); c2.add(self.tbl_st, 1)
+        self.txt_st = QPlainTextEdit(); self.txt_st.setReadOnly(True); self.txt_st.setFixedHeight(160); c2.add(self.txt_st)
+        v.addWidget(c2, 1)
+        self._st_report = None
+        return self._scroll(inner)
+
+    def _run_selftest(self):
+        from ..diagnostics import run_all
+        if self.engine and self.engine.running():
+            QMessageBox.warning(self, "تست", "اول موتور معامله را متوقف کن."); return
+        self.btn_st.setEnabled(False); self.tbl_st.setRowCount(0); self.txt_st.clear()
+        include_ai = self.st_ai.isChecked()
+        w = Worker(lambda: run_all(self.settings, self.db, progress=lambda m: w.progress.emit(0, 0) or self.bridge.event.emit("[selftest] " + m), include_ai=include_ai))
+
+        def done(rep):
+            self._st_report = rep; self.btn_st.setEnabled(True); self.btn_st_copy.setEnabled(True); self.btn_st_save.setEnabled(True)
+            fill(self.tbl_st, [["✓ موفق" if c.ok else "✗ خطا", c.name, str(c.ms), c.detail] for c in rep.checks])
+            for i, c in enumerate(rep.checks):
+                self.tbl_st.item(i, 0).setForeground(__import__("PySide6.QtGui", fromlist=["QColor"]).QColor(theme.SUCCESS if c.ok else theme.DANGER))
+            ok = sum(1 for c in rep.checks if c.ok)
+            self.lbl_st_progress.setText(f"{ok} از {len(rep.checks)} بخش موفق. «کپی گزارش» را بزن و متن را بفرست.")
+            self.txt_st.setPlainText(rep.summary())
+
+        def fail(m):
+            self.btn_st.setEnabled(True); self.lbl_st_progress.setText("خطا: " + m.splitlines()[0])
+        w.done.connect(done); w.failed.connect(fail)
+        w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
+        self._workers.append(w); w.start()
+        self.lbl_st_progress.setText("در حال اجرا… (تست‌های هوش مصنوعی یک تا دو دقیقه طول می‌کشد)")
+
+    def _copy_selftest(self):
+        if self._st_report:
+            QApplication.clipboard().setText(self._st_report.summary())
+            self.lbl_st_progress.setText("گزارش کپی شد. در چت Paste کن (Ctrl+V).")
+
+    def _save_selftest(self):
+        if not self._st_report:
+            return
+        import json
+        path, _ = QFileDialog.getSaveFileName(self, "ذخیره گزارش", "tgtrader-selftest.json", "JSON (*.json)")
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._st_report.to_dict(), f, ensure_ascii=False, indent=2)
+            self.lbl_st_progress.setText(f"ذخیره شد: {path}")
 
     # ============================================================ HELP
     def _page_help(self) -> QWidget:

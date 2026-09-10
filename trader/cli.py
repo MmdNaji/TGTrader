@@ -109,6 +109,13 @@ def cmd_teach(a):
         print(f"{n} skill(s) saved")
 
 
+def cmd_selftest(a):
+    from .diagnostics import run_all
+    s = Settings.load(); db = Database()
+    rep = run_all(s, db, progress=lambda m: print("…", m), include_ai=not a.no_ai)
+    print(rep.summary())
+
+
 def cmd_docs(a):
     db = Database()
     for d in db.docs():
@@ -125,6 +132,7 @@ def main(argv=None):
     l = sub.add_parser("learn"); l.add_argument("doc_id", type=int); l.set_defaults(fn=cmd_learn)
     sub.add_parser("skills").set_defaults(fn=cmd_skills)
     sub.add_parser("docs").set_defaults(fn=cmd_docs)
+    st = sub.add_parser("selftest"); st.add_argument("--no-ai", action="store_true"); st.set_defaults(fn=cmd_selftest)
     for st in ("approve", "disable", "draft"):
         c = sub.add_parser(st); c.add_argument("ids", type=int, nargs="+")
         c.set_defaults(fn=cmd_status, status={"approve": "approved", "disable": "disabled", "draft": "draft"}[st])
