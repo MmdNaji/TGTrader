@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS trades (
     qty REAL NOT NULL,
     entry_price REAL NOT NULL,
     stop_price REAL,
+    init_stop REAL,                    -- the stop the trade OPENED with; R is measured from this
+    entry_fee REAL,                    -- fee paid on entry, subtracted when the trade closes
     take_profit REAL,
     exit_price REAL,
     pnl REAL,
@@ -91,6 +93,12 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            # migrate databases created before these columns existed
+            for col in ("init_stop", "entry_fee"):
+                try:
+                    self._conn.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
+                except sqlite3.OperationalError:
+                    pass          # already there
             self._conn.commit()
 
     # ------------------------------------------------------------ low level
@@ -133,19 +141,24 @@ class Database:
 
     # ------------------------------------------------------------ trades
     def open_trade(self, mode: str, symbol: str, side: str, qty: float, entry: float,
-                   stop: float | None, tp: float | None, strategy: str, reason: str) -> int:
+                   stop: float | None, tp: float | None, strategy: str, reason: str,
+                   entry_fee: float = 0.0) -> int:
         cur = self.execute(
-            "INSERT INTO trades(mode, symbol, side, qty, entry_price, stop_price, take_profit, strategy, reason, opened_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (mode, symbol, side, qty, entry, stop, tp, strategy, reason, time.time()),
+            "INSERT INTO trades(mode, symbol, side, qty, entry_price, stop_price, init_stop, entry_fee,"
+            " take_profit, strategy, reason, opened_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (mode, symbol, side, qty, entry, stop, stop, entry_fee, tp, strategy, reason, time.time()),
         )
         return int(cur.lastrowid)
 
-    def close_trade(self, trade_id: int, exit_price: float, pnl: float, r_multiple: float | None) -> None:
-        self.execute(
-            "UPDATE trades SET exit_price=?, pnl=?, r_multiple=?, closed_at=?, status='closed' WHERE id=?",
+    def close_trade(self, trade_id: int, exit_price: float, pnl: float, r_multiple: float | None) -> bool:
+        """Close an OPEN trade. Returns False if it was already closed, so a double close
+        (GUI and engine racing on the same row) cannot rewrite the P&L twice."""
+        cur = self.execute(
+            "UPDATE trades SET exit_price=?, pnl=?, r_multiple=?, closed_at=?, status='closed'"
+            " WHERE id=? AND status='open'",
             (exit_price, pnl, r_multiple, time.time(), trade_id),
         )
+        return cur.rowcount > 0
 
     def update_stop(self, trade_id: int, stop: float) -> None:
         self.execute("UPDATE trades SET stop_price=? WHERE id=?", (stop, trade_id))

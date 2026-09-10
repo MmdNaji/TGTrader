@@ -10,12 +10,13 @@ import time
 import traceback
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject, QEvent
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QFileDialog, QMessageBox, QPlainTextEdit,
     QSplitter, QProgressDialog, QTextBrowser, QStackedWidget, QScrollArea, QButtonGroup, QFrame,
+    QAbstractSpinBox, QSlider,
 )
 
 from .. import __version__, updater
@@ -60,6 +61,32 @@ class Worker(QThread):
             self.failed.emit(f"{exc}\n{traceback.format_exc(limit=2)}")
 
 
+# U+2066 LEFT-TO-RIGHT ISOLATE ... U+2069 POP DIRECTIONAL ISOLATE. The whole app runs RTL, and
+# bidi reordering turns "+1.23$ (+0.45%)" into something that reads as a different number - the
+# sign ends up on the wrong end and the two figures swap. Isolating the run fixes it for good.
+def money_pct(amount: float | None, pct: float | None) -> str:
+    if amount is None:
+        return "—"
+    body = f"{amount:+,.2f} $" + (f" ({pct:+.2f}%)" if pct is not None else "")
+    return "\u2066" + body + "\u2069"
+
+
+class WheelGuard(QObject):
+    """Stops the mouse wheel changing a spin box, a combo or a slider it merely passes over.
+
+    Every settings field on this page is money - capital limit, risk per trade, percent per
+    trade. Scrolling the page with the cursor over one of them silently changed it, and the
+    next thing the engine did was size a position from the new number. A field must be focused
+    (clicked into) before the wheel touches it."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Wheel and isinstance(obj, (QAbstractSpinBox, QComboBox, QSlider)):
+            if not obj.hasFocus():
+                ev.ignore()
+                return True          # let the scroll area have it instead
+        return False
+
+
 class Bridge(QObject):
     event = Signal(str)
     confirm_request = Signal(str)
@@ -80,10 +107,14 @@ class PriceFeed(QThread):
 
     def run(self):
         from ..market.data import MarketData
+        if self._stop.is_set():
+            return
         try:
             md = MarketData(self._settings)
         except Exception:
             return
+        if self._stop.is_set():
+            return          # asked to stop while the exchange was still loading
         while not self._stop.is_set():
             out = {}
             for sym in self._symbols_fn():
@@ -118,6 +149,8 @@ class MainWindow(QMainWindow):
         self._workers: list[Worker] = []
         self.teach_history: list[dict[str, str]] = []
         self._pending_update: updater.Release | None = None
+        self._quit_for_update = False
+        self._retiring_feeds: list[PriceFeed] = []   # feeds asked to stop that have not yet
         self._chart_last = 0.0
         self._dash_chart_last = 0.0
         self._pos_data: list[dict] = []
@@ -344,6 +377,14 @@ class MainWindow(QMainWindow):
         if self.engine and isinstance(self.engine.broker, PaperBroker):
             self.engine.broker.reset(bal)
             self.engine.last_prices.clear()
+            # A reset means "start over". Leaving the cooldowns and the one-entry-per-bar marks
+            # behind means the engine sits out its first pass on exactly the symbols the user
+            # just wiped, which reads as "I reset it and it still does nothing".
+            self.engine._cooldown.clear()
+            self.engine._entered_bar.clear()
+            self.engine._last_bar.clear()
+            self.engine._order_err.clear()
+            self.engine._reconciled = True     # nothing is open; do not re-scan
         self.db.record_equity("paper", bal)
         self._live = {}
         self._hide_pos_detail()
@@ -388,10 +429,16 @@ class MainWindow(QMainWindow):
                                 f"لاگ نصب: {updater.log_path()}\nپوشه‌ی برنامه: {updater.install_dir()}\n\n"
                                 f"برای تلاش دوباره دکمه‌ی 🔄 را بزن، یا نصب دستی:\n{rel.asset_url}")
             return
-        if manual or (self.settings.auto_update and updater.is_frozen() and rel.asset_url):
-            if self.engine and self.engine.running() and not manual:
+        if manual:
+            self._offer_update(rel); return
+        if self.settings.auto_update and updater.is_frozen() and rel.asset_url:
+            if self.engine and self.engine.running():
                 self._on_event("[update] engine is running - will install when it is stopped"); return
-            self._offer_update(rel)
+            # Automatic means the DOWNLOAD happens on its own - that is the slow part and the
+            # part that fails from Iran. Closing the app still asks, because the alternative is
+            # the window vanishing mid-session with no explanation.
+            self._on_event(f"[update] downloading {rel.version} automatically")
+            self._download_and_install(rel)
 
     def _offer_update(self, rel):
         if not updater.is_frozen():
@@ -400,20 +447,84 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} فایل نصب ندارد:\n{rel.page_url}"); return
         if self.engine and self.engine.running():
             QMessageBox.warning(self, "به‌روزرسانی", "اول موتور معامله را متوقف کن، بعد به‌روزرسانی کن."); return
-        # Most reliable path on Windows: open the installer download in the default browser -
-        # exactly the manual flow that works. No silent install, no self-restart.
+        mb = QMessageBox(self)
+        mb.setWindowTitle("به‌روزرسانی")
+        mb.setText(f"نسخه‌ی {rel.version} آماده است (نسخه‌ی فعلی {__version__}).\n\n"
+                   f"حجم: {(rel.asset_size or 0) / 1048576:.0f} مگابایت\n\n"
+                   "دانلود داخل برنامه از همان مسیری می‌رود که قیمت‌ها از آن می‌آید (پروکسی/VPN)،\n"
+                   "و فایل قبل از اجرا با SHA-256 بررسی می‌شود.")
+        b_app = mb.addButton("دانلود و نصب", QMessageBox.AcceptRole)
+        b_web = mb.addButton("دانلود با مرورگر", QMessageBox.ActionRole)
+        mb.addButton("بعداً", QMessageBox.RejectRole)
+        mb.exec()
+        if mb.clickedButton() is b_web:
+            self._update_via_browser(rel)
+            return
+        if mb.clickedButton() is not b_app:
+            return
+        self._download_and_install(rel)
+
+    def _update_via_browser(self, rel):
+        """Fallback only. The browser has no idea about the app's proxy setting, so on a
+        connection where the exchange itself is blocked this link usually will not open."""
         import webbrowser
         updater.mark_attempt(rel.version)
-        opened = False
         try:
             opened = webbrowser.open(rel.asset_url)
         except Exception:
             opened = False
         self._on_event(f"[update] opened installer download for {rel.version}: {rel.asset_url}")
         QMessageBox.information(self, "به‌روزرسانی",
-            f"نسخه‌ی {rel.version} آماده است.\n\nدانلود در مرورگر باز شد. بعد از دانلود:\n"
-            f"۱) برنامه را ببند.\n۲) فایل دانلودشده (TGTrader-Setup) را اجرا کن و Install بزن.\n\n"
+            f"نسخه‌ی {rel.version}: دانلود در مرورگر باز شد.\n\nبعد از دانلود:\n"
+            f"۱) برنامه را ببند.\n۲) فایل TGTrader-Setup را اجرا کن و Install بزن.\n\n"
             + ("" if opened else f"اگر مرورگر باز نشد، این آدرس را دستی باز کن:\n{rel.asset_url}"))
+
+    def _download_and_install(self, rel):
+        dlg = QProgressDialog(f"در حال دانلود نسخه‌ی {rel.version}…", "لغو", 0, 100, self)
+        dlg.setWindowTitle("به‌روزرسانی"); dlg.setMinimumDuration(0); dlg.setAutoClose(False)
+        w = Worker(lambda: updater.download(rel, progress=lambda d, t: w.progress.emit(d, t)))
+
+        def on_progress(d, t):
+            if dlg.wasCanceled():
+                return
+            dlg.setMaximum(max(t, 1)); dlg.setValue(min(d, t) if t else 0)
+            dlg.setLabelText(f"در حال دانلود نسخه‌ی {rel.version}…  {d / 1048576:.0f} از {t / 1048576:.0f} مگابایت")
+
+        def on_done(path):
+            dlg.close()
+            if dlg.wasCanceled():
+                return
+            verified = "بررسی‌شده با SHA-256" if rel.sha256 else "بدون checksum منتشر شده"
+            self._on_event(f"[update] downloaded {rel.version} to {path} ({verified})")
+            if QMessageBox.question(self, "به‌روزرسانی",
+                    f"دانلود تمام شد ({verified}).\n\nحالا نصب‌کننده باز می‌شود و این برنامه بسته می‌شود.\n"
+                    "بعد از پایان نصب، برنامه دوباره باز می‌شود.\n\nادامه؟") != QMessageBox.Yes:
+                return
+            updater.mark_attempt(rel.version)
+            try:
+                updater.install(path)
+            except Exception as exc:
+                QMessageBox.critical(self, "به‌روزرسانی", f"اجرای نصب‌کننده انجام نشد:\n{exc}\n\nفایل اینجاست:\n{path}")
+                return
+            # Quitting is not optional: Windows will not let the installer replace an exe that
+            # is still running, and staying open is exactly what produced the download loop.
+            self._quit_for_update = True
+            QApplication.instance().quit()
+
+        def on_fail(msg):
+            dlg.close()
+            first = msg.splitlines()[0]
+            self._on_event(f"[update] download failed: {first}")
+            if QMessageBox.question(self, "به‌روزرسانی",
+                    f"دانلود داخل برنامه انجام نشد:\n{first}\n\nبا مرورگر امتحان شود؟") == QMessageBox.Yes:
+                self._update_via_browser(rel)
+
+        w.progress.connect(on_progress)
+        w.done.connect(on_done)
+        w.failed.connect(on_fail)
+        w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
+        self._workers.append(w); w.start()
+        dlg.exec()
 
     def _install_mt5(self):
         if updater.mt5_installed():
@@ -440,7 +551,7 @@ class MainWindow(QMainWindow):
         h.addWidget(button("⟳", "", self.refresh_desk_chart)); h.addStretch()
         ctop.add_layout(h)
         self.desk_chart = CandleChart(); ctop.add(self.desk_chart, 1)
-        self.desk_symbol.currentTextChanged.connect(lambda _: self.refresh_desk_chart())
+        self.desk_symbol.currentTextChanged.connect(lambda _: (self._sync_watch_symbols(), self.refresh_desk_chart()))
         self.desk_tf.currentTextChanged.connect(lambda _: self.refresh_desk_chart())
         cbot = Card("پوزیشن‌های باز", "روی هر ردیف بزن تا چارت بالا برود روی همان ارز")
         self.tbl_desk = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
@@ -480,7 +591,8 @@ class MainWindow(QMainWindow):
         self.chart = CandleChart(); c.add(self.chart, 1)
         self.lbl_hover = hint("چرخ ماوس: زوم · کشیدن: جابه‌جایی · ▲▼ ورود/خروج معاملات · خط‌چین: قیمت آخر، ورود، حد ضرر، هدف")
         self.chart.hovered.connect(self.lbl_hover.setText); c.add(self.lbl_hover)
-        self.ch_symbol.currentTextChanged.connect(lambda _: self.refresh_chart()); self.ch_tf.currentTextChanged.connect(lambda _: self.refresh_chart())
+        self.ch_symbol.currentTextChanged.connect(lambda _: (self._sync_watch_symbols(), self.refresh_chart()))
+        self.ch_tf.currentTextChanged.connect(lambda _: self.refresh_chart())
         v.addWidget(c, 1)
         return w
 
@@ -844,8 +956,12 @@ class MainWindow(QMainWindow):
         prow.addWidget(button("🎯 اسکالپ (فقط تماشا)", "ghost", lambda: self._preset("scalp")))
         prow.addStretch()
         cp.add_layout(prow)
-        cp.add(hint("«هوشمند چندارزی»: ۸ ارز، Claude با دقت max و ۸۶ مهارت، تا ۸ پوزیشن، تایم‌فریم ۵ دقیقه، موجودی کاغذی ۱۰۰۰. "
-                    "برای دیدن معامله‌ی زیاد روی ارزهای مختلف. یادت باشد سود تضمینی نیست."))
+        cp.add(hint(
+            "اندازه‌گیری واقعی روی ۸ ارز و ۱۰۰۰ کندل (کارمزد ۰.۱٪ در هر طرف حساب شده):\n"
+            "• تایم‌فریم روزانه: میانگین +۶.۷٪ ، ۷ ارز از ۸ سودده — هر تنظیمی که امتحان شد مثبت بود.\n"
+            "• تایم‌فریم ۴ ساعته و ۱ ساعته: همیشه منفی (۱ از ۸).\n"
+            "• اسکالپ روی ۵ و ۱۵ دقیقه: ۰ از ۶ سودده، بین -۹٪ تا -۱۸٪. سرعت زیاد یعنی کارمزد زیاد، نه سود زیاد.\n"
+            "«هوشمند چندارزی» به همین دلیل روی تایم‌فریم روزانه تنظیم می‌شود، نه ۵ دقیقه. سود تضمینی نیست."))
         v.addWidget(cp)
 
         grid = QGridLayout(); grid.setSpacing(14)
@@ -861,6 +977,9 @@ class MainWindow(QMainWindow):
         self.s_agg = QComboBox()
         self.s_agg.addItems(["normal", "high", "scalp"]); self.s_agg.setCurrentText(getattr(s, "aggressiveness", "normal"))
         self.s_autoupd = QCheckBox("به‌روزرسانی خودکار موقع باز شدن برنامه"); self.s_autoupd.setChecked(s.auto_update)
+        self.s_align = QCheckBox("هم‌جهت با بیت‌کوین (لانگ آلت وقتی BTC ریزشی است، باز نشود) — "
+                                 "در بک‌تست سود را کمی کم کرد؛ فقط برای محافظه‌کاری در ریزش")
+        self.s_align.setChecked(getattr(s, "align_with_leader", True))
         c1.add(FormRow("تصمیم‌گیرنده", self.s_provider, "کلید همان را وارد کن. کنترل صفحه همیشه با Claude است."))
         c1.add(FormRow("Claude API key", self.s_key, "از console.anthropic.com"))
         c1.add(FormRow("مدل Claude", self.s_model, "opus-5 پیشنهادی؛ sonnet-5 ارزان‌تر"))
@@ -871,6 +990,7 @@ class MainWindow(QMainWindow):
         c1.add(FormRow("میزان تهاجم", self.s_agg,
                        "normal = صبور، منتظر ستاپ واقعی · high = آستانه پایین‌تر، معامله‌ی بیشتر · "
                        "scalp = فقط قوانین، روی هر مومنتوم وارد می‌شود (برای دیدن فعالیت روی تایم‌فریم کوتاه، نه برای سود)"))
+        c1.add(self.s_align)
         c1.add(self.s_autoupd)
         c1.add_action(button("تست اتصال", "", self._test_llm))
         grid.addWidget(c1, 0, 0)
@@ -885,7 +1005,11 @@ class MainWindow(QMainWindow):
         self.s_ex_key = QLineEdit(s.exchange.api_key); self.s_ex_secret = QLineEdit(s.exchange.secret); self.s_ex_secret.setEchoMode(QLineEdit.Password)
         self.s_ex_pass = QLineEdit(s.exchange.password); self.s_ex_pass.setEchoMode(QLineEdit.Password)
         self.s_symbols = QLineEdit(", ".join(s.symbols))
-        self.s_tf = QComboBox(); self.s_tf.addItems(["5m", "15m", "30m", "1h", "4h", "1d"]); self.s_tf.setCurrentText(s.timeframe)
+        # "1m" was missing from this list while the scalp preset tried to select it. setCurrentText
+        # on a non-editable combo does NOTHING when the value is absent - no error, no warning - so
+        # the preset silently left whatever timeframe was there before.
+        self.s_tf = QComboBox(); self.s_tf.addItems(["1m", "5m", "15m", "30m", "1h", "4h", "1d"])
+        self.s_tf.setCurrentText(s.timeframe)
         self.s_paper_bal = QDoubleSpinBox(); self.s_paper_bal.setRange(1, 1e9); self.s_paper_bal.setValue(s.paper_start_balance)
         c2.add(FormRow("حالت", self.s_mode, "paper = کاغذی، بدون پول واقعی. اول همیشه کاغذی."))
         c2.add(FormRow("بازار", self.s_market, "فارکس به MetaTrader 5 نیاز دارد (پایین)"))
@@ -950,21 +1074,30 @@ class MainWindow(QMainWindow):
     def _preset(self, kind: str):
         """One click that fills every field for a coherent mode, saves, and asks for a restart."""
         if kind == "smart":
+            # 8 symbols is what was asked for; the DAILY timeframe is what the measurement
+            # supports. The same eight symbols on 5m lost money on every single one of them.
             self.s_agg.setCurrentText("high"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT, DOGE/USDT, ADA/USDT, AVAX/USDT")
-            self.s_maxpos.setValue(8); self.s_tf.setCurrentText("5m")
-            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_loop.setValue(3); self.s_pospct.setValue(20)
-            msg = "حالت هوشمند چندارزی اعمال شد: ۸ ارز، دقت max، تا ۸ پوزیشن."
+            self.s_maxpos.setValue(8); self.s_tf.setCurrentText("1d")
+            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_loop.setValue(30); self.s_pospct.setValue(20)
+            self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
+            msg = ("حالت هوشمند چندارزی اعمال شد: ۸ ارز، تایم‌فریم روزانه، دقت max، تا ۸ پوزیشن.\n"
+                   "در بک‌تست همین ترکیب روی ۸ ارز: میانگین +۶.۷٪ و ۷ ارز از ۸ سودده.")
         elif kind == "serious":
             self.s_agg.setCurrentText("normal"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT")
             self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60); self.s_pospct.setValue(0)
-            msg = "حالت جدی و صبور اعمال شد: روزانه، normal، برای پول واقعی."
+            self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
+            msg = "حالت جدی و صبور اعمال شد: روزانه، normal، ۳ ارز، برای پول واقعی."
         else:  # scalp
             self.s_agg.setCurrentText("scalp"); self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT")
-            self.s_maxpos.setValue(6); self.s_tf.setCurrentText("1m"); self.s_loop.setValue(2)
+            # 5m, not 1m: of the fast timeframes it was the least bad when measured
+            # (-8.6% against -18.3% at 15m, and 1m is worse still). All of them lose.
+            self.s_maxpos.setValue(6); self.s_tf.setCurrentText("5m"); self.s_loop.setValue(3)
             self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_pospct.setValue(15)
-            msg = "حالت اسکالپ اعمال شد: پرتعداد و سریع، فقط برای تماشا (در بلندمدت ضرر می‌دهد)."
+            msg = ("حالت اسکالپ اعمال شد: پرتعداد و سریع.\n\n"
+                   "این حالت در بک‌تست روی ۶ ارز و تایم‌فریم ۵ و ۱۵ دقیقه، هیچ‌کدام سودده نبود "
+                   "(بین -۹٪ تا -۱۸٪). فقط برای دیدن کارکرد برنامه است، نه برای سود.")
         self._save_settings()
         if self.settings.mode == "paper":
             from ..execution.paper import PaperBroker
@@ -991,7 +1124,7 @@ class MainWindow(QMainWindow):
         s.ai_provider = self.s_provider.currentText(); s.openai_api_key = self.s_oai_key.text().strip(); s.openai_model = self.s_oai_model.text().strip() or "gpt-5"
         s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText(); s.effort = self.s_effort.currentText()
         s.use_llm_for_decisions = self.s_llm.isChecked(); s.auto_update = self.s_autoupd.isChecked()
-        s.aggressiveness = self.s_agg.currentText()
+        s.aggressiveness = self.s_agg.currentText(); s.align_with_leader = self.s_align.isChecked()
         s.mode = self.s_mode.currentText(); s.market = self.s_market.currentText()
         s.exchange.exchange_id = self.s_exchange.currentText().strip().lower(); s.data_source = self.s_data_source.currentText()
         s.exchange.api_key = self.s_ex_key.text().strip(); s.exchange.secret = self.s_ex_secret.text().strip()
@@ -1079,7 +1212,7 @@ class MainWindow(QMainWindow):
             rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
                          f"{px:g}" if px else "—", f"${val:.2f}", f"{r['stop_price']:g}",
                          f"{r['take_profit']:g}" if r["take_profit"] else "—",
-                         f"{fl:+.2f}$ ({pct:+.2f}%)" if fl is not None else "—"])
+                         money_pct(fl, pct)])
         self._pos_data = [dict(x) for x in opens]
         fill(self.tbl_positions, rows, tones={7: "pnl"}); self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
         if hasattr(self, "tbl_desk"):
@@ -1180,7 +1313,9 @@ class MainWindow(QMainWindow):
         self._run_bg(lambda: self.engine.close_position(dict(r), px, "manual"), lambda _: (self._hide_pos_detail(), self.refresh()))
 
     # ------------------------------------------------------------ live price feed
-    def _watch_symbols(self) -> list[str]:
+    def _sync_watch_symbols(self) -> None:
+        """Recompute the watch list ON THE GUI THREAD. Reading a combo box from the feed thread
+        is a data race against Qt: it happened to work and is not allowed to."""
         syms = list(self.settings.symbols)
         for combo_name in ("ch_symbol", "desk_symbol"):
             try:
@@ -1189,19 +1324,34 @@ class MainWindow(QMainWindow):
                     syms.append(cs)
             except Exception:
                 pass
-        return syms
+        self._watch_cache = syms      # replaced whole, never mutated in place
+
+    def _watch_symbols(self) -> list[str]:
+        # Called from the feed thread: a plain read of a list the GUI thread swapped in.
+        return list(getattr(self, "_watch_cache", None) or self.settings.symbols)
 
     def _start_feed(self):
         self._stop_feed()
+        self._sync_watch_symbols()
         self._feed = PriceFeed(self.settings, self._watch_symbols)
         self._feed.tick.connect(self._on_tick)
         self._feed.start()
 
     def _stop_feed(self):
-        if getattr(self, "_feed", None):
-            self._feed.stop()
-            self._feed.wait(1500)
-            self._feed = None
+        """Ask the feed to stop and only let go of it once it really has.
+
+        Dropping the last Python reference to a QThread that is still running makes Qt abort the
+        whole process ("QThread: Destroyed while thread is still running"). The feed can easily
+        be inside a several-second HTTP call over a slow proxy, so waiting 1.5s and then setting
+        it to None crashed the app whenever settings were saved at the wrong moment."""
+        feed = getattr(self, "_feed", None)
+        self._feed = None
+        if not feed:
+            return
+        feed.stop()
+        if not feed.wait(1500):
+            self._retiring_feeds.append(feed)          # keep it alive until it finishes
+        self._retiring_feeds = [f for f in getattr(self, "_retiring_feeds", []) if not f.isFinished()]
 
     def _on_tick(self, prices: dict):
         self._live.update(prices)
@@ -1234,7 +1384,7 @@ class MainWindow(QMainWindow):
             rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
                          f"{px:g}" if px else "—", f"${val:.2f}", f"{r['stop_price']:g}",
                          f"{r['take_profit']:g}" if r["take_profit"] else "—",
-                         f"{fl:+.2f}$ ({pct:+.2f}%)" if fl is not None else "—"])
+                         money_pct(fl, pct)])
         self._pos_data = [dict(x) for x in opens]
         fill(self.tbl_positions, rows, tones={7: "pnl"})
         self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
@@ -1250,16 +1400,50 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev):
         self._stop_feed()
         if self.engine and self.engine.running():
-            if QMessageBox.question(self, "خروج", "موتور در حال اجراست. با بستن برنامه معامله متوقف می‌شود (پوزیشن‌های باز روی صرافی می‌مانند). خارج شوم؟") != QMessageBox.Yes:
+            # No question when the installer is already running: the answer would arrive after
+            # Windows had failed to replace a locked exe, which is the update loop all over again.
+            if not self._quit_for_update and QMessageBox.question(
+                    self, "خروج",
+                    "موتور در حال اجراست. با بستن برنامه معامله متوقف می‌شود (پوزیشن‌های باز روی صرافی می‌مانند). خارج شوم؟") != QMessageBox.Yes:
                 ev.ignore(); return
             self.engine.stop()
+        # Background workers must be joined before the window goes: Qt aborts the process with
+        # "QThread: Destroyed while thread is still running" if one is alive at teardown, which
+        # the user sees as the app crashing on exit.
+        _join_threads(list(self._workers) + list(getattr(self, "_retiring_feeds", [])))
+        self._workers.clear()
+        self._retiring_feeds = []
         ev.accept()
+
+
+def _join_threads(threads: list, ms: int = 5000) -> None:
+    """Wait for background threads, and terminate whatever will not stop.
+
+    Loading an exchange's market list can take much longer than any reasonable wait, and that
+    call is inside the price feed. A QThread still running when Python releases it makes Qt
+    abort the process - which the user sees as the app crashing every time they close it while
+    the connection is slow. Terminating a thread is ugly; aborting on exit is worse."""
+    for t in threads:
+        try:
+            if t.wait(ms):
+                continue
+            t.terminate()
+            t.wait(2000)
+        except Exception:
+            pass
 
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app._wheel_guard = WheelGuard()          # kept alive on the app, or Qt drops the filter
+    app.installEventFilter(app._wheel_guard)
     app.setLayoutDirection(Qt.RightToLeft)
     app.setStyleSheet(theme.QSS)
     app.setFont(QFont("Segoe UI", 10))
     win = MainWindow(); win.show()
-    return app.exec()
+    code = app.exec()
+    # Belt and braces: anything still alive after the window closed is joined or terminated
+    # here, so the process can never abort on the way out.
+    win._stop_feed()
+    _join_threads(list(win._workers) + list(win._retiring_feeds), ms=3000)
+    return code

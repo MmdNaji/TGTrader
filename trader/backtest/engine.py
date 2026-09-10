@@ -1,9 +1,12 @@
-"""Bar-by-bar backtest of the rule strategies with the same risk manager the live loop uses.
+"""Bar-by-bar backtest of the rule strategies.
 
-It is deliberately simple: one position per symbol, market fills at the next bar's open,
-stops and targets checked against the bar's high/low, fees and slippage applied. Good
-enough to tell a rule that loses money from one that does not; not a substitute for
-paper trading before real money.
+It calls the REAL ``RiskManager.size`` and applies the same fee-aware entry filter as the live
+loop, because a backtest that is more permissive than the engine is worse than no backtest: it
+green-lights a setting the engine will then refuse, or reports an edge the fees will eat.
+
+One position per symbol, market fills at the next bar's open, stops and targets checked against
+the bar's high/low, both fees and slippage applied. Good enough to tell a rule that loses money
+from one that does not; not a substitute for paper trading before real money.
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from ..config import RiskSettings
+from ..risk.manager import RiskManager
 from ..market.indicators import enrich
 from ..strategy.base import Strategy
 from ..strategy.builtin import DEFAULT_STRATEGIES, evaluate_all
@@ -34,6 +38,7 @@ class BtTrade:
     r: float = 0.0
     reason: str = ""
     entry_fee: float = 0.0
+    init_stop: float = 0.0     # the stop the trade was opened with; R is measured from this
 
 
 @dataclass
@@ -69,7 +74,12 @@ class BtResult:
 
 def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity: float = 1000.0,
                  strategies: list[Strategy] | None = None, fee_rate: float = 0.001, slippage: float = 0.0005,
-                 warmup: int = 60, allow_short: bool = True) -> BtResult:
+                 warmup: int = 60, allow_short: bool = True,
+                 leader_regimes: pd.Series | None = None) -> BtResult:
+    """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
+    a long is refused while the leader is in ``trend_down`` and a short while it is in
+    ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
+    assumed."""
     data = enrich(df)
     res = BtResult(symbol=symbol, bars=len(data), start_equity=start_equity)
     equity = start_equity
@@ -77,6 +87,7 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
     pending: tuple[Any, float] | None = None   # (signal, stop_distance) to fill at next open
     strategies = strategies or DEFAULT_STRATEGIES
     rr, atr_mult = risk.reward_risk, risk.atr_stop_mult
+    rm = RiskManager(risk, None, "backtest")     # the same sizing code the live loop runs
 
     for i in range(warmup, len(data)):
         bar = data.iloc[i]
@@ -86,15 +97,15 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
         if pending and open_t is None:
             sig, sd = pending
             px = o * (1 + slippage) if sig.side == "long" else o * (1 - slippage)
-            base = min(equity, risk.capital_limit)
-            qty = (risk.risk_per_trade * base) / sd
-            qty = min(qty, risk.max_position_frac * risk.capital_limit / px)
-            if qty > 0:
+            sizing = rm.size(sig.side, px, sd, equity)
+            if sizing:
+                qty = sizing.qty
                 stop = px - sd if sig.side == "long" else px + sd
                 tp = px + rr * sd if sig.side == "long" else px - rr * sd
                 entry_fee = qty * px * fee_rate
                 equity -= entry_fee
-                open_t = BtTrade(sig.side, px, stop, tp, qty, i, sig.strategy, reason=sig.reason, entry_fee=entry_fee)
+                open_t = BtTrade(sig.side, px, stop, tp, qty, i, sig.strategy, reason=sig.reason,
+                                 entry_fee=entry_fee, init_stop=stop)
             pending = None
 
         # 2. manage the open trade on this bar
@@ -111,17 +122,15 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                     exit_px, why = t.stop, "stop"
                 elif l <= t.tp:
                     exit_px, why = t.tp, "target"
-            if exit_px is None and risk.trail_after_r > 0:
-                r_dist = abs(t.entry - t.stop) or 1e-12
-                if t.side == "long" and c >= t.entry + risk.trail_after_r * r_dist:
-                    t.stop = max(t.stop, c - r_dist)
-                elif t.side == "short" and c <= t.entry - risk.trail_after_r * r_dist:
-                    t.stop = min(t.stop, c + r_dist)
+            if exit_px is None:
+                # R from the ORIGINAL stop. Measuring it from the already-trailed stop shrinks it
+                # every bar, so the stop walks into the price and closes every winner for nothing.
+                t.stop = rm.trail_stop(t.side, t.entry, t.stop, c, t.init_stop or t.stop)
             if exit_px is not None:
                 pnl = (exit_px - t.entry) * t.qty if t.side == "long" else (t.entry - exit_px) * t.qty
                 pnl -= t.qty * exit_px * fee_rate + t.entry_fee   # both fees belong to the trade
                 t.exit, t.exit_i, t.pnl = exit_px, i, pnl
-                r_dist = abs(t.entry - (t.entry - (t.tp - t.entry) / rr)) if rr else 1e-12
+                r_dist = abs(t.entry - (t.init_stop or t.stop))
                 t.r = pnl / (t.qty * r_dist) if r_dist else 0.0
                 t.reason += f" -> {why}"
                 equity += pnl + t.entry_fee   # entry fee was already taken from equity when the trade opened
@@ -135,10 +144,20 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
             if regime not in ("volatile", "unknown"):
                 sigs = evaluate_all(symbol, window, regime, strategies)
                 sigs = [s for s in sigs if allow_short or s.side == "long"]
+                if sigs and leader_regimes is not None:
+                    lr = leader_regimes.get(window.index[-1])
+                    if lr == "trend_down":
+                        sigs = [x for x in sigs if x.side == "short"]
+                    elif lr == "trend_up":
+                        sigs = [x for x in sigs if x.side == "long"]
                 if sigs:
                     sig = max(sigs, key=lambda s: s.strength)
                     sd = sig.stop_distance or atr_mult * float(bar["atr14"])
-                    if sd and sd > 0:
+                    # The same two cost gates the live engine applies, so a backtest cannot
+                    # promise trades the engine would refuse.
+                    sd = max(sd or 0.0, c * fee_rate * 4.0)
+                    round_trip = 2.0 * fee_rate * c
+                    if sd > 0 and rr * sd > 3.0 * round_trip:
                         pending = (sig, sd)
 
         # mark to market

@@ -54,7 +54,17 @@ DECISION_SYSTEM = """You are the decision layer of a personal trading bot. You a
 produced, the open position on this symbol if any, and the bot's SKILLS - rules learned from books, articles
 and the owner. Apply the skills. Be conservative: 'hold' is the right answer most of the time, and a trade
 is only worth taking when several independent things line up. Never suggest a size - the risk manager sizes
-every trade. Answer only through the JSON schema."""
+every trade.
+
+SHORTS ARE FIRST-CLASS. 'sell' opens a SHORT and is exactly as valid as 'buy' when the analysis points down;
+the broker supports it. A downtrend, a failed breakout or a rejection at resistance is a sell setup, not a
+reason to sit out. Do not bias towards long.
+
+The bot pays a fee on the way in and on the way out, so a setup whose target is only a little beyond the
+noise is a losing trade even when the direction is right. Ask for a stop wide enough that the target is
+worth several times the round trip.
+
+Answer only through the JSON schema."""
 
 TEACH_SYSTEM = """You are the learning side of a personal trading bot. The owner teaches you in plain
 language (Persian or English). Reply in the owner's language. When they state a rule you should trade by,
@@ -68,7 +78,11 @@ def _client(settings: Settings) -> anthropic.Anthropic:
         raise RuntimeError("Anthropic API key is not set (Settings -> Claude)")
     from ..net import anthropic_http_client
     hc = anthropic_http_client(settings)
-    return anthropic.Anthropic(api_key=key, timeout=180.0, http_client=hc) if hc else anthropic.Anthropic(api_key=key, timeout=180.0)
+    # max_retries is capped low on purpose: this client is called from the trading loop, and the
+    # SDK's default retry ladder on a 180s timeout can block that thread for the better part of
+    # ten minutes - long enough to miss every stop on every other symbol.
+    kw = {"api_key": key, "timeout": 120.0, "max_retries": 2}
+    return anthropic.Anthropic(http_client=hc, **kw) if hc else anthropic.Anthropic(**kw)
 
 
 class Brain:
@@ -90,7 +104,17 @@ class Brain:
         if resp.stop_reason == "refusal":
             raise RuntimeError("model refused the request")
         text = next((b.text for b in resp.content if b.type == "text"), "")
-        return json.loads(text)
+        if resp.stop_reason == "max_tokens":
+            # The answer was cut off mid-JSON. json.loads then raises "Expecting value", which
+            # reads like a bug in the parser instead of "give the model more room".
+            raise RuntimeError("the model ran out of output budget before finishing its answer "
+                               "(raise max_tokens or lower the effort level)")
+        if not text.strip():
+            raise RuntimeError(f"the model returned no text (stop_reason={resp.stop_reason})")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"the model's answer was not valid JSON: {exc}") from exc
 
     # ------------------------------------------------------------ decisions
     def decide(self, symbol: str, snapshot: dict[str, Any], regime: str, signals: list[dict[str, Any]],
@@ -107,8 +131,12 @@ class Brain:
         user = (f"SKILLS:\n{skill_text}\n\n"
                 + ("RELEVANT NOTES FROM THE LIBRARY:\n" + "\n---\n".join(knowledge) + "\n\n" if knowledge else "")
                 + f"MARKET:\n{json.dumps(payload, ensure_ascii=False)}")
+        # max_tokens is shared with thinking. At effort=max the thinking alone can spend a 2000
+        # budget and the JSON is then truncated to nothing, which used to surface as a JSON error
+        # on every single decision. Give the reasoning room and cap the wait: a decision that
+        # takes two minutes is a decision taken at a price that has moved on.
         resp = self._create(
-            model=self.settings.model, max_tokens=2000,
+            model=self.settings.model, max_tokens=8000, timeout=90.0,
             system=[{"type": "text", "text": DECISION_SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_config={"effort": self.settings.effort, "format": {"type": "json_schema", "schema": DECISION_SCHEMA}},
@@ -129,7 +157,7 @@ class Brain:
                       "Extract every actionable trading rule in this text - entries, exits, risk, regime, psychology.\n"
                       "Skip generic advice with no concrete condition. Keep the author's thresholds.\n\n" + chunk)
             resp = self._create(
-                model=self.settings.model, max_tokens=8000,
+                model=self.settings.model, max_tokens=16000, timeout=600.0,
                 system="You extract trading rules from books and articles for a rule-following trading bot.",
                 messages=[{"role": "user", "content": prompt}],
                 output_config={"effort": self.settings.effort, "format": {"type": "json_schema", "schema": SKILLS_SCHEMA}},

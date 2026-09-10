@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import sys
 import time
 from typing import Any, Callable
 
 from .base import Broker, Fill
-from ..config import Settings
+from ..config import Settings, data_dir
 
 SYSTEM = """You are operating a trading website or desktop app on the user's own Windows computer to place ONE order.
 You control the mouse and keyboard through the computer tools. Rules:
@@ -171,8 +172,37 @@ class ComputerBroker(Broker):
         self.confirm = confirm
         self.on_step = on_step or (lambda s: None)
         self.screen = Screen(settings.computer.max_screenshot_width)
+        # Persisted, not in-memory. Held only in memory, a restart forgot every open position
+        # and forgot how much cash had been spent, so the next close credited money that had
+        # never been debited and the equity curve drifted further from reality on every run.
+        self._state_file = data_dir() / "computer_state.json"
         self._cash = cash_balance or settings.risk.capital_limit
         self._positions: dict[str, dict] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            st = json.loads(self._state_file.read_text(encoding="utf-8"))
+            self._cash = float(st["cash"])
+            self._positions = dict(st.get("positions") or {})
+        except Exception:
+            pass          # first run, or a file we cannot read: start from the configured cash
+
+    def _save(self) -> None:
+        try:
+            self._state_file.write_text(
+                json.dumps({"cash": self._cash, "positions": self._positions, "ts": time.time()}),
+                encoding="utf-8")
+        except Exception:
+            pass
+
+    def positions(self) -> dict[str, dict]:
+        return dict(self._positions)
+
+    def reset(self, cash: float) -> None:
+        self._cash = float(cash)
+        self._positions = {}
+        self._save()
 
     # The site is the source of truth for balances but we cannot read it programmatically,
     # so we track what we sent and let the user correct the figure in settings.
@@ -185,19 +215,25 @@ class ComputerBroker(Broker):
             eq += p["qty"] * prices.get(sym, p["price"])
         return eq
 
-    def market_order(self, symbol: str, side: str, qty: float, price_hint: float) -> Fill:
+    def market_order(self, symbol: str, side: str, qty: float, price_hint: float,
+                     close: bool = False) -> Fill:
+        if close and symbol not in self._positions:
+            # Driving the screen with a SELL when nothing is held does not flatten anything -
+            # on a spot exchange it fails, and on a margin one it opens a short nobody asked for.
+            raise RuntimeError(f"computer: no open {symbol} position to close")
         if not sys.platform.startswith("win") and not sys.platform.startswith("darwin") and not sys.platform.startswith("linux"):
             raise RuntimeError("computer executor needs a desktop session")
         result = self._drive(symbol, side, qty, price_hint)
         if result["status"] != "filled":
             raise RuntimeError(f"computer executor: {result['note']}")
         price = float(result["price"] or price_hint)
-        if side == "buy":
-            self._cash -= qty * price
-            self._positions[symbol] = {"qty": qty, "price": price}
-        else:
+        if close or symbol in self._positions:
             self._cash += qty * price
             self._positions.pop(symbol, None)
+        else:
+            self._cash -= qty * price
+            self._positions[symbol] = {"qty": qty, "price": price}
+        self._save()
         return Fill(symbol, side, qty, price, 0.0, order_id="screen")
 
     # ------------------------------------------------------------ the loop

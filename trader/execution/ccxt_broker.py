@@ -43,7 +43,8 @@ class CcxtBroker(Broker):
             step = 10 ** (-int(step))
         return min_qty, step
 
-    def market_order(self, symbol: str, side: str, qty: float, price_hint: float) -> Fill:
+    def market_order(self, symbol: str, side: str, qty: float, price_hint: float,
+                     close: bool = False) -> Fill:
         amount = float(self.ex.amount_to_precision(symbol, qty))
         order = self.ex.create_order(symbol, "market", side, amount)
         # Some exchanges return the fill lazily; fetch it once to get the average price.

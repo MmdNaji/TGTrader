@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 
+import pytest
 import numpy as np
 import pandas as pd
 
@@ -217,3 +219,293 @@ def test_engine_one_decision_per_bar():
     eng._consider_entry("X/Y", quiet, float(quiet["close"].iloc[-1]), [])  # same bar again -> skipped
     after = len(db.recent_decisions(999))
     assert after - before <= 1
+
+
+# --------------------------------------------------------------------------- money-path fixes
+def _engine(name: str, symbols=("X/Y",), balance=1000.0):
+    s = Settings(); s.mode = "paper"; s.symbols = list(symbols); s.use_llm_for_decisions = False
+    s.risk.capital_limit = balance; s.paper_start_balance = balance
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / name)
+    pb = PaperBroker(balance); pb.reset(balance)
+    eng = Engine(s, db, broker=pb)
+    eng.market = FakeMarket(synth(900, seed=5))
+    return s, db, pb, eng
+
+
+def test_paper_broker_never_opens_a_position_on_a_close():
+    pb = PaperBroker(1000); pb.reset(1000)
+    try:
+        pb.market_order("X/Y", "sell", 1.0, 100.0, close=True)
+        assert False, "closing a position the broker does not hold must raise"
+    except RuntimeError as exc:
+        assert "no open" in str(exc)
+    assert pb.positions() == {} and pb.cash() == 1000     # and it must not have moved any money
+
+
+def test_close_charges_both_fees_and_measures_r_from_the_original_stop():
+    s, db, pb, eng = _engine("t_fees.db")
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    tid = db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 95.0, 110.0, "t", "r",
+                        entry_fee=fill.fee)
+    # the stop has since been trailed up to break-even; R must still be measured from 95
+    db.update_stop(tid, 100.0)
+    pos = dict(db.open_trades("paper")[0])
+    assert eng.close_position(pos, 110.0, "target")
+    row = dict(db.closed_trades("paper")[0])
+    exit_fill_price = 110.0 * (1 - pb.slippage)
+    gross = (exit_fill_price - fill.price) * fill.qty
+    exit_fee = fill.qty * exit_fill_price * pb.fee_rate
+    assert abs(row["pnl"] - (gross - exit_fee - fill.fee)) < 1e-9
+    assert row["pnl"] < gross                                   # fees really were charged
+    # R from the ORIGINAL stop (~5 wide), not from the trailed one (0 wide -> infinite R)
+    assert 1.0 < row["r_multiple"] < 3.0
+
+
+def test_a_second_close_cannot_rewrite_the_pnl():
+    s, db, pb, eng = _engine("t_double.db")
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 95.0, 110.0, "t", "r", entry_fee=fill.fee)
+    pos = dict(db.open_trades("paper")[0])
+    assert eng.close_position(pos, 110.0, "target")
+    first = dict(db.closed_trades("paper")[0])["pnl"]
+    assert eng.close_position(pos, 50.0, "target") is False    # the row is no longer open
+    assert dict(db.closed_trades("paper")[0])["pnl"] == first
+    assert len(db.closed_trades("paper")) == 1
+
+
+def test_stop_is_tested_against_the_live_price_not_the_whole_bar():
+    s, db, pb, eng = _engine("t_bar.db")
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 90.0, 130.0, "t", "r", entry_fee=fill.fee)
+    pos = dict(db.open_trades("paper")[0])
+    df = enrich(synth(400, seed=11))
+    # a bar whose LOW is far below the stop, while the live price is comfortably above it
+    df = df.copy()
+    df.iloc[-1, df.columns.get_loc("low")] = 50.0
+    df.iloc[-1, df.columns.get_loc("high")] = 200.0
+    closed = eng._manage(pos, df, 100.0)
+    assert closed is False and db.open_trades("paper"), "the in-progress bar must not trigger the stop"
+    # the live price crossing it does close the trade
+    assert eng._manage(dict(db.open_trades("paper")[0]), df, 89.0) is True
+
+
+def test_a_position_stays_managed_after_its_symbol_leaves_the_settings():
+    s, db, pb, eng = _engine("t_orphan.db", symbols=("A/B",))
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 99.9, 100.1, "t", "r", entry_fee=fill.fee)
+    assert "X/Y" not in s.symbols
+    eng.loop_once()
+    # the X/Y trade must have been managed and closed; A/B is free to open one of its own
+    assert not [r for r in db.open_trades("paper") if r["symbol"] == "X/Y"], \
+        "an open position must be managed even off the symbol list"
+    assert dict(db.closed_trades("paper")[0])["symbol"] == "X/Y"
+
+
+def test_one_broken_symbol_does_not_abandon_the_others():
+    s, db, pb, eng = _engine("t_broken.db", symbols=("BAD/X", "X/Y"))
+    good = FakeMarket(synth(900, seed=5))
+
+    class Flaky:
+        is_kcex = False
+        def candles(self, symbol, timeframe=None, limit=400, max_age=20.0):
+            if symbol == "BAD/X":
+                raise RuntimeError("exchange unreachable")
+            return good.candles(symbol, timeframe, limit, max_age)
+        def price(self, symbol):
+            return good.price(symbol)
+    eng.market = Flaky()
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 99.9, 100.1, "t", "r", entry_fee=fill.fee)
+    eng.loop_once()                       # BAD/X raises first; X/Y must still be managed
+    assert not [r for r in db.open_trades("paper") if r["symbol"] == "X/Y"]
+    assert eng.status.get("error") == ""  # and the pass itself did not fail
+
+
+def test_no_re_entry_on_the_same_bar_and_a_cooldown_after_a_stop():
+    s, db, pb, eng = _engine("t_cool.db")
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 99.0, 200.0, "t", "r", entry_fee=fill.fee)
+    pos = dict(db.open_trades("paper")[0])
+    assert eng.close_position(pos, 98.0, "stop")
+    assert eng._cooldown["X/Y"] > time.time(), "a stop-out must start a cooldown"
+    df = enrich(synth(400, seed=13))
+    before = len(db.recent_decisions(9999))
+    eng._consider_entry("X/Y", df, float(df["close"].iloc[-1]), [])
+    assert len(db.recent_decisions(9999)) == before, "no evaluation at all while cooling down"
+
+
+def test_a_model_failure_holds_instead_of_falling_back_to_the_raw_rules():
+    s, db, pb, eng = _engine("t_brain.db")
+    s.use_llm_for_decisions = True
+
+    class DeadBrain:
+        def decide(self, *a, **k):
+            raise RuntimeError("api unreachable")
+    eng.brain = DeadBrain()
+    df = enrich(synth(900, seed=5))
+    for i in range(300, len(df)):
+        eng._consider_entry("X/Y", df.iloc[: i + 1], float(df["close"].iloc[i]), [])
+    assert not db.open_trades("paper"), "a dead model must not silently trade a different system"
+    assert any("model unavailable" in (d["reason"] or "") for d in db.recent_decisions(9999))
+
+
+def test_total_open_risk_never_exceeds_the_daily_loss_budget():
+    rm = RiskManager(RiskSettings(capital_limit=1000, risk_per_trade=0.01, max_daily_loss=0.03),
+                     None, "paper")
+    budget = 0.03 * 1000
+    opens = []
+    for _ in range(10):
+        sz = rm.size("long", 100.0, 2.0, 1000.0, open_positions=opens)
+        if sz is None:
+            break
+        opens.append({"entry_price": 100.0, "init_stop": 98.0, "qty": sz.qty})
+        assert rm.open_risk(opens) <= budget + 1e-9
+    assert rm.open_risk(opens) <= budget + 1e-9 and len(opens) >= 3
+    assert rm.size("long", 100.0, 2.0, 1000.0, open_positions=opens) is None
+
+
+def test_a_target_that_does_not_clear_the_fees_is_refused():
+    """The real reason a fast preset bleeds: it is right about direction and still loses,
+    because the move it is aiming at is smaller than the fees on the way in and out."""
+    s, db, pb, eng = _engine("t_feefilter.db")
+    s.risk.reward_risk = 1.0                     # aiming at 1R, which fees eat at this stop width
+    s.use_llm_for_decisions = True
+
+    class TinyStopBrain:
+        def decide(self, *a, **k):
+            return {"action": "buy", "confidence": 0.99, "reason": "scalp it",
+                    "stop_distance_atr": 0.001, "skills_used": []}
+    eng.brain = TinyStopBrain()
+    full = enrich(synth(900, seed=5))
+    # the model is only consulted when there is something to look at, so use a trending window
+    df = next(w for w in (full.iloc[: i + 1] for i in range(300, len(full)))
+              if detect_regime(w) in ("trend_up", "trend_down"))
+    price = float(df["close"].iloc[-1])
+    eng._consider_entry("X/Y", df, price, [])
+    assert not db.open_trades("paper")
+    assert any("round-trip fee" in (d["reason"] or "") for d in db.recent_decisions(9999))
+    # the same setup with a target that does clear the fees is allowed through
+    s.risk.reward_risk = 3.0
+    eng._last_bar.clear(); eng._entered_bar.clear()
+    eng._consider_entry("X/Y", df, price, [])
+    assert db.open_trades("paper"), "a target that clears the fees must not be blocked"
+
+
+def test_settings_round_trip_keeps_the_new_fields():
+    s = Settings()
+    assert s.align_with_leader is False, \
+        "measured: the leader filter cost ~1.2% of return on 1d and changed nothing on 4h"
+    s.align_with_leader = True; s.position_pct = 37.5
+    s2 = Settings.from_dict(s.to_dict())
+    assert s2.align_with_leader is True and s2.position_pct == 37.5
+    # a settings file written by an older build has neither field and must still load
+    raw = s.to_dict(); raw.pop("align_with_leader"); raw.pop("position_pct")
+    s3 = Settings.from_dict(raw)
+    assert s3.align_with_leader is False and s3.position_pct == 0.0
+    bad = Settings(); bad.position_pct = 400
+    assert any("position_pct" in p for p in bad.validate())
+
+
+def test_the_leader_filter_refuses_a_long_while_bitcoin_is_breaking_down():
+    s, db, pb, eng = _engine("t_lead.db", symbols=("ETH/USDT",))
+    s.market = "crypto"; s.align_with_leader = True; s.use_llm_for_decisions = True
+
+    class BuyBrain:
+        def decide(self, *a, **k):
+            return {"action": "buy", "confidence": 0.99, "reason": "up", "stop_distance_atr": 2.0,
+                    "skills_used": []}
+    eng.brain = BuyBrain()
+    full = enrich(synth(900, seed=5))
+    df = next(w for w in (full.iloc[: i + 1] for i in range(300, len(full)))
+              if detect_regime(w) in ("trend_up", "trend_down"))
+    price = float(df["close"].iloc[-1])
+    eng._leader_regime = "trend_down"
+    eng._consider_entry("ETH/USDT", df, price, [])
+    assert not db.open_trades("paper")
+    assert any("against the market leader" in (d["reason"] or "") for d in db.recent_decisions(9999))
+    # unknown leader must mean "do not filter", never "refuse everything"
+    eng._leader_regime = None
+    eng._last_bar.clear(); eng._entered_bar.clear()
+    eng._consider_entry("ETH/USDT", df, price, [])
+    assert db.open_trades("paper"), "a data hiccup on BTC must not stop every other symbol trading"
+
+
+class FakeMt5:
+    """Enough of the MetaTrader5 module to drive Mt5Broker without Windows."""
+    ORDER_TYPE_BUY, ORDER_TYPE_SELL = 0, 1
+    TRADE_ACTION_DEAL, ORDER_TIME_GTC, ORDER_FILLING_IOC = 1, 0, 1
+    TRADE_RETCODE_DONE = 10009
+
+    class _Obj:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
+    def __init__(self, positions=()):
+        self.sent = []
+        self._positions = list(positions)
+
+    def initialize(self, **kw): return True
+    def last_error(self): return (0, "")
+    def symbol_select(self, sym, on): return True
+    def symbol_info(self, sym):
+        return self._Obj(trade_contract_size=100000.0, volume_min=0.01, volume_step=0.01, volume_max=50.0)
+    def symbol_info_tick(self, sym): return self._Obj(ask=1.1001, bid=1.0999)
+    def account_info(self): return self._Obj(equity=10000.0, margin_free=9000.0)
+    def positions_get(self, symbol=None): return tuple(self._positions)
+    def history_deals_get(self, ticket=None): return (self._Obj(commission=-0.7, swap=0.0),)
+    def order_send(self, req):
+        self.sent.append(req)
+        return self._Obj(retcode=self.TRADE_RETCODE_DONE, volume=req["volume"],
+                         price=req["price"], order=1, deal=2)
+
+
+def _mt5_broker(fake):
+    import sys as _sys
+    from trader.execution.mt5_broker import Mt5Broker
+    _sys.modules["MetaTrader5"] = fake
+    return Mt5Broker(Settings())
+
+
+def test_mt5_sizes_in_lots_while_the_engine_sizes_in_units():
+    fake = FakeMt5()
+    b = _mt5_broker(fake)
+    # limits must come back in UNITS, or the risk manager compares 0.01 against 20000
+    assert b.limits("EUR/USD") == (0.01 * 100000, 0.01 * 100000)
+    fill = b.market_order("EUR/USD", "buy", 20000.0, 1.10)     # 20,000 units = 0.2 lots
+    assert fake.sent[-1]["volume"] == pytest.approx(0.2), fake.sent[-1]["volume"]
+    assert fill.qty == pytest.approx(20000.0), "the fill must be reported back in units"
+    # rounding is always DOWN, so the step can never make an order bigger than intended
+    b.market_order("EUR/USD", "buy", 25900.0, 1.10)
+    assert fake.sent[-1]["volume"] == pytest.approx(0.25)
+    # below the broker's minimum is refused, not silently rounded up
+    with pytest.raises(RuntimeError, match="minimum"):
+        b.market_order("EUR/USD", "buy", 500.0, 1.10)
+
+
+def test_mt5_closes_by_ticket_not_by_an_opposite_deal():
+    pos = FakeMt5._Obj(magic=777001, ticket=555, volume=0.2)
+    fake = FakeMt5(positions=[pos])
+    b = _mt5_broker(fake)
+    b.market_order("EUR/USD", "sell", 20000.0, 1.10, close=True)
+    req = fake.sent[-1]
+    assert req.get("position") == 555, "a hedging account needs the ticket, or this opens a short"
+    assert req["volume"] == pytest.approx(0.2)
+    # nothing open -> refuse, never open the other side
+    empty = FakeMt5()
+    b2 = _mt5_broker(empty)
+    with pytest.raises(RuntimeError, match="no open"):
+        b2.market_order("EUR/USD", "sell", 20000.0, 1.10, close=True)
+    assert not empty.sent
+
+
+def test_the_screen_broker_survives_a_restart():
+    from trader.execution.computer import ComputerBroker
+    s = Settings(); s.risk.capital_limit = 500.0
+    b = ComputerBroker(s, client=None, confirm=lambda _: True)
+    b.reset(500.0)
+    b._cash -= 100.0
+    b._positions["X/Y"] = {"qty": 2.0, "price": 50.0}
+    b._save()
+    again = ComputerBroker(s, client=None, confirm=lambda _: True)
+    assert again.cash() == 400.0 and again.positions() == {"X/Y": {"qty": 2.0, "price": 50.0}}, \
+        "a restart used to forget the spend and then credit money that was never debited"
+    again.reset(500.0)

@@ -46,10 +46,25 @@ class CandleChart(QWidget):
 
     def set_data(self, df: pd.DataFrame, symbol: str, timeframe: str,
                  position: dict[str, Any] | None = None, trades: list[dict[str, Any]] | None = None) -> None:
+        # A refresh must not throw the view away. The chart reloads on a timer, so resetting the
+        # pan here meant that looking at anything but the newest bars was impossible: every
+        # minute the chart jumped back under the cursor.
+        same = (self.df is not None and symbol == self.symbol and timeframe == self.timeframe)
+        prev_len = len(self.df) if self.df is not None else 0
+        prev_offset = self.offset
         self.df, self.symbol, self.timeframe = df, symbol, timeframe
         self.position, self.trades = position, trades or []
-        self.visible = min(self.visible, len(df)) if len(df) else self.visible
-        self.offset = 0
+        n = len(df)
+        if not same or not n:
+            self.visible = min(120, n) if n else self.visible
+            self.offset = 0
+        else:
+            self.visible = max(20, min(self.visible, n))
+            if prev_offset <= 0:
+                self.offset = 0          # pinned to the newest bar: stay pinned
+            else:
+                grew = max(0, n - prev_len)
+                self.offset = max(0, min(n - self.visible, prev_offset + grew))
         self.update()
 
     # ------------------------------------------------------------ interaction

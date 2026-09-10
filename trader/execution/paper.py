@@ -52,10 +52,16 @@ class PaperBroker(Broker):
     def supports_short(self) -> bool:
         return True
 
-    def market_order(self, symbol: str, side: str, qty: float, price_hint: float) -> Fill:
+    def market_order(self, symbol: str, side: str, qty: float, price_hint: float,
+                     close: bool = False) -> Fill:
         px = price_hint * (1 + self.slippage) if side == "buy" else price_hint * (1 - self.slippage)
         fee = qty * px * self.fee_rate
         pos = self._positions.get(symbol)
+        if close and pos is None:
+            # The journal thinks a position is open but this account does not hold it (reset,
+            # restored state file, or a double close). Opening the opposite side here would
+            # invent an unmanaged position and destroy cash.
+            raise RuntimeError(f"paper: no open {symbol} position to close")
         if pos is None:
             # opening
             if side == "buy":

@@ -4,6 +4,15 @@ Every ``loop_seconds`` for every symbol:
   candles -> indicators -> regime -> rule signals -> (optional) Claude decision using skills
   -> risk gate and sizing -> broker -> journal.
 Open positions are managed every loop: stop, target, trailing stop.
+
+Rules this file must keep, because each one was a real bug:
+  * one symbol failing must never stop the other symbols being managed;
+  * a position is managed until it is closed, even if its symbol is removed from the list;
+  * stops and targets are tested against the LIVE price, never against the whole in-progress
+    bar (that bar contains price action from before the entry and before the stop moved);
+  * fees are part of the P&L, on entry as well as on exit;
+  * R is measured from the ORIGINAL stop, not from the trailed one;
+  * open and close are serialised, so the GUI and the loop cannot close the same trade twice.
 """
 from __future__ import annotations
 
@@ -23,6 +32,13 @@ from .risk.manager import RiskManager
 from .strategy.builtin import evaluate_all, DEFAULT_STRATEGIES, Scalp
 from .strategy.regime import detect_regime
 
+# Seconds a symbol is left alone after it stopped us out. Re-entering the same losing idea
+# inside the same bar is the single most expensive habit a fast loop has.
+COOLDOWN_AFTER_STOP = {"1m": 180, "5m": 900, "15m": 1800, "1h": 3600, "4h": 7200, "1d": 14400}
+
+# The market leader every other crypto follows. Its trend is a filter, not a detail.
+LEADER_SYMBOLS = ("BTC/USDT", "BTC/USD", "BTC/USDT:USDT", "BTC/BUSD")
+
 
 class Engine:
     def __init__(self, settings: Settings, db: Database, broker: Broker | None = None,
@@ -37,8 +53,16 @@ class Engine:
         self.on_event = on_event or (lambda s: None)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Serialises every open and close. The GUI closes trades on the Qt thread while this
+        # loop closes them on its own; without it both can pass the "still open" check.
+        self._trade_lock = threading.RLock()
         self.last_prices: dict[str, float] = {}
-        self._last_bar: dict[str, float] = {}   # last candle a symbol was evaluated on
+        self._last_bar: dict[str, float] = {}      # last candle a symbol was evaluated on
+        self._entered_bar: dict[str, float] = {}   # last candle a symbol was entered on
+        self._cooldown: dict[str, float] = {}      # symbol -> "do not re-enter before" timestamp
+        self._order_err: dict[str, str] = {}       # symbol -> last order error (de-duplicates the log)
+        self._reconciled = False
+        self._leader_regime: str | None = None   # trend of BTC on this pass
         self.status: dict[str, Any] = {"running": False, "last_loop": 0.0, "error": ""}
         load_seed_skills(db)
         self.strategies = ([Scalp()] + list(DEFAULT_STRATEGIES)
@@ -58,6 +82,12 @@ class Engine:
     def log(self, msg: str, level: str = "info") -> None:
         self.db.log(msg, level)
         self.on_event(f"[{level}] {msg}")
+
+    def fee_rate(self) -> float:
+        """Taker fee per side as a fraction. The paper broker knows its own; for a live
+        exchange assume a normal taker fee rather than zero - assuming zero is what makes a
+        scalping preset look profitable on paper and bleed in reality."""
+        return float(getattr(self.broker, "fee_rate", 0.001) or 0.001)
 
     # ------------------------------------------------------------ thread control
     def start(self) -> None:
@@ -88,38 +118,111 @@ class Engine:
         self.status["running"] = False
         self.log("engine stopped")
 
+    # ------------------------------------------------------------ reconciliation
+    def _reconcile(self) -> None:
+        """A journal row whose position the broker does not hold can never be closed, so it
+        would be "managed" forever and would block its symbol from ever trading again."""
+        held = getattr(self.broker, "positions", None)
+        if not callable(held):
+            return
+        try:
+            have = set(held().keys())
+        except Exception:
+            return
+        for row in [dict(r) for r in self.db.open_trades(self.mode)]:
+            if row["symbol"] in have:
+                continue
+            price = float(row["entry_price"])
+            self.db.close_trade(row["id"], price, 0.0, None)
+            self.log(f"reconciled {row['symbol']}: the broker holds no such position, "
+                     f"trade #{row['id']} marked closed at entry", "warn")
+
     # ------------------------------------------------------------ one pass
     def loop_once(self) -> None:
+        if not self._reconciled:
+            self._reconcile()
+            self._reconciled = True
         open_positions = [dict(r) for r in self.db.open_trades(self.mode)]
-        for symbol in self.settings.symbols:
+        # An open position is managed whatever the symbol list says now. Removing a symbol from
+        # settings must not abandon a live trade with a stop nobody is watching.
+        symbols = list(self.settings.symbols)
+        for p in open_positions:
+            if p["symbol"] not in symbols:
+                symbols.append(p["symbol"])
+        self._leader_regime = self._read_leader(symbols)
+        for symbol in symbols:
             if self._stop.is_set():
                 return
-            df = enrich(self.market.candles(symbol, limit=400))
-            price = float(df["close"].iloc[-1])
-            self.last_prices[symbol] = price
-            pos = next((p for p in open_positions if p["symbol"] == symbol), None)
-            if pos:
-                self._manage(pos, df, price)
+            try:
+                df = enrich(self.market.candles(symbol, limit=400))
+                price = float(df["close"].iloc[-1])
+                self.last_prices[symbol] = price
+                pos = next((p for p in open_positions if p["symbol"] == symbol), None)
+                if pos:
+                    if self._manage(pos, df, price):
+                        open_positions = [p for p in open_positions if p["id"] != pos["id"]]
+                    continue
+                self._consider_entry(symbol, df, price, open_positions)
+            except Exception as exc:
+                # One bad symbol must not leave every other position unmanaged for the whole pass.
+                msg = f"{symbol}: {exc}"
+                if self._order_err.get(f"loop:{symbol}") != msg:
+                    self.log(f"symbol pass failed - {msg}", "warn")
+                    self._order_err[f"loop:{symbol}"] = msg
                 continue
-            self._consider_entry(symbol, df, price, open_positions)
+            self._order_err.pop(f"loop:{symbol}", None)
+        if self.last_prices:
+            try:
+                self.db.record_equity(self.mode, self.broker.equity(self.last_prices))
+            except Exception as exc:
+                self.log(f"equity read failed: {exc}", "warn")
+
+    def _leader(self, symbols: list[str]) -> str | None:
+        if self.settings.market != "crypto" or not self.settings.align_with_leader:
+            return None
+        for s in symbols:
+            if s.upper() in LEADER_SYMBOLS:
+                return s
+        return LEADER_SYMBOLS[0]
+
+    def _read_leader(self, symbols: list[str]) -> str | None:
+        """Bitcoin's trend on this pass, or None when the filter is off or unavailable.
+
+        Unavailable must mean "do not filter", never "refuse everything": a data hiccup on one
+        symbol is not a reason to stop trading the other nine."""
+        lead = self._leader(symbols)
+        if not lead:
+            return None
         try:
-            self.db.record_equity(self.mode, self.broker.equity(self.last_prices))
-        except Exception as exc:
-            self.log(f"equity read failed: {exc}", "warn")
+            return detect_regime(enrich(self.market.candles(lead, limit=400)))
+        except Exception:
+            return None
 
     # ------------------------------------------------------------ entries
     def _consider_entry(self, symbol: str, df, price: float, open_positions: list[dict]) -> None:
-        regime = detect_regime(df)
-        signals = evaluate_all(symbol, df, regime, self.strategies)
+        now = time.time()
+        if now < self._cooldown.get(symbol, 0.0):
+            return
+        agg = self.settings.aggressiveness
+        # Outside scalping, evaluate on the CLOSED bar. The last row of the frame is the bar
+        # still forming: a signal read off it can un-happen before the bar closes, which is a
+        # signal that backtests beautifully and does not exist in real time.
+        eval_df = df if agg == "scalp" or len(df) < 80 else df.iloc[:-1]
+        regime = detect_regime(eval_df)
+        signals = evaluate_all(symbol, eval_df, regime, self.strategies)
         if not self.broker.supports_short():
             signals = [s for s in signals if s.side == "long"]
+        bar_ts = float(eval_df.index[-1].timestamp())
+        # Never take the same bar twice: after a quick stop-out the same closed-bar signal is
+        # still sitting there and would be re-entered immediately.
+        if self._entered_bar.get(symbol) == bar_ts:
+            return
         # One evaluation per candle unless a fresh rule signal appears: a 1h/1d snapshot barely
         # changes within the same bar, so re-asking the model every loop only burns API cost.
-        bar_ts = float(df.index[-1].timestamp())
         if not signals and self._last_bar.get(symbol) == bar_ts:
             return
         self._last_bar[symbol] = bar_ts
-        snap = snapshot(df)
+        snap = snapshot(eval_df)
         equity = self.broker.equity(self.last_prices)
 
         refuse = self.risk.check(symbol, open_positions, equity)
@@ -128,7 +231,6 @@ class Engine:
                 self.db.add_decision(symbol, "hold", None, "risk", refuse, {"regime": regime})
             return
 
-        agg = self.settings.aggressiveness
         min_conf = {"high": 0.4, "scalp": 0.0}.get(agg, 0.55)
         # In scalp mode we act on the rule signals directly: the model is deliberately patient
         # ("hold is usually right"), which is the opposite of what this preset is for.
@@ -145,8 +247,13 @@ class Engine:
                 )
                 source = "llm"
             except Exception as exc:
+                # Fail CLOSED. Falling through to the raw rules would silently trade a different,
+                # untested system every time the API is unreachable - and the user asked for the
+                # model's judgement precisely because the rules alone are not the plan.
                 self.log(f"LLM decision failed for {symbol}: {exc}", "warn")
-                decision = None
+                self.db.add_decision(symbol, "hold", None, "llm", f"model unavailable: {exc}",
+                                     {"regime": regime})
+                return
 
         if decision is None:
             if not signals:
@@ -154,6 +261,7 @@ class Engine:
             best = max(signals, key=lambda s: s.strength)
             decision = {"action": "buy" if best.side == "long" else "sell", "confidence": best.strength,
                         "reason": best.reason, "stop_distance_atr": self.settings.risk.atr_stop_mult,
+                        "stop_distance": best.stop_distance,
                         "skills_used": [], "strategy": best.strategy}
 
         action = decision["action"]
@@ -162,14 +270,42 @@ class Engine:
             self.db.add_decision(symbol, "hold", decision.get("confidence"), source, decision.get("reason", ""), payload)
             return
         side = "long" if action == "buy" else "short"
+        # Almost every coin is a leveraged bet on Bitcoin, and in a sell-off the correlation
+        # goes to nearly one. Ten longs on ten alts while BTC breaks down is one very large
+        # long on BTC with ten sets of fees.
+        lead = self._leader(list(self.settings.symbols))
+        if (lead and symbol.upper() not in LEADER_SYMBOLS and self._leader_regime
+                and ((side == "long" and self._leader_regime == "trend_down")
+                     or (side == "short" and self._leader_regime == "trend_up"))):
+            self.db.add_decision(symbol, "hold", decision["confidence"], "risk",
+                                 f"against the market leader: {lead} is in {self._leader_regime}", payload)
+            return
         if side == "short" and not self.broker.supports_short():
             self.db.add_decision(symbol, "hold", decision["confidence"], source, "short not supported by broker", payload)
             return
 
         atr_v = snap.get("atr14") or 0.0
-        stop_distance = float(decision.get("stop_distance_atr", 2.0)) * atr_v
+        # The strategy's own stop distance is the one its entry was designed around; the ATR
+        # multiple is the fallback for the model path and for rules that do not set one.
+        stop_distance = float(decision.get("stop_distance") or 0.0)
+        if stop_distance <= 0:
+            stop_distance = float(decision.get("stop_distance_atr", 2.0)) * atr_v
+        # A stop closer than the round trip in fees is not a stop, it is a donation.
+        min_stop = price * self.fee_rate() * 4.0
+        stop_distance = max(stop_distance, min_stop)
         if stop_distance <= 0:
             return
+
+        # Fee-aware filter. Reward has to clear the round trip by a real margin, or the strategy
+        # is paying the exchange to take its edge. This is the actual reason a fast preset bleeds.
+        round_trip = 2.0 * self.fee_rate() * price
+        gross_target = self.settings.risk.reward_risk * stop_distance
+        if gross_target <= 3.0 * round_trip:
+            self.db.add_decision(symbol, "hold", decision.get("confidence"), "risk",
+                                 f"target {gross_target:.6g} does not clear the round-trip fee "
+                                 f"{round_trip:.6g} by 3x", payload)
+            return
+
         min_qty, step = self.broker.limits(symbol)
         if getattr(self.market, "is_kcex", False) and not (min_qty or step):
             try:
@@ -181,44 +317,58 @@ class Engine:
         except Exception:
             cash = equity
         sizing = self.risk.size(side, price, stop_distance, equity, min_qty, step, cash=cash,
-                                position_pct=getattr(self.settings, "position_pct", 0.0))
+                                position_pct=getattr(self.settings, "position_pct", 0.0),
+                                open_positions=open_positions)
         if sizing is None:
             self.db.add_decision(symbol, "hold", decision["confidence"], "risk",
-                                 "not enough free cash for a new position at the capital limit", payload)
+                                 "not enough free cash or open-risk budget for a new position", payload)
             return
         strategy = decision.get("strategy") or ("llm" if source == "llm" else "rules")
         self.db.add_decision(symbol, action, decision["confidence"], source, decision.get("reason", ""), payload)
-        try:
-            fill = self.broker.market_order(symbol, "buy" if side == "long" else "sell", sizing.qty, price)
-        except Exception as exc:
-            # de-duplicate: an order that cannot fill (e.g. no free cash) would otherwise log every loop
-            msg = f"order failed on {symbol}: {exc}"
-            if msg != getattr(self, "_last_order_err", None):
-                self.log(msg, "warn"); self._last_order_err = msg
-            return
-        self._last_order_err = None
-        # stops are recomputed from the actual fill price
-        stop = fill.price - stop_distance if side == "long" else fill.price + stop_distance
-        tp = fill.price + self.settings.risk.reward_risk * stop_distance if side == "long" \
-            else fill.price - self.settings.risk.reward_risk * stop_distance
-        tid = self.db.open_trade(self.mode, symbol, side, fill.qty, fill.price, stop, tp, strategy, decision.get("reason", ""))
-        open_positions.append({"id": tid, "symbol": symbol, "side": side})
-        self.log(f"OPEN {side} {symbol} qty={fill.qty:g} @ {fill.price:g} stop={stop:g} tp={tp:g} ({strategy})")
+        with self._trade_lock:
+            # Re-check under the lock: another thread may have opened this symbol meanwhile.
+            if any(r["symbol"] == symbol for r in self.db.open_trades(self.mode)):
+                return
+            try:
+                fill = self.broker.market_order(symbol, "buy" if side == "long" else "sell", sizing.qty, price)
+            except Exception as exc:
+                # de-duplicate PER SYMBOL: one symbol out of cash used to silence the log for all
+                msg = f"order failed on {symbol}: {exc}"
+                if self._order_err.get(symbol) != msg:
+                    self.log(msg, "warn")
+                    self._order_err[symbol] = msg
+                return
+            self._order_err.pop(symbol, None)
+            # stops are recomputed from the actual fill price
+            stop = fill.price - stop_distance if side == "long" else fill.price + stop_distance
+            tp = fill.price + self.settings.risk.reward_risk * stop_distance if side == "long" \
+                else fill.price - self.settings.risk.reward_risk * stop_distance
+            tid = self.db.open_trade(self.mode, symbol, side, fill.qty, fill.price, stop, tp,
+                                     strategy, decision.get("reason", ""), entry_fee=fill.fee)
+        self._entered_bar[symbol] = bar_ts
+        open_positions.append({"id": tid, "symbol": symbol, "side": side, "qty": fill.qty,
+                               "entry_price": fill.price, "stop_price": stop, "init_stop": stop})
+        self.log(f"OPEN {side} {symbol} qty={fill.qty:g} @ {fill.price:g} stop={stop:g} tp={tp:g} "
+                 f"fee={fill.fee:.6g} ({strategy})")
 
     # ------------------------------------------------------------ position management
-    def _manage(self, pos: dict, df, price: float) -> None:
-        side, entry, stop, tp = pos["side"], float(pos["entry_price"]), float(pos["stop_price"]), float(pos["take_profit"] or 0)
-        bar_h, bar_l = float(df["high"].iloc[-1]), float(df["low"].iloc[-1])
+    def _manage(self, pos: dict, df, price: float) -> bool:
+        """Returns True if the position was closed on this pass."""
+        side, entry = pos["side"], float(pos["entry_price"])
+        stop, tp = float(pos["stop_price"]), float(pos["take_profit"] or 0)
+        # Only the LIVE price may trigger a stop or a target. The in-progress bar's high and low
+        # include price action from before this trade was opened and from before the stop was
+        # last moved, so testing against them closes trades at prices that never existed for us.
         why = None
         if side == "long":
-            if bar_l <= stop or price <= stop:
+            if price <= stop:
                 why = "stop"
-            elif tp and (bar_h >= tp or price >= tp):
+            elif tp and price >= tp:
                 why = "target"
         else:
-            if bar_h >= stop or price >= stop:
+            if price >= stop:
                 why = "stop"
-            elif tp and (bar_l <= tp or price <= tp):
+            elif tp and price <= tp:
                 why = "target"
         if why is None:
             # trend-change exit for trend trades
@@ -226,30 +376,61 @@ class Engine:
             if (side == "long" and regime == "trend_down") or (side == "short" and regime == "trend_up"):
                 why = "regime flipped"
         if why is None:
-            new_stop = self.risk.trail_stop(side, entry, stop, price)
+            init_stop = pos.get("init_stop")
+            new_stop = self.risk.trail_stop(side, entry, stop, price,
+                                            float(init_stop) if init_stop else None)
             if new_stop != stop:
                 self.db.update_stop(pos["id"], new_stop)
                 self.log(f"trail {pos['symbol']} stop {stop:g} -> {new_stop:g}")
-            return
-        self.close_position(pos, price, why)
+            return False
+        return self.close_position(pos, price, why)
 
-    def close_position(self, pos: dict, price: float, why: str) -> None:
+    def close_position(self, pos: dict, price: float, why: str) -> bool:
         side = pos["side"]
-        try:
-            fill = self.broker.market_order(pos["symbol"], "sell" if side == "long" else "buy", float(pos["qty"]), price)
-        except Exception as exc:
-            self.log(f"close failed on {pos['symbol']}: {exc}", "error")
-            return
-        pnl = (fill.price - float(pos["entry_price"])) * fill.qty if side == "long" \
-            else (float(pos["entry_price"]) - fill.price) * fill.qty
-        pnl -= fill.fee
-        r_dist = abs(float(pos["entry_price"]) - float(pos["stop_price"])) if pos.get("stop_price") else 0.0
-        r = pnl / (fill.qty * r_dist) if r_dist else None
-        self.db.close_trade(pos["id"], fill.price, pnl, r)
-        self.db.add_decision(pos["symbol"], "close", None, "risk", why, {"pnl": pnl})
-        self.log(f"CLOSE {side} {pos['symbol']} @ {fill.price:g} pnl={pnl:+.4f} ({why})")
+        with self._trade_lock:
+            # Idempotency starts here: if the row is no longer open, somebody else closed it.
+            row = self.db.one("SELECT status FROM trades WHERE id=?", (pos["id"],))
+            if not row or row["status"] != "open":
+                return False
+            try:
+                fill = self.broker.market_order(pos["symbol"], "sell" if side == "long" else "buy",
+                                                float(pos["qty"]), price, close=True)
+            except Exception as exc:
+                if "no open" in str(exc).lower():
+                    # The broker does not hold it. Leaving the row open means managing a ghost
+                    # forever and blocking the symbol; close it flat and say so.
+                    self.db.close_trade(pos["id"], price, 0.0, None)
+                    self.log(f"{pos['symbol']}: broker holds no position, trade #{pos['id']} "
+                             f"closed flat in the journal", "warn")
+                    return True
+                self.log(f"close failed on {pos['symbol']}: {exc}", "error")
+                return False
+            entry = float(pos["entry_price"])
+            gross = (fill.price - entry) * fill.qty if side == "long" else (entry - fill.price) * fill.qty
+            # BOTH fees. Charging only the exit made every trade look better than it was, and
+            # the daily-loss limit was measured against those inflated numbers.
+            entry_fee = float(pos.get("entry_fee") or 0.0)
+            pnl = gross - fill.fee - entry_fee
+            # R is measured from the ORIGINAL stop. From the trailed stop, a winner that trailed
+            # to break-even reports an infinite R and the statistics become meaningless.
+            init_stop = pos.get("init_stop") or pos.get("stop_price")
+            r_dist = abs(entry - float(init_stop)) if init_stop else 0.0
+            r = pnl / (fill.qty * r_dist) if r_dist and fill.qty else None
+            if not self.db.close_trade(pos["id"], fill.price, pnl, r):
+                return False
+        if why == "stop":
+            self._cooldown[pos["symbol"]] = time.time() + COOLDOWN_AFTER_STOP.get(
+                self.settings.timeframe, 1800)
+        self.db.add_decision(pos["symbol"], "close", None, "risk", why,
+                             {"pnl": pnl, "r": r, "fees": fill.fee + entry_fee})
+        self.log(f"CLOSE {side} {pos['symbol']} @ {fill.price:g} pnl={pnl:+.4f} "
+                 f"fees={fill.fee + entry_fee:.6g} ({why})")
+        return True
 
     def close_all(self, why: str = "manual") -> None:
         for pos in [dict(r) for r in self.db.open_trades(self.mode)]:
-            price = self.last_prices.get(pos["symbol"]) or self.market.price(pos["symbol"])
-            self.close_position(pos, price, why)
+            try:
+                price = self.last_prices.get(pos["symbol"]) or self.market.price(pos["symbol"])
+                self.close_position(pos, price, why)
+            except Exception as exc:
+                self.log(f"close_all failed on {pos['symbol']}: {exc}", "error")

@@ -24,7 +24,10 @@ class Broker:
     def cash(self) -> float:
         raise NotImplementedError
 
-    def market_order(self, symbol: str, side: str, qty: float, price_hint: float) -> Fill:
+    def market_order(self, symbol: str, side: str, qty: float, price_hint: float,
+                     close: bool = False) -> Fill:
+        """close=True means "reduce/flatten an existing position". A broker must never turn a
+        close into a new opposite position - that is how a flat account ends up short."""
         raise NotImplementedError
 
     def limits(self, symbol: str) -> tuple[float, float]:

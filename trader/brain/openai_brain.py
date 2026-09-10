@@ -22,7 +22,9 @@ def _client(settings: Settings):
         raise RuntimeError("OpenAI API key is not set (Settings -> AI)")
     from ..net import openai_http_client
     hc = openai_http_client(settings)
-    return OpenAI(api_key=key, timeout=180.0, http_client=hc) if hc else OpenAI(api_key=key, timeout=180.0)
+    # Called from the trading loop: a long retry ladder here blocks every other symbol's stop.
+    kw = {"api_key": key, "timeout": 120.0, "max_retries": 2}
+    return OpenAI(http_client=hc, **kw) if hc else OpenAI(**kw)
 
 
 class OpenAIBrain:
@@ -34,13 +36,16 @@ class OpenAIBrain:
         self.model = settings.openai_model or "gpt-5"
 
     def _json(self, system: str, user_messages: list[dict[str, str]], schema: dict[str, Any], name: str,
-              max_tokens: int = 4000, effort: str | None = None) -> dict[str, Any]:
+              max_tokens: int = 4000, effort: str | None = None,
+              timeout: float | None = None) -> dict[str, Any]:
         kw: dict[str, Any] = dict(
             model=self.model,
             messages=[{"role": "system", "content": system}, *user_messages],
             response_format={"type": "json_schema", "json_schema": {"name": name, "schema": schema, "strict": True}},
             max_completion_tokens=max_tokens,
         )
+        if timeout:
+            kw["timeout"] = timeout
         eff = EFFORT_MAP.get(effort or self.settings.effort)
         if eff and (self.model.startswith("gpt-5") or self.model.startswith("o")):
             kw["reasoning_effort"] = eff
@@ -48,7 +53,18 @@ class OpenAIBrain:
         choice = resp.choices[0]
         if getattr(choice.message, "refusal", None):
             raise RuntimeError(f"model refused: {choice.message.refusal}")
-        return json.loads(choice.message.content or "{}")
+        if choice.finish_reason == "length":
+            # On a reasoning model max_completion_tokens covers the reasoning too, so a short
+            # budget returns an empty answer. Returning "{}" here made that look like a decision.
+            raise RuntimeError("the model ran out of output budget before finishing its answer "
+                               "(raise max_completion_tokens or lower the effort level)")
+        content = (choice.message.content or "").strip()
+        if not content:
+            raise RuntimeError(f"the model returned no text (finish_reason={choice.finish_reason})")
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"the model's answer was not valid JSON: {exc}") from exc
 
     # ------------------------------------------------------------ same surface as Brain
     def decide(self, symbol, snapshot, regime, signals, position, skills, knowledge) -> dict[str, Any]:
@@ -58,7 +74,7 @@ class OpenAIBrain:
         user = (f"SKILLS:\n{skill_text}\n\n"
                 + ("RELEVANT NOTES FROM THE LIBRARY:\n" + "\n---\n".join(knowledge) + "\n\n" if knowledge else "")
                 + f"MARKET:\n{json.dumps(payload, ensure_ascii=False)}")
-        out = self._json(DECISION_SYSTEM, [{"role": "user", "content": user}], DECISION_SCHEMA, "decision", 2000)
+        out = self._json(DECISION_SYSTEM, [{"role": "user", "content": user}], DECISION_SCHEMA, "decision", 8000, timeout=90.0)
         out["confidence"] = max(0.0, min(1.0, float(out.get("confidence", 0))))
         out["stop_distance_atr"] = max(1.0, min(4.0, float(out.get("stop_distance_atr", 2))))
         return out
@@ -71,7 +87,7 @@ class OpenAIBrain:
                       "Extract every actionable trading rule in this text - entries, exits, risk, regime, psychology.\n"
                       "Skip generic advice with no concrete condition. Keep the author's thresholds.\n\n" + chunk)
             out = self._json("You extract trading rules from books and articles for a rule-following trading bot.",
-                             [{"role": "user", "content": prompt}], SKILLS_SCHEMA, "skills", 8000)
+                             [{"role": "user", "content": prompt}], SKILLS_SCHEMA, "skills", 16000, timeout=600.0)
             for s in out.get("skills", []):
                 k = s["name"].strip().lower()
                 if k not in seen:

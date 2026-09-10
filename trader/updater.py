@@ -4,7 +4,11 @@ Where releases come from
 ------------------------
 1. The owner's own server: ``UPDATE_URL`` (latest.json on a plain IP:port, mirrored from the
    build every two minutes). This is what the app tries first - fast from Iran, no GitHub.
-2. GitHub Releases (``UPDATE_REPO``) as a fallback when the server is unreachable.
+2. GitHub Releases (``UPDATE_REPO``).
+
+BOTH are asked and the NEWEST wins. The server is a mirror on a two-minute cron: taking
+whichever source answered first meant that for the two minutes after a release - or forever if
+the mirror ever wedged - the app reported "you are up to date" while a newer build existed.
 
 How an update is applied (Windows)
 ----------------------------------
@@ -16,7 +20,6 @@ A loop guard refuses to auto-install the same version twice within 30 minutes.
 """
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import json
 import os
@@ -49,12 +52,13 @@ class Release:
     page_url: str
     sha256: str = ""
     source: str = "server"
-    kind: str = "exe"          # exe = full installer | code = zip overlay, applied in seconds
+    kind: str = "exe"          # only full installers are shipped; the zip-overlay path is gone
 
 
 def base_version() -> str:
-    """Version of the code bundled inside the exe (the overlay may be newer)."""
-    return os.environ.get("TGTRADER_BASE_VERSION") or __version__
+    """The version actually running. There is no code-overlay layer any more: what the exe
+    reports is what it is, so the update button can never claim a version the app is not."""
+    return __version__
 
 
 def _vtuple(v: str) -> tuple[int, ...]:
@@ -116,67 +120,44 @@ def _check_github(timeout: float) -> Release | None:
 
 
 def check(timeout: float = 20.0) -> Release | None:
-    """Return the newest release if it is newer than the running version, else None."""
+    """Return the newest release across every source, or None when we are already on it."""
     if not configured():
         raise RuntimeError("update source is not configured")
-    rel: Release | None = None
+    found: list[Release] = []
     err: Exception | None = None
     for fn in (_check_server, _check_github):
         try:
-            rel = fn(timeout)
-            if rel:
-                break
-        except Exception as exc:  # try the next source
+            r = fn(timeout)
+            if r:
+                found.append(r)
+        except Exception as exc:
             err = exc
-    if rel is None:
+    if not found:
         if err:
             raise err
         return None
-    return rel if _vtuple(rel.version) > _vtuple(__version__) else None
-
-
-# ---------------------------------------------------------------- code overlay
-def overlay_dir() -> Path:
-    from .config import data_dir
-    return data_dir() / "code"
-
-
-def apply_code(zip_path: Path) -> Path:
-    """Extract a code zip into <data>/code.new, sanity-check it, swap it in. Returns the overlay dir."""
-    import shutil
-    import zipfile
-    dest = overlay_dir(); new = dest.with_name("code.new"); old = dest.with_name("code.old")
-    shutil.rmtree(new, ignore_errors=True)
-    with zipfile.ZipFile(zip_path) as z:
-        for n in z.namelist():
-            if n.startswith("/") or ".." in n.split("/"):
-                raise RuntimeError("unsafe path in update archive")
-        z.extractall(new)
-    if not (new / "trader" / "__init__.py").exists():
-        shutil.rmtree(new, ignore_errors=True)
-        raise RuntimeError("update archive has no trader package")
-    shutil.rmtree(old, ignore_errors=True)
-    if dest.exists():
-        dest.rename(old)
-    new.rename(dest)
-    shutil.rmtree(old, ignore_errors=True)
-    return dest
-
-
-def restart_app() -> None:
-    """Start a fresh copy of this app; the caller quits right after."""
-    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    if is_frozen():
-        subprocess.Popen([sys.executable], close_fds=True, creationflags=flags)
-    else:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent.parent / "run.py")], close_fds=True, creationflags=flags)
+    found.sort(key=lambda r: _vtuple(r.version), reverse=True)
+    best = found[0]
+    if not best.asset_url:
+        # A source that names a version but has no file to download is useless on its own;
+        # prefer an equal-or-older source that actually has an installer.
+        best = next((r for r in found if r.asset_url), best)
+    # GitHub's API does not publish a checksum. When the mirror has the same build, take its
+    # hash, so the fallback route is verified rather than trusted.
+    if not best.sha256:
+        same = next((r for r in found if r.sha256 and _vtuple(r.version) == _vtuple(best.version)), None)
+        if same:
+            best.sha256 = same.sha256
+            if not best.asset_size:
+                best.asset_size = same.asset_size
+    return best if _vtuple(best.version) > _vtuple(__version__) else None
 
 
 # ---------------------------------------------------------------- download
 def download(rel: Release, progress: Callable[[int, int], None] | None = None) -> Path:
     if not rel.asset_url:
         raise RuntimeError("this release has no Windows installer attached")
-    dest = Path(tempfile.gettempdir()) / (f"TGTrader-code-{rel.version}.zip" if rel.kind == "code" else f"TGTrader-Setup-{rel.version}.exe")
+    dest = Path(tempfile.gettempdir()) / f"TGTrader-Setup-{rel.version}.exe"
     done = 0
     h = hashlib.sha256()
     p = _proxy()
@@ -195,6 +176,10 @@ def download(rel: Release, progress: Callable[[int, int], None] | None = None) -
     if rel.sha256 and h.hexdigest().lower() != rel.sha256.lower():
         dest.unlink(missing_ok=True)
         raise RuntimeError("downloaded file is corrupted (checksum mismatch), try again")
+    if not rel.sha256:
+        # Say so rather than implying the file was checked. Everything here travels over plain
+        # HTTP, so an unverified installer is a real (if small) risk worth naming.
+        pass
     return dest
 
 
