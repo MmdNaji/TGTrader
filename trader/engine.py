@@ -180,7 +180,8 @@ class Engine:
             cash = self.broker.cash()
         except Exception:
             cash = equity
-        sizing = self.risk.size(side, price, stop_distance, equity, min_qty, step, cash=cash)
+        sizing = self.risk.size(side, price, stop_distance, equity, min_qty, step, cash=cash,
+                                position_pct=getattr(self.settings, "position_pct", 0.0))
         if sizing is None:
             self.db.add_decision(symbol, "hold", decision["confidence"], "risk",
                                  "not enough free cash for a new position at the capital limit", payload)

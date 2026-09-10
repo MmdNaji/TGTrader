@@ -54,6 +54,8 @@ class CandleChart(QWidget):
 
     # ------------------------------------------------------------ interaction
     def wheelEvent(self, ev):
+        # consume the wheel so it zooms the chart instead of scrolling the page it sits on
+        ev.accept()
         if self.df is None:
             return
         step = max(5, self.visible // 8)

@@ -91,6 +91,9 @@ class Settings:
     # high (lower bar), scalp (rules-only, trades on almost any momentum signal,
     # meant for watching activity on a short timeframe - not a profit setting).
     aggressiveness: str = "normal"   # normal | high | scalp
+    # Percent of capital to put into each trade as notional. 0 = automatic
+    # risk-based sizing (from risk_per_trade and the stop distance).
+    position_pct: float = 0.0
 
     # --- trading ---
     mode: str = "paper"           # paper | live

@@ -31,6 +31,7 @@ from .widgets import Card, Kpi, pill, set_pill, hint, section, FormRow, Empty, t
 
 NAV = [
     ("dashboard", "🏠", "داشبورد", "وضعیت حساب، پوزیشن‌ها و تصمیم‌های ربات"),
+    ("desk", "🖥", "میز معامله", "چارت بالا، پوزیشن‌های باز پایین - همه‌جا محلی"),
     ("chart", "📈", "چارت", "همان کندل‌هایی که ربات با آن‌ها تصمیم می‌گیرد"),
     ("trades", "🧾", "معاملات", "تاریخچه و آمار معاملات بسته‌شده"),
     ("skills", "🧠", "مهارت‌ها", "قوانینی که ربات با آن‌ها معامله می‌کند"),
@@ -130,7 +131,7 @@ class MainWindow(QMainWindow):
         col.addWidget(self._topbar())
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {}
-        builders = {"dashboard": self._page_dashboard, "chart": self._page_chart, "trades": self._page_trades,
+        builders = {"dashboard": self._page_dashboard, "desk": self._page_desk, "chart": self._page_chart, "trades": self._page_trades,
                     "skills": self._page_skills, "learn": self._page_learn, "backtest": self._page_backtest,
                     "settings": self._page_settings, "help": self._page_help, "selftest": self._page_selftest}
         for key, *_ in NAV:
@@ -189,6 +190,8 @@ class MainWindow(QMainWindow):
                 self.page_title.setText(label); self.page_sub.setText(sub)
         if key == "chart" and time.time() - self._chart_last > 30:
             self.refresh_chart()
+        if key == "desk" and time.time() - getattr(self, "_desk_chart_last", 0) > 30:
+            self.refresh_desk_chart()
         if key == "skills":
             self.refresh_skills()
         if key == "learn":
@@ -247,7 +250,7 @@ class MainWindow(QMainWindow):
 
         low = QHBoxLayout(); low.setSpacing(12)
         c3 = Card("پوزیشن‌های باز")
-        self.tbl_positions = table(["نماد", "جهت", "ورود", "قیمت", "حد ضرر", "هدف", "سود شناور"])
+        self.tbl_positions = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
         self.tbl_positions.setTextElideMode(Qt.ElideNone)
         self.tbl_positions.setMinimumHeight(160)
         self.empty_pos = Empty("پوزیشن بازی نیست. وقتی شرایط ورود جور شود، این‌جا ظاهر می‌شود.")
@@ -397,36 +400,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} فایل نصب ندارد:\n{rel.page_url}"); return
         if self.engine and self.engine.running():
             QMessageBox.warning(self, "به‌روزرسانی", "اول موتور معامله را متوقف کن، بعد به‌روزرسانی کن."); return
-        self._on_event(f"[update] downloading {rel.version} from {rel.source}: {rel.asset_url}")
-        dlg = QProgressDialog(f"در حال دانلود نسخه‌ی {rel.version} ({'کد، چند ثانیه' if rel.kind == 'code' else 'نصب کامل'})…", "لغو", 0, 100, self)
-        dlg.setWindowTitle("به‌روزرسانی خودکار"); dlg.setAutoClose(False); dlg.setMinimumDuration(0)
-        w = Worker(lambda: updater.download(rel, progress=lambda d, t: w.progress.emit(d, t)))
-
-        def on_prog(d, t):
-            dlg.setMaximum(max(t, 1)); dlg.setValue(min(d, t) if t else 0)
-            dlg.setLabelText(f"در حال دانلود… {d/1e6:.1f} / {t/1e6:.1f} MB\nبعد از دانلود، برنامه بسته و با نسخه‌ی جدید باز می‌شود.")
-
-        def done(path):
-            dlg.close()
-            if dlg.wasCanceled():
-                return
-            try:
-                updater.mark_attempt(rel.version)
-                if rel.kind == "code":
-                    updater.apply_code(path)
-                    self._on_event(f"[update] code {rel.version} applied to {updater.overlay_dir()}; restarting")
-                    updater.restart_app()
-                else:
-                    updater.install(path)
-                    self._on_event(f"[update] installer started for {rel.version} into {updater.install_dir()}; closing")
-            except Exception as exc:
-                QMessageBox.critical(self, "به‌روزرسانی", f"{exc}\n\nفایل دانلودشده:\n{path}"); return
-            QApplication.instance().quit()
-
-        w.progress.connect(on_prog); w.done.connect(done)
-        w.failed.connect(lambda m: (dlg.close(), QMessageBox.critical(self, "به‌روزرسانی", m.splitlines()[0])))
-        w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
-        self._workers.append(w); w.start(); dlg.exec()
+        # Most reliable path on Windows: open the installer download in the default browser -
+        # exactly the manual flow that works. No silent install, no self-restart.
+        import webbrowser
+        updater.mark_attempt(rel.version)
+        opened = False
+        try:
+            opened = webbrowser.open(rel.asset_url)
+        except Exception:
+            opened = False
+        self._on_event(f"[update] opened installer download for {rel.version}: {rel.asset_url}")
+        QMessageBox.information(self, "به‌روزرسانی",
+            f"نسخه‌ی {rel.version} آماده است.\n\nدانلود در مرورگر باز شد. بعد از دانلود:\n"
+            f"۱) برنامه را ببند.\n۲) فایل دانلودشده (TGTrader-Setup) را اجرا کن و Install بزن.\n\n"
+            + ("" if opened else f"اگر مرورگر باز نشد، این آدرس را دستی باز کن:\n{rel.asset_url}"))
 
     def _install_mt5(self):
         if updater.mt5_installed():
@@ -440,6 +427,44 @@ class MainWindow(QMainWindow):
         w.failed.connect(lambda m: (dlg.close(), QMessageBox.critical(self, "MetaTrader 5", m.splitlines()[0])))
         w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
         self._workers.append(w); w.start(); dlg.exec()
+
+    # ============================================================ DESK (chart + open positions together)
+    def _page_desk(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(12)
+        split = QSplitter(Qt.Vertical)
+        ctop = Card("چارت", "روی چارت اسکرول کنی فقط چارت زوم می‌شود، نه صفحه")
+        h = QHBoxLayout(); h.setSpacing(10)
+        self.desk_symbol = QComboBox(); self.desk_symbol.setEditable(True); self.desk_symbol.addItems(self.settings.symbols); self.desk_symbol.setMinimumWidth(160)
+        self.desk_tf = QComboBox(); self.desk_tf.addItems(["1m", "5m", "15m", "1h", "4h", "1d"]); self.desk_tf.setCurrentText(self.settings.timeframe)
+        h.addWidget(QLabel("نماد")); h.addWidget(self.desk_symbol); h.addWidget(QLabel("تایم‌فریم")); h.addWidget(self.desk_tf)
+        h.addWidget(button("⟳", "", self.refresh_desk_chart)); h.addStretch()
+        ctop.add_layout(h)
+        self.desk_chart = CandleChart(); ctop.add(self.desk_chart, 1)
+        self.desk_symbol.currentTextChanged.connect(lambda _: self.refresh_desk_chart())
+        self.desk_tf.currentTextChanged.connect(lambda _: self.refresh_desk_chart())
+        cbot = Card("پوزیشن‌های باز", "روی هر ردیف بزن تا چارت بالا برود روی همان ارز")
+        self.tbl_desk = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
+        self.tbl_desk.setTextElideMode(Qt.ElideNone)
+        self.tbl_desk.cellClicked.connect(self._desk_row_to_chart)
+        self.empty_desk = Empty("پوزیشن بازی نیست.")
+        cbot.add(self.tbl_desk, 1); cbot.add(self.empty_desk)
+        cbot.add_action(button("بستن همه", "danger", self.close_all))
+        split.addWidget(ctop); split.addWidget(cbot); split.setSizes([520, 260])
+        v.addWidget(split, 1)
+        self._desk_chart_last = 0.0
+        QTimer.singleShot(700, self.refresh_desk_chart)
+        return w
+
+    def refresh_desk_chart(self):
+        sym = self.desk_symbol.currentText().strip().upper(); tf = self.desk_tf.currentText()
+        if sym:
+            self._desk_chart_last = time.time()
+            self._load_chart(self.desk_chart, sym, tf, lambda m: self._on_event("[desk] " + m.splitlines()[0]))
+
+    def _desk_row_to_chart(self, row: int, _col: int = 0):
+        if 0 <= row < len(self._pos_data):
+            self.desk_symbol.setCurrentText(self._pos_data[row]["symbol"])
+            self.refresh_desk_chart()
 
     # ============================================================ CHART
     def _page_chart(self) -> QWidget:
@@ -871,12 +896,13 @@ class MainWindow(QMainWindow):
         c2.add(FormRow("Secret", self.s_ex_secret)); c2.add(FormRow("Passphrase", self.s_ex_pass, "فقط okx و kucoin"))
         c2.add(FormRow("نمادها", self.s_symbols, "با کاما: BTC/USDT, ETH/USDT"))
         c2.add(FormRow("تایم‌فریم", self.s_tf, "1d پیش‌فرض؛ کوتاه‌تر = معامله و نویز بیشتر"))
-        c2.add(FormRow("موجودی کاغذی", self.s_paper_bal, "موجودی شروع حساب کاغذی"))
+        c2.add(FormRow("موجودی کاغذی", self.s_paper_bal, "پول مجازی حساب تمرینی. عوضش کنی و ذخیره بزنی، حساب همان لحظه با همین مبلغ ریست می‌شود."))
         grid.addWidget(c2, 0, 1)
 
         c3 = Card("ریسک", "سقف‌های سخت؛ هوش مصنوعی نمی‌تواند از این‌ها رد شود")
         self.s_cap = QDoubleSpinBox(); self.s_cap.setRange(1, 1e9); self.s_cap.setValue(s.risk.capital_limit)
         self.s_rpt = QDoubleSpinBox(); self.s_rpt.setRange(0.1, 10); self.s_rpt.setSuffix(" %"); self.s_rpt.setValue(s.risk.risk_per_trade * 100)
+        self.s_pospct = QDoubleSpinBox(); self.s_pospct.setRange(0, 100); self.s_pospct.setSuffix(" %"); self.s_pospct.setValue(getattr(s, "position_pct", 0.0))
         self.s_dl = QDoubleSpinBox(); self.s_dl.setRange(0.5, 50); self.s_dl.setSuffix(" %"); self.s_dl.setValue(s.risk.max_daily_loss * 100)
         self.s_maxpos = QSpinBox(); self.s_maxpos.setRange(1, 20); self.s_maxpos.setValue(s.risk.max_open_positions)
         self.s_atr = QDoubleSpinBox(); self.s_atr.setRange(0.5, 6); self.s_atr.setValue(s.risk.atr_stop_mult)
@@ -884,6 +910,7 @@ class MainWindow(QMainWindow):
         self.s_trail = QDoubleSpinBox(); self.s_trail.setRange(0, 5); self.s_trail.setValue(s.risk.trail_after_r)
         c3.add(FormRow("سقف سرمایه‌ی ربات", self.s_cap, "ربات هرگز بیش از این مبلغ را درگیر نمی‌کند"))
         c3.add(FormRow("ریسک هر معامله", self.s_rpt, "حداکثر ضرر یک معامله، درصدی از سقف. ۱٪ = با سقف ۱۰۰ دلار، ۱ دلار"))
+        c3.add(FormRow("درصد سرمایه در هر معامله", self.s_pospct, "چند درصد پول در هر معامله گذاشته شود. ۰ = خودکار (بر اساس ریسک). مثلاً ۲۰ یعنی هر معامله با ۲۰٪ سرمایه."))
         c3.add(FormRow("حداکثر زیان روزانه", self.s_dl, "با رسیدن به آن، تا فردا معامله‌ی جدیدی باز نمی‌شود"))
         c3.add(FormRow("حداکثر پوزیشن باز", self.s_maxpos))
         c3.add(FormRow("حد ضرر (ATR ×)", self.s_atr, "۲ = دو برابر نوسان معمول یک کندل"))
@@ -926,17 +953,17 @@ class MainWindow(QMainWindow):
             self.s_agg.setCurrentText("high"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT, DOGE/USDT, ADA/USDT, AVAX/USDT")
             self.s_maxpos.setValue(8); self.s_tf.setCurrentText("5m")
-            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_loop.setValue(3)
+            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_loop.setValue(3); self.s_pospct.setValue(20)
             msg = "حالت هوشمند چندارزی اعمال شد: ۸ ارز، دقت max، تا ۸ پوزیشن."
         elif kind == "serious":
             self.s_agg.setCurrentText("normal"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT")
-            self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60)
+            self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60); self.s_pospct.setValue(0)
             msg = "حالت جدی و صبور اعمال شد: روزانه، normal، برای پول واقعی."
         else:  # scalp
             self.s_agg.setCurrentText("scalp"); self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT")
             self.s_maxpos.setValue(6); self.s_tf.setCurrentText("1m"); self.s_loop.setValue(2)
-            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000)
+            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_pospct.setValue(15)
             msg = "حالت اسکالپ اعمال شد: پرتعداد و سریع، فقط برای تماشا (در بلندمدت ضرر می‌دهد)."
         self._save_settings()
         if self.settings.mode == "paper":
@@ -974,6 +1001,7 @@ class MainWindow(QMainWindow):
         s.mt5_login = int(self.s_mt5_login.text()) if self.s_mt5_login.text().strip().isdigit() else 0
         s.mt5_password = self.s_mt5_pass.text(); s.mt5_server = self.s_mt5_server.text().strip()
         s.risk.capital_limit = self.s_cap.value(); s.risk.risk_per_trade = self.s_rpt.value() / 100; s.risk.max_daily_loss = self.s_dl.value() / 100
+        s.position_pct = self.s_pospct.value()
         s.risk.max_open_positions = self.s_maxpos.value(); s.risk.atr_stop_mult = self.s_atr.value(); s.risk.reward_risk = self.s_rr.value()
         s.risk.trail_after_r = self.s_trail.value()
         s.computer.enabled = self.s_cu_on.isChecked(); s.computer.confirm_before_submit = self.s_cu_confirm.isChecked()
@@ -1041,16 +1069,21 @@ class MainWindow(QMainWindow):
         pf = (f"{st['profit_factor']:.2f}" if st["profit_factor"] != float("inf") else "∞")
         self.lbl_stats_mini.setText(f"سود خالص {st['pnl']:+.4f} · ضریب سود {pf} · میانگین R {st['avg_r']:+.2f}" if st["trades"] else "")
 
-        prices = self.engine.last_prices if self.engine else {}
+        prices = {**(self.engine.last_prices if self.engine else {}), **self._live}
         rows = []
         for r in opens:
             px = prices.get(r["symbol"])
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
+            val = float(r["qty"]) * float(r["entry_price"])
+            pct = (fl / val * 100) if (fl is not None and val) else None
             rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
-                         f"{px:g}" if px else "—", f"{r['stop_price']:g}",
-                         f"{r['take_profit']:g}" if r["take_profit"] else "—", f"{fl:+.4f}" if fl is not None else "—"])
+                         f"{px:g}" if px else "—", f"${val:.2f}", f"{r['stop_price']:g}",
+                         f"{r['take_profit']:g}" if r["take_profit"] else "—",
+                         f"{fl:+.2f}$ ({pct:+.2f}%)" if fl is not None else "—"])
         self._pos_data = [dict(x) for x in opens]
-        fill(self.tbl_positions, rows, tones={6: "pnl"}); self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
+        fill(self.tbl_positions, rows, tones={7: "pnl"}); self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
+        if hasattr(self, "tbl_desk"):
+            fill(self.tbl_desk, rows, tones={7: "pnl"}); self.tbl_desk.setVisible(bool(rows)); self.empty_desk.setVisible(not rows)
         self._render_pos_detail()
         decs = self.db.recent_decisions(30)
         fa = {"buy": "خرید", "sell": "فروش", "hold": "نگه‌دار", "close": "بستن"}
@@ -1072,6 +1105,8 @@ class MainWindow(QMainWindow):
             self.refresh_dash_chart()
         if self.stack.currentWidget() is self.pages["chart"] and self.ch_auto.isChecked() and now - self._chart_last > 60:
             self.refresh_chart()
+        if self.stack.currentWidget() is self.pages["desk"] and now - getattr(self, "_desk_chart_last", 0) > 60:
+            self.refresh_desk_chart()
         if self.tbl_skills.rowCount() == 0 and not self.sk_search.text():
             self.refresh_skills()
 
@@ -1147,12 +1182,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ live price feed
     def _watch_symbols(self) -> list[str]:
         syms = list(self.settings.symbols)
-        try:
-            cs = self.ch_symbol.currentText().strip().upper()
-            if cs and cs not in syms:
-                syms.append(cs)
-        except Exception:
-            pass
+        for combo_name in ("ch_symbol", "desk_symbol"):
+            try:
+                cs = getattr(self, combo_name).currentText().strip().upper()
+                if cs and cs not in syms:
+                    syms.append(cs)
+            except Exception:
+                pass
         return syms
 
     def _start_feed(self):
@@ -1180,6 +1216,10 @@ class MainWindow(QMainWindow):
             pass
         if self.settings.symbols and self.settings.symbols[0] in self._live:
             self.dash_chart.set_live_price(self._live[self.settings.symbols[0]])
+        if hasattr(self, "desk_symbol"):
+            ds = self.desk_symbol.currentText().strip().upper()
+            if ds in self._live:
+                self.desk_chart.set_live_price(self._live[ds])
         # live floating P&L on the open positions + equity, without a full DB refresh cycle
         try:
             opens = [dict(r) for r in self.db.open_trades(self.settings.mode)]
@@ -1189,12 +1229,17 @@ class MainWindow(QMainWindow):
         for r in opens:
             px = self._live.get(r["symbol"])
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
+            val = float(r["qty"]) * float(r["entry_price"])
+            pct = (fl / val * 100) if (fl is not None and val) else None
             rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
-                         f"{px:g}" if px else "—", f"{r['stop_price']:g}",
-                         f"{r['take_profit']:g}" if r["take_profit"] else "—", f"{fl:+.4f}" if fl is not None else "—"])
+                         f"{px:g}" if px else "—", f"${val:.2f}", f"{r['stop_price']:g}",
+                         f"{r['take_profit']:g}" if r["take_profit"] else "—",
+                         f"{fl:+.2f}$ ({pct:+.2f}%)" if fl is not None else "—"])
         self._pos_data = [dict(x) for x in opens]
-        fill(self.tbl_positions, rows, tones={6: "pnl"})
+        fill(self.tbl_positions, rows, tones={7: "pnl"})
         self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
+        if hasattr(self, "tbl_desk"):
+            fill(self.tbl_desk, rows, tones={7: "pnl"}); self.tbl_desk.setVisible(bool(rows)); self.empty_desk.setVisible(not rows)
         self._render_pos_detail()
         if self.engine:
             try:
