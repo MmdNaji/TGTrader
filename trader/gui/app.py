@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self._dash_chart_last = 0.0
         self._pos_data: list[dict] = []
         self._detail_symbol: str | None = None
+        self._live: dict[str, float] = {}
         self._market = None          # shared MarketData so exchange metadata loads once
 
         root = QWidget(); self.setCentralWidget(root)
@@ -142,7 +143,6 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(1500)
         self.refresh()
         self.goto("dashboard")
-        self._live: dict[str, float] = {}
         self._feed: PriceFeed | None = None
         self._start_feed()
         QTimer.singleShot(4000, lambda: self._check_update(manual=False))
