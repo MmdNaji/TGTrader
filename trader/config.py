@@ -40,7 +40,7 @@ class RiskSettings:
     # The day is over when this fraction of the capital limit is lost.
     max_daily_loss: float = 0.03
     # Never hold more than this many positions at once.
-    max_open_positions: int = 3
+    max_open_positions: int = 5
     # Stop-loss distance in ATR multiples; take-profit as a multiple of the stop.
     atr_stop_mult: float = 2.0
     reward_risk: float = 2.0
@@ -95,7 +95,7 @@ class Settings:
     # --- trading ---
     mode: str = "paper"           # paper | live
     market: str = "crypto"        # crypto | forex
-    symbols: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT"])
+    symbols: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"])
     # Where candles/prices come from: "auto" = the trading exchange, then public fallbacks
     # (mexc, kcex, gateio, htx, bitget) when it is blocked from the user's country.
     data_source: str = "auto"
