@@ -133,17 +133,36 @@ class MarketData:
             df = self._mt5_candles(symbol, tf, limit)
         else:
             def fetch(src: str) -> pd.DataFrame:
-                if src == "kcex":
-                    return self.kcex.candles(symbol, tf, limit)
-                return ohlcv_to_frame(self._ex(src).fetch_ohlcv(symbol, tf, limit=limit))
+                out = (self.kcex.candles(symbol, tf, limit) if src == "kcex"
+                       else ohlcv_to_frame(self._ex(src).fetch_ohlcv(symbol, tf, limit=limit)))
+                # An exchange that answers 200 with an empty list is NOT a working source. Taking
+                # it as success cached an empty frame, defeated the fallback chain, and every
+                # caller then died on df["close"].iloc[-1] with an IndexError.
+                if out is None or len(out) < 2:
+                    raise RuntimeError(f"{src} returned no candles for {symbol} {tf}")
+                return out
             df = self._try_sources(f"{symbol} {tf}", fetch)
+        if df is None or df.empty:
+            raise RuntimeError(f"no candles for {symbol} {tf}")
         self._cache[key] = (now, df)
         return df
 
     def price(self, symbol: str) -> float:
         if self.settings.market == "forex":
             import MetaTrader5 as mt5  # type: ignore
-            tick = mt5.symbol_info_tick(symbol.replace("/", ""))
+            sym = symbol.replace("/", "")
+            # symbol_info_tick returns None for a symbol that was never selected, and on a
+            # terminal this process has not initialised. Falling through to tick.bid then threw
+            # AttributeError - out of close_all, which is the one call that must not die halfway.
+            tick = mt5.symbol_info_tick(sym)
+            if tick is None:
+                mt5.initialize(login=self.settings.mt5_login or None,
+                               password=self.settings.mt5_password or None,
+                               server=self.settings.mt5_server or None)
+                mt5.symbol_select(sym, True)
+                tick = mt5.symbol_info_tick(sym)
+            if tick is None or not (tick.bid and tick.ask):
+                raise RuntimeError(f"MT5 has no price for {sym}")
             return float((tick.bid + tick.ask) / 2)
 
         def fetch(src: str) -> float:

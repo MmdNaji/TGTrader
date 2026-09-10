@@ -144,7 +144,18 @@ class Settings:
             s = cls()
             s.save()
             return s
-        raw: dict[str, Any] = json.loads(p.read_text(encoding="utf-8"))
+        try:
+            raw: dict[str, Any] = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            # Damaged beyond reading: keep it for inspection and start from the defaults rather
+            # than refusing to open at all. Losing the settings is bad; losing the app is worse.
+            try:
+                p.replace(p.with_suffix(".json.broken"))
+            except OSError:
+                pass
+            s = cls()
+            s.save()
+            return s
         return cls.from_dict(raw)
 
     @classmethod
@@ -165,12 +176,19 @@ class Settings:
         return asdict(self)
 
     def save(self) -> None:
+        """Write through a temporary file and rename over the original.
+
+        Writing in place means a crash or a full disk mid-write leaves a truncated file, and
+        load() then raises JSONDecodeError on every start - the app simply never opens again
+        and the only fix is deleting a file the user does not know about. A rename is atomic."""
         p = self.path()
-        p.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
         try:
-            os.chmod(p, 0o600)
+            os.chmod(tmp, 0o600)
         except OSError:
             pass
+        os.replace(tmp, p)
 
     # ---------------------------------------------------------------- helpers
     def has_llm(self) -> bool:

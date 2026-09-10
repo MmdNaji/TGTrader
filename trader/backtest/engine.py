@@ -75,11 +75,20 @@ class BtResult:
 def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity: float = 1000.0,
                  strategies: list[Strategy] | None = None, fee_rate: float = 0.001, slippage: float = 0.0005,
                  warmup: int = 60, allow_short: bool = True,
-                 leader_regimes: pd.Series | None = None) -> BtResult:
+                 leader_regimes: pd.Series | None = None, min_confidence: float = 0.0,
+                 position_pct: float = 0.0) -> BtResult:
     """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
     a long is refused while the leader is in ``trend_down`` and a short while it is in
     ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
-    assumed."""
+    assumed.
+
+    ``min_confidence`` is the live engine's confidence gate (0.55 on "normal", 0.4 on "high",
+    0 on "scalp"). Without it the backtest trades signals the engine refuses, which is how a
+    backtest ends up describing a strategy nobody is running.
+
+    ``position_pct`` mirrors the setting of the same name. It matters more than it looks:
+    sizing by notional ignores the stop distance, and measured over 8 coins it turned -4% into
+    -29%. The page has to show that rather than quietly backtesting a different sizing rule."""
     data = enrich(df)
     res = BtResult(symbol=symbol, bars=len(data), start_equity=start_equity)
     equity = start_equity
@@ -97,7 +106,7 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
         if pending and open_t is None:
             sig, sd = pending
             px = o * (1 + slippage) if sig.side == "long" else o * (1 - slippage)
-            sizing = rm.size(sig.side, px, sd, equity)
+            sizing = rm.size(sig.side, px, sd, equity, position_pct=position_pct)
             if sizing:
                 qty = sizing.qty
                 stop = px - sd if sig.side == "long" else px + sd
@@ -127,6 +136,10 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 # every bar, so the stop walks into the price and closes every winner for nothing.
                 t.stop = rm.trail_stop(t.side, t.entry, t.stop, c, t.init_stop or t.stop)
             if exit_px is not None:
+                # Exits pay slippage too. Filling every stop at exactly the stop price makes
+                # the worst fills in the sample free, which is precisely backwards: a stop is
+                # hit in a fast move, and that is when the fill is worst.
+                exit_px = exit_px * (1 - slippage) if t.side == "long" else exit_px * (1 + slippage)
                 pnl = (exit_px - t.entry) * t.qty if t.side == "long" else (t.entry - exit_px) * t.qty
                 pnl -= t.qty * exit_px * fee_rate + t.entry_fee   # both fees belong to the trade
                 t.exit, t.exit_i, t.pnl = exit_px, i, pnl
@@ -144,6 +157,8 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
             if regime not in ("volatile", "unknown"):
                 sigs = evaluate_all(symbol, window, regime, strategies)
                 sigs = [s for s in sigs if allow_short or s.side == "long"]
+                if min_confidence > 0:
+                    sigs = [s for s in sigs if s.strength >= min_confidence]
                 if sigs and leader_regimes is not None:
                     lr = leader_regimes.get(window.index[-1])
                     if lr == "trend_down":

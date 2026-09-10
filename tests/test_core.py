@@ -402,7 +402,7 @@ def test_a_target_that_does_not_clear_the_fees_is_refused():
     assert any("round-trip fee" in (d["reason"] or "") for d in db.recent_decisions(9999))
     # the same setup with a target that does clear the fees is allowed through
     s.risk.reward_risk = 3.0
-    eng._last_bar.clear(); eng._entered_bar.clear()
+    eng._last_bar.clear(); eng._entered_bar.clear(); eng._llm_bar.clear()
     eng._consider_entry("X/Y", df, price, [])
     assert db.open_trades("paper"), "a target that clears the fees must not be blocked"
 
@@ -441,7 +441,7 @@ def test_the_leader_filter_refuses_a_long_while_bitcoin_is_breaking_down():
     assert any("against the market leader" in (d["reason"] or "") for d in db.recent_decisions(9999))
     # unknown leader must mean "do not filter", never "refuse everything"
     eng._leader_regime = None
-    eng._last_bar.clear(); eng._entered_bar.clear()
+    eng._last_bar.clear(); eng._entered_bar.clear(); eng._llm_bar.clear()
     eng._consider_entry("ETH/USDT", df, price, [])
     assert db.open_trades("paper"), "a data hiccup on BTC must not stop every other symbol trading"
 
@@ -525,3 +525,80 @@ def test_the_screen_broker_survives_a_restart():
     assert again.cash() == 400.0 and again.positions() == {"X/Y": {"qty": 2.0, "price": 50.0}}, \
         "a restart used to forget the spend and then credit money that was never debited"
     again.reset(500.0)
+
+
+def test_an_empty_candle_response_is_a_failure_not_a_source():
+    """An exchange answering 200 with an empty list used to count as a working source: the empty
+    frame was cached, the fallback chain never ran, and every caller died on .iloc[-1]."""
+    import pandas as pd
+    from trader.market.data import MarketData
+    s = Settings(); s.proxy_mode = "none"; s.market = "crypto"
+    md = MarketData.__new__(MarketData)
+    md.settings = s; md._cache = {}; md.active_source = None; md.notice = ""
+    md.on_notice = lambda m: None
+    calls = []
+
+    def try_sources(what, fn):
+        # walk two sources the way the real chain does: the first is empty, the second works
+        for src in ("emptyone", "goodone"):
+            try:
+                calls.append(src)
+                return fn(src)
+            except Exception:
+                continue
+        raise RuntimeError("no source")
+    md._try_sources = try_sources
+
+    good = pd.DataFrame({"open": [1.0, 2.0], "high": [1.0, 2.0], "low": [1.0, 2.0],
+                         "close": [1.0, 2.0], "volume": [1.0, 1.0]},
+                        index=pd.date_range("2025-01-01", periods=2, freq="h", tz="UTC"))
+
+    class FakeEx:
+        def __init__(self, rows): self.rows = rows
+        def fetch_ohlcv(self, symbol, tf, limit=400): return self.rows
+    md._ex = lambda src: FakeEx([] if src == "emptyone" else
+                                [[1735689600000, 1, 1, 1, 1, 1], [1735693200000, 2, 2, 2, 2, 1]])
+    out = md.candles("A/B", "1h", limit=10)
+    assert calls == ["emptyone", "goodone"], "the empty source must not end the chain"
+    assert len(out) == 2
+
+
+def test_rsi_is_nan_while_it_is_warming_up():
+    import numpy as np
+    from trader.market.indicators import rsi
+    out = rsi(pd.Series(np.random.default_rng(3).normal(100, 1, 60)))
+    assert out.iloc[:13].isna().all(), "the warm-up used to report 100 - maximum overbought"
+    assert out.iloc[20:].notna().all()
+    # the genuine all-up and all-down cases still report the extremes rather than NaN
+    assert rsi(pd.Series(np.arange(1, 60, dtype=float))).iloc[-1] > 99
+    assert rsi(pd.Series(np.arange(60, 1, -1, dtype=float))).iloc[-1] < 1
+
+
+def test_settings_survive_a_truncated_file():
+    import json as _json
+    from trader.config import Settings as S
+    p = S.path()
+    original = p.read_text(encoding="utf-8") if p.exists() else None
+    try:
+        s = S(); s.risk.capital_limit = 4321.0; s.save()
+        assert _json.loads(p.read_text(encoding="utf-8"))["risk"]["capital_limit"] == 4321.0
+        assert not p.with_suffix(".json.tmp").exists(), "the temp file must be renamed away"
+        p.write_text('{"mode": "pap', encoding="utf-8")     # a crash mid-write
+        back = S.load()                                      # must not raise
+        assert back.mode == "paper" and p.with_suffix(".json.broken").exists()
+    finally:
+        p.with_suffix(".json.broken").unlink(missing_ok=True)
+        if original is not None:
+            p.write_text(original, encoding="utf-8")
+
+
+def test_a_deleted_seed_skill_stays_deleted():
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_seed.db")
+    assert load_seed_skills(db) > 100
+    row = next(r for r in db.skills() if str(r["source"]).startswith("seed:"))
+    db.delete_skill(row["id"])
+    assert not db.skill_exists(row["name"])
+    assert load_seed_skills(db) == 0, "restarting used to put every deleted rule straight back"
+    assert not db.skill_exists(row["name"])
+    db.restore_seed_skill(row["name"])
+    assert load_seed_skills(db) == 1 and db.skill_exists(row["name"])

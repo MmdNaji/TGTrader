@@ -66,6 +66,7 @@ class Engine:
         self.last_prices: dict[str, float] = {}
         self._last_bar: dict[str, float] = {}      # last candle a symbol was evaluated on
         self._entered_bar: dict[str, float] = {}   # last candle a symbol was entered on
+        self._llm_bar: dict[str, float] = {}       # last candle the model was asked about
         self._cooldown: dict[str, float] = {}      # symbol -> "do not re-enter before" timestamp
         self._order_err: dict[str, str] = {}       # symbol -> last order error (de-duplicates the log)
         self._reconciled = False
@@ -245,11 +246,18 @@ class Engine:
         # In scalp mode we act on the rule signals directly: the model is deliberately patient
         # ("hold is usually right"), which is the opposite of what this preset is for.
         use_llm = self.settings.use_llm_for_decisions and self.brain is not None and agg != "scalp"
+        if use_llm and self._llm_bar.get(symbol) == bar_ts:
+            # Already asked about this bar. The once-per-bar gate above only skips a QUIET bar,
+            # so a signal that persists across a whole daily candle used to buy a full model
+            # call every loop_seconds - hundreds of paid calls for one decision that cannot
+            # change until the bar does.
+            return
         decision: dict[str, Any] | None = None
         source = "rules"
         if use_llm and (signals or regime in ("trend_up", "trend_down")):
             try:
                 knowledge = [r["content"] for r in self.db.search_knowledge(f"{regime} {' '.join(s.strategy for s in signals)}", limit=3)]
+                self._llm_bar[symbol] = bar_ts
                 decision = self.brain.decide(
                     symbol, snap, regime,
                     [{"strategy": s.strategy, "side": s.side, "strength": s.strength, "reason": s.reason} for s in signals],

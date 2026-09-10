@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS equity (
     equity REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS seed_removed (
+    name TEXT PRIMARY KEY,             -- lower-cased name of a shipped skill the owner deleted
+    removed_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS skills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -230,7 +235,22 @@ class Database:
         self.execute(f"UPDATE skills SET {cols} WHERE id=?", (*sets.values(), skill_id))
 
     def delete_skill(self, skill_id: int) -> None:
+        """Delete a skill, and remember it if it came from the shipped seed files.
+
+        Without the tombstone, load_seed_skills() puts every seed rule back on the next start,
+        so deleting a rule the owner disagrees with lasted until the app was reopened."""
+        row = self.one("SELECT name, source FROM skills WHERE id=?", (skill_id,))
+        if row and str(row["source"] or "").startswith("seed:"):
+            self.execute("INSERT OR IGNORE INTO seed_removed(name, removed_at) VALUES (?,?)",
+                         (row["name"].strip().lower(), time.time()))
         self.execute("DELETE FROM skills WHERE id=?", (skill_id,))
+
+    def removed_seed_names(self) -> set[str]:
+        return {r["name"] for r in self.query("SELECT name FROM seed_removed")}
+
+    def restore_seed_skill(self, name: str) -> None:
+        """Undo a deletion, so a seed rule can come back on the next start."""
+        self.execute("DELETE FROM seed_removed WHERE name=?", (name.strip().lower(),))
 
     def skills(self, status: str | None = None) -> list[sqlite3.Row]:
         if status:

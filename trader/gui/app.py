@@ -352,7 +352,7 @@ class MainWindow(QMainWindow):
 
     def toggle_kill(self):
         from ..risk.manager import RiskManager
-        rm = RiskManager(self.settings.risk, self.db, self.settings.mode)
+        rm = RiskManager(self.settings.risk, self.db, self.live_mode())
         rm.set_kill_switch(not rm.kill_switch_on()); self.refresh()
 
     def close_all(self):
@@ -425,10 +425,12 @@ class MainWindow(QMainWindow):
         self.btn_update.style().unpolish(self.btn_update); self.btn_update.style().polish(self.btn_update)
         self._on_event(f"[update] version {rel.version} is available")
         if not manual and updater.attempted_recently(rel.version):
-            self._on_event(f"[update] {rel.version} was already attempted recently and did not apply - see {updater.log_path()}; press the update button to retry")
-            QMessageBox.warning(self, "به‌روزرسانی", f"نسخه‌ی {rel.version} چند دقیقه پیش نصب شد ولی اعمال نشد (برنامه هنوز {__version__} است).\n"
-                                f"لاگ نصب: {updater.log_path()}\nپوشه‌ی برنامه: {updater.install_dir()}\n\n"
-                                f"برای تلاش دوباره دکمه‌ی 🔄 را بزن، یا نصب دستی:\n{rel.asset_url}")
+            self._on_event(f"[update] {rel.version} was offered recently and the app is still {__version__}")
+            QMessageBox.warning(self, "به‌روزرسانی",
+                f"نسخه‌ی {rel.version} چند دقیقه پیش دانلود/نصب شد ولی برنامه هنوز {__version__} است.\n\n"
+                f"معمولاً یعنی نصب‌کننده تا آخر اجرا نشده، یا در پوشه‌ی دیگری نصب شده.\n"
+                f"پوشه‌ی برنامه‌ی فعلی:\n{updater.install_dir()}\n\n"
+                f"برای تلاش دوباره 🔄 را بزن.")
             return
         if manual:
             self._offer_update(rel); return
@@ -610,8 +612,9 @@ class MainWindow(QMainWindow):
         md = self.market_data()
 
         def done(df):
-            pos = next((dict(r) for r in self.db.open_trades(self.settings.mode) if r["symbol"] == sym), None)
-            trades = [dict(r) for r in self.db.closed_trades(self.settings.mode, 300) if r["symbol"] == sym]
+            mode = self.live_mode()
+            pos = next((dict(r) for r in self.db.open_trades(mode) if r["symbol"] == sym), None)
+            trades = [dict(r) for r in self.db.closed_trades(mode, 300) if r["symbol"] == sym]
             widget.set_data(df, sym, tf, pos, trades)
         self._run_bg(lambda: enrich(md.candles(sym, tf, limit=500)), done, on_fail or (lambda m: self._on_event("[chart] " + m.splitlines()[0])))
 
@@ -850,7 +853,13 @@ class MainWindow(QMainWindow):
 
         def job():
             df = self.market_data().candles(sym, tf, limit=bars)
-            return run_backtest(sym, df, self.settings.risk, start_equity=self.settings.risk.capital_limit, allow_short=short)
+            return run_backtest(sym, df, self.settings.risk,
+                                 start_equity=self.settings.risk.capital_limit, allow_short=short,
+                                 # the SAME confidence gate the engine will apply, so the page
+                                 # cannot promise trades the engine then refuses to take
+                                 min_confidence={"high": 0.4, "scalp": 0.0}.get(
+                                     self.settings.aggressiveness, 0.55),
+                                 position_pct=getattr(self.settings, "position_pct", 0.0))
 
         def done(res):
             self.btn_bt.setEnabled(True)
@@ -1039,9 +1048,10 @@ class MainWindow(QMainWindow):
         c3.add(FormRow("ریسک هر معامله", self.s_rpt, "حداکثر ضرر یک معامله، درصدی از سقف. ۱٪ = با سقف ۱۰۰ دلار، ۱ دلار"))
         c3.add(FormRow("درصد سرمایه در هر معامله", self.s_pospct,
                        "چند درصد پول در هر معامله گذاشته شود. ۰ = خودکار (اندازه از روی فاصله‌ی حد ضرر).\n"
-                       "⚠ در بک‌تست، عدد ۲۰ به‌جای ۰ نتیجه را از ‎-۴٪‎ به ‎-۲۹٪‎ برد و بیشترین افت "
-                       "را از ۱۴٪ به ۳۲٪ رساند: این حالت فاصله‌ی حد ضرر را نادیده می‌گیرد، پس یک "
-                       "معامله با حد ضرر دور، چند برابر بقیه ریسک می‌کند. ۰ توصیه می‌شود."))
+                       "⚠ این حالت فاصله‌ی حد ضرر را نادیده می‌گیرد، پس معامله‌ای با حد ضرر دور "
+                       "چند برابر بقیه ریسک می‌کند — سود و ضرر هر دو بزرگ‌تر می‌شوند.\n"
+                       "در شبیه‌سازی موتور روی یک حساب مشترک با ۵ ارز، عدد ۲۰ به‌جای ۰ نتیجه را از "
+                       "‎-۴٪‎ به ‎-۲۹٪‎ برد و بیشترین افت را از ۱۴٪ به ۳۲٪ رساند. ۰ توصیه می‌شود."))
         c3.add(FormRow("سقف ریسک همزمان همه‌ی پوزیشن‌ها", self.s_openrisk,
                        "اگر همه‌ی پوزیشن‌های باز با هم حد ضرر بخورند، حداکثر چند درصد سرمایه از دست می‌رود. "
                        "۰ = بدون سقف. با ۶٪ و ریسک ۱٪ در هر معامله، حدود ۶ پوزیشن همزمان جا می‌شود."))
@@ -1097,18 +1107,18 @@ class MainWindow(QMainWindow):
             self.s_pospct.setValue(0)
             self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
             msg = ("حالت هوشمند چندارزی اعمال شد: ۸ ارز، تایم‌فریم روزانه، دقت max، تا ۸ پوزیشن.\n\n"
-                   "صادقانه بگویم: روی یک حساب ۱۰۰۰ دلاری، پخش‌کردن پول روی ۸ ارز در همین بازه "
-                   "بدتر از ۳ ارز درآمد (۸ ارز ‎-۵.۶٪‎ در برابر ۳ ارز ‎+۱.۴٪‎)، چون پول نقد بین "
-                   "همه تقسیم می‌شود. اگر هدف سود است، «جدی و صبور» را بزن.")
+                   "صادقانه بگویم: در شبیه‌سازی موتور روی یک حساب ۱۰۰۰ دلاری و ۶۰۰ کندل روزانه، "
+                   "پخش‌کردن همان پول روی ۸ ارز بدتر از ۳ ارز درآمد (‎-۵.۶٪‎ در برابر ‎+۱.۴٪‎)، "
+                   "چون نقدینگی بین همه تقسیم می‌شود. اگر هدف سود است، «جدی و صبور» را بزن.")
         elif kind == "serious":
             self.s_agg.setCurrentText("normal"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT")
             self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60); self.s_pospct.setValue(0)
             self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
             msg = ("حالت جدی و صبور اعمال شد: روزانه، normal، ۳ ارز، اندازه‌ی خودکار.\n\n"
-                   "این بهترین ترکیبی است که اندازه‌گیری شد: ‎+۱.۴٪‎ روی حساب مشترک ۱۰۰۰ دلاری "
+                   "این بهترین ترکیبی بود که اندازه‌گیری شد: ‎+۱.۴٪‎ روی حساب مشترک ۱۰۰۰ دلاری "
                    "با بیشترین افت ۹٪ — در حالی که همان قوانین با ۸ ارز ‎-۵.۶٪‎ و با «۲۰٪ در هر "
-                   "معامله» ‎-۲۶٪‎ دادند.")
+                   "معامله» ‎-۲۶٪‎ دادند. عددها از ۶۰۰ کندل روزانه با کارمزد واقعی است، نه تضمین.")
         else:  # scalp
             self.s_agg.setCurrentText("scalp"); self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT")
             # 5m, not 1m: of the fast timeframes it was the least bad when measured
@@ -1120,8 +1130,9 @@ class MainWindow(QMainWindow):
                    "(بین -۹٪ تا -۱۸٪). فقط برای دیدن کارکرد برنامه است، نه برای سود.")
         self._save_settings()
         if self.settings.mode == "paper":
-            from ..execution.paper import PaperBroker
-            PaperBroker(self.settings.paper_start_balance).reset(self.settings.paper_start_balance)
+            # Resetting the broker's cash file but leaving the open trades in the journal left
+            # rows describing positions nothing held: the next close had to invent them.
+            self._reset_paper_now()
         QMessageBox.information(self, "اعمال شد", msg + "\n\nحالا برو داشبورد و «توقف» بعد «شروع» را بزن تا فعال شود.")
         self.goto("dashboard")
 
@@ -1189,8 +1200,19 @@ class MainWindow(QMainWindow):
         self._run_bg(lambda: make_brain(s).ping(), lambda r: QMessageBox.information(self, s.ai_provider, f"پاسخ: {r}\nاتصال برقرار است."))
 
     # ============================================================ periodic refresh
+    def live_mode(self) -> str:
+        """The mode the RUNNING engine is in, not the one in the settings form.
+
+        Changing the mode in Settings takes effect only when the engine is restarted, so
+        reading settings.mode while it runs made the dashboard show the paper journal while
+        the engine traded live, or the reverse - the single most dangerous thing this window
+        can get wrong."""
+        if self.engine and self.engine.running():
+            return self.engine.mode
+        return self.settings.mode
+
     def refresh(self):
-        s = self.settings; mode = s.mode
+        s = self.settings; mode = self.live_mode()
         running = bool(self.engine and self.engine.running())
         from ..risk.manager import RiskManager
         rm = RiskManager(s.risk, self.db, mode)
@@ -1393,7 +1415,7 @@ class MainWindow(QMainWindow):
                 self.desk_chart.set_live_price(self._live[ds])
         # live floating P&L on the open positions + equity, without a full DB refresh cycle
         try:
-            opens = [dict(r) for r in self.db.open_trades(self.settings.mode)]
+            opens = [dict(r) for r in self.db.open_trades(self.live_mode())]
         except Exception:
             return
         rows = []
@@ -1419,7 +1441,6 @@ class MainWindow(QMainWindow):
                 pass
 
     def closeEvent(self, ev):
-        self._stop_feed()
         if self.engine and self.engine.running():
             # No question when the installer is already running: the answer would arrive after
             # Windows had failed to replace a locked exe, which is the update loop all over again.

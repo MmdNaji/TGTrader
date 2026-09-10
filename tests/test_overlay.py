@@ -57,3 +57,12 @@ def test_a_github_release_borrows_the_mirrors_checksum(monkeypatch):
     rel = updater.check(timeout=1)
     # whichever of the two equal versions is chosen, it must carry a checksum to verify against
     assert rel and rel.sha256 == "deadbeef"
+
+
+def test_a_release_candidate_never_outranks_its_own_release():
+    assert updater._vtuple("0.5.0") > updater._vtuple("0.4.9")
+    assert updater._vtuple("0.5.0") == updater._vtuple("v0.5.0")
+    # the bug: (0,5,0,1) sorts above (0,5,0), so an rc pinned that user for good
+    assert updater._vtuple("0.5.0-rc1") == updater._vtuple("0.5.0")
+    assert updater._vtuple("0.5.1") > updater._vtuple("0.5.0-rc9")
+    assert updater._vtuple("0.5.0+build7") == updater._vtuple("0.5.0")

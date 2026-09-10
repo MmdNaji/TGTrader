@@ -62,7 +62,11 @@ def base_version() -> str:
 
 
 def _vtuple(v: str) -> tuple[int, ...]:
-    nums = re.findall(r"\d+", v)
+    """Numeric version only. A pre-release suffix is DROPPED, not parsed as another number:
+    "0.5.0-rc1" read as (0,5,0,1) sorts ABOVE the real (0,5,0), so anyone who ever installed a
+    release candidate would be told the final release was older and never offered it again."""
+    core = re.split(r"[-+]", str(v).strip().lstrip("vV"), maxsplit=1)[0]
+    nums = re.findall(r"\d+", core)
     return tuple(int(n) for n in nums[:4]) or (0,)
 
 

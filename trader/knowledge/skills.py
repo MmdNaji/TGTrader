@@ -36,10 +36,17 @@ def parse_seed(md: str) -> list[dict[str, str]]:
 
 
 def load_seed_skills(db: Database) -> int:
-    """Insert the seed skills that are not present yet. Returns how many were added."""
+    """Insert the seed skills that are not present yet. Returns how many were added.
+
+    A seed skill the owner DELETED stays deleted: its name is remembered in ``seed_removed`` so
+    the next start does not put it straight back. Before this, deleting a rule you disagreed
+    with lasted exactly until the app was reopened, which reads as the setting not working."""
+    removed = db.removed_seed_names()
     added = 0
     for f in sorted(SEED_DIR.glob("*.md")):
         for s in parse_seed(f.read_text(encoding="utf-8")):
+            if s["name"].strip().lower() in removed:
+                continue
             if not db.skill_exists(s["name"]):
                 db.add_skill(s["name"], s["category"], s["rule"], source=f"seed:{f.stem}", status="approved")
                 added += 1

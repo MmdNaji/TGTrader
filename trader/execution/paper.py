@@ -15,18 +15,34 @@ class PaperBroker(Broker):
         self.fee_rate = fee_rate
         self.slippage = slippage
         self._state_file = data_dir() / "paper_state.json"
+        self.load_error = False
         self._positions: dict[str, dict] = {}
         self._cash = start_balance
-        self._load(start_balance)
+        try:
+            self._load(start_balance)
+        except RuntimeError:
+            # Surfaced through the log rather than blocking startup; the balance is already
+            # back at start_balance and the damaged file is kept.
+            self.load_error = True
 
     def _load(self, start_balance: float) -> None:
-        if self._state_file.exists():
+        if not self._state_file.exists():
+            return
+        try:
+            st = json.loads(self._state_file.read_text())
+            self._cash = float(st["cash"])
+            self._positions = dict(st.get("positions") or {})
+        except Exception as exc:
+            # Swallowing this silently reset the account to the starting balance and looked
+            # exactly like a run that had made no money. Keep the file and say what happened.
             try:
-                st = json.loads(self._state_file.read_text())
-                self._cash = float(st.get("cash", start_balance))
-                self._positions = st.get("positions", {})
-            except Exception:
+                self._state_file.replace(self._state_file.with_suffix(".json.broken"))
+            except OSError:
                 pass
+            raise RuntimeError(
+                f"the paper account file was unreadable ({exc}); it has been set aside as "
+                f"{self._state_file.name}.broken and the balance is back to {start_balance:g}"
+            ) from exc
 
     def _save(self) -> None:
         self._state_file.write_text(json.dumps({"cash": self._cash, "positions": self._positions, "ts": time.time()}))

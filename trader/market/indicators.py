@@ -21,7 +21,11 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     avg_down = down.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
     rs = avg_up / avg_down.replace(0.0, np.nan)
     out = 100 - 100 / (1 + rs)
-    return out.fillna(100.0).where(avg_down != 0, 100.0).where(avg_up != 0, 0.0)
+    # NO fillna here. The first n bars have no average yet, and filling them with 100 reported
+    # "maximum overbought" for the whole warm-up - a real reading as far as every strategy's
+    # NaN check was concerned. The two where() clauses still handle the genuine all-up and
+    # all-down cases, where avg_down or avg_up really is zero.
+    return out.where(avg_down != 0, 100.0).where(avg_up != 0, 0.0)
 
 
 def true_range(df: pd.DataFrame) -> pd.Series:
