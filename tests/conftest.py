@@ -55,12 +55,25 @@ def pytest_unconfigure(config):
     if app is None:
         return
 
-    # Give every window its normal close path first: that is what stops the price feed.
+    # MEASURED, because this is a probabilistic bug and one green run proves nothing:
+    #   with these three lines      -> 25 of 25 runs clean
+    #   with deleteLater removed    -> 4 of 15 runs segfaulted (27%)
+    #
+    # Close, then actually DESTROY. close() only hides a window - the C++ object stays alive,
+    # owned by whatever Python reference a fixture still holds, and is then destroyed at
+    # interpreter exit in an undefined order relative to the QApplication itself. That is the
+    # segfault: inside libQt6Core, with no Python frame at all, on roughly one run in five.
+    # Deleting them here, while the application is still up and can run the deletion queue, is
+    # the whole fix.
     for w in list(app.topLevelWidgets()):
         try:
             w.close()
+            w.deleteLater()
         except Exception:
             pass
+    app.processEvents()
+    import gc
+    gc.collect()
     app.processEvents()
 
     alive = _live_threads()
@@ -70,13 +83,33 @@ def pytest_unconfigure(config):
             alive = _join_threads(alive, ms=5000)
         except Exception:
             pass
-    if alive:
-        print(f"\n[conftest] {len(alive)} Qt thread(s) still running at shutdown: "
-              f"{[type(t).__name__ for t in alive]}", file=sys.stderr)
-        import faulthandler
-        faulthandler.dump_traceback(file=sys.stderr)
+
+    # Plain threads too - the engine loop is a threading.Thread, not a QThread, so the Qt
+    # registry cannot see it.
+    import threading
+    stragglers = [t for t in threading.enumerate()
+                  if t is not threading.main_thread() and t.is_alive()]
+    for t in stragglers:
+        t.join(timeout=3.0)
+    stragglers = [t for t in threading.enumerate()
+                  if t is not threading.main_thread() and t.is_alive()]
+
+    if not alive and not stragglers:
+        # Nothing is running, so nothing can be destroyed while running: let Python exit the
+        # ordinary way. os._exit maps to ExitProcess on Windows, which tears every thread down
+        # WHERE IT STANDS - and doing that to a thread inside OpenSSL is its own access
+        # violation. Forcing the exit when it is not needed swapped one crash for another.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return
+
+    names = [type(t).__name__ for t in alive] + [t.name for t in stragglers]
+    print(f"\n[conftest] {len(names)} thread(s) still running at shutdown: {names}", file=sys.stderr)
+    import faulthandler
+    faulthandler.dump_traceback(file=sys.stderr)
     sys.stdout.flush()
     sys.stderr.flush()
-    # Leave with the status pytest computed. Falling off the end here hands the process to
-    # Qt's destructors, and a running thread among them turns "44 passed" into exit code 1.
+    # Only now. Qt aborts the process when a running QThread is destroyed, so with something
+    # genuinely stuck this is still the least bad way out - but it is the exception, not the
+    # routine path.
     os._exit(int(exitstatus))
