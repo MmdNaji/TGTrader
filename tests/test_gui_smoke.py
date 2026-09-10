@@ -347,3 +347,22 @@ def test_reset_while_the_engine_is_running_stops_it_wipes_and_restarts(win, monk
         "a reset means start over: no cooldowns or per-bar marks may carry across"
     win.engine.stop(wait=5.0)
     win.engine = None
+
+
+def test_the_price_feed_does_not_ask_one_exchange_for_everything_every_second(win):
+    """Eight symbols polled every second is eight requests a second at one exchange, which is
+    what produced "Too Many Requests" and left the bot with no market data for the symbols it
+    was holding. The chart on screen stays live; the rest take turns."""
+    win.settings.symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
+                            "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT"]
+    win.ch_symbol.setCurrentText("DOGE/USDT")
+    win._sync_watch_symbols()
+    focus, rest = win._watch_split()
+    assert "DOGE/USDT" in focus, "the symbol on screen must be polled every cycle"
+    assert set(focus) & set(rest) == set(), "a symbol must not be in both halves"
+    assert len(focus) + len(rest) == len(set(win._watch_symbols()))
+    # one cycle asks for the focus symbols plus ONE of the others, not all eight
+    per_cycle = len(focus) + (1 if rest else 0)
+    assert per_cycle <= 4, f"{per_cycle} requests per cycle is still too many"
+    # and every symbol is still reached within a few cycles
+    assert per_cycle * (len(rest) or 1) >= len(win._watch_symbols())

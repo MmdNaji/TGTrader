@@ -39,15 +39,18 @@ class RiskSettings:
     risk_per_trade: float = 0.01
     # The day is over when this fraction of the capital limit is lost.
     max_daily_loss: float = 0.03
-    # Never hold more than this many positions at once.
-    max_open_positions: int = 5
+    # Never hold more than this many positions at once. Kept consistent with
+    # max_position_frac below: at 25% of the capital limit each, four is what the cash reaches.
+    max_open_positions: int = 4
     # Stop-loss distance in ATR multiples; take-profit as a multiple of the stop.
     atr_stop_mult: float = 2.0
     reward_risk: float = 2.0
     # Trailing stop kicks in once the trade is this many R in profit (0 = off).
     trail_after_r: float = 1.0
-    # Largest single position as a fraction of the capital limit.
-    max_position_frac: float = 0.5
+    # Largest single position as a fraction of the capital limit. 25%, not 50%: at a half the
+    # account per trade only two positions fit however many the other settings allow, and the
+    # mismatch is invisible until the bot has one trade open and refuses every other.
+    max_position_frac: float = 0.25
     # Ceiling on the TOTAL money at risk across every open position at once (entry to original
     # stop), as a fraction of the capital limit. This is a different thing from max_daily_loss:
     # that one is about losses already taken today, this one is about how much can be lost at
@@ -198,6 +201,35 @@ class Settings:
 
     def has_claude(self) -> bool:
         return bool(self.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY"))
+
+    def advisories(self) -> list[str]:
+        """Settings that are legal but work against each other, in plain language.
+
+        Deliberately NOT part of validate(): validate() decides whether the engine may start at
+        all, and none of these are reasons to refuse. They are reasons the bot will quietly do
+        less than the settings appear to promise - which is exactly what happened here: one
+        position open for hours while every other entry was refused with a truncated message
+        nobody could read.
+        """
+        out: list[str] = []
+        r = self.risk
+        if r.max_open_risk > 0 and r.risk_per_trade > r.max_open_risk:
+            out.append(
+                f"ریسک هر معامله ({r.risk_per_trade*100:.1f}%) از سقف ریسک همزمان "
+                f"({r.max_open_risk*100:.1f}%) بیشتر است. یعنی بعد از اولین معامله، بودجه‌ی "
+                f"ریسک تمام می‌شود و بقیه رد می‌شوند.")
+        if r.max_position_frac > 0 and r.max_open_positions > 1:
+            fits = int(1 / r.max_position_frac)
+            if fits < r.max_open_positions:
+                out.append(
+                    f"«حداکثر پوزیشن همزمان» {r.max_open_positions} است ولی هر پوزیشن تا "
+                    f"{r.max_position_frac*100:.0f}٪ سرمایه می‌گیرد، پس نقدینگی فقط به حدود "
+                    f"{fits} پوزیشن می‌رسد. برای {r.max_open_positions} پوزیشن، این عدد را حدود "
+                    f"{100//max(r.max_open_positions,1)}٪ بگذار.")
+        if len(self.symbols) > r.max_open_positions:
+            out.append(f"{len(self.symbols)} نماد داری ولی حداکثر {r.max_open_positions} پوزیشن "
+                       f"همزمان مجاز است - بقیه فقط بررسی می‌شوند.")
+        return out
 
     def validate(self) -> list[str]:
         problems: list[str] = []

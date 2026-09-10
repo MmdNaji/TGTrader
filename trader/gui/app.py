@@ -146,10 +146,10 @@ class PriceFeed(_Tracked):
     a REST price API and the price does not actually change that often."""
     tick = Signal(dict)
 
-    def __init__(self, settings, symbols_fn):
+    def __init__(self, settings, split_fn):
         super().__init__()
         self._settings = settings
-        self._symbols_fn = symbols_fn
+        self._split_fn = split_fn      # () -> (symbols on screen, everything else)
         self._stop = threading.Event()
         self.finished.connect(self._retire)
 
@@ -166,18 +166,32 @@ class PriceFeed(_Tracked):
         md.abort = self._stop.is_set
         if self._stop.is_set():
             return          # asked to stop while the exchange was still loading
+        turn = 0
+        backoff = 0.0
         while not self._stop.is_set():
-            out = {}
-            for sym in self._symbols_fn():
+            focus, rest = self._split_fn()
+            # The chart the user is actually looking at stays live every cycle; the rest take
+            # turns, one per cycle. Asking for all eight symbols every second was eight requests
+            # a second at one exchange, which is what produced "Too Many Requests" and left the
+            # bot with no market data at all for the symbols it holds.
+            batch = list(focus)
+            if rest:
+                batch.append(rest[turn % len(rest)])
+                turn += 1
+            out, failed = {}, False
+            for sym in batch:
                 if self._stop.is_set():
                     break
                 try:
                     out[sym] = md.price(sym)
                 except Exception:
-                    pass
+                    failed = True
             if out:
                 self.tick.emit(out)
-            self._stop.wait(1.0)
+            # Back off when the source is unhappy, so a rate limit is not answered by asking
+            # harder. Recovers as soon as a cycle succeeds.
+            backoff = min(backoff * 2 + 1.0, 20.0) if failed and not out else 0.0
+            self._stop.wait(1.0 + backoff)
 
     def stop(self):
         self._stop.set()
@@ -320,6 +334,13 @@ class MainWindow(QMainWindow):
     def _page_dashboard(self) -> QWidget:
         inner = QWidget(); v = QVBoxLayout(inner); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(14)
 
+        # Settings that are legal but fight each other. The symptom without this is a bot that
+        # opens one trade and then refuses every other one, with the reason buried in a
+        # truncated column nobody reads.
+        self.lbl_advice = QLabel(""); self.lbl_advice.setObjectName("advice")
+        self.lbl_advice.setWordWrap(True); self.lbl_advice.setVisible(False)
+        v.addWidget(self.lbl_advice)
+
         self.card_setup = Card("راه‌اندازی", "سه قدم تا اولین معامله‌ی کاغذی", accent=True)
         self.setup_rows: dict[str, QLabel] = {}
         for key, text in (("ai", "کلید هوش مصنوعی را در تنظیمات وارد کن و «تست اتصال» را بزن"),
@@ -376,6 +397,13 @@ class MainWindow(QMainWindow):
         c3.add_action(button("🧪 ریست تست", "ghost", self.reset_test))
         c4 = Card("آخرین تصمیم‌ها", "نگه‌داشتن هم یک تصمیم است؛ دلیلش را بخوان")
         self.tbl_decisions = table(["زمان", "نماد", "اقدام", "اطمینان", "منبع", "دلیل"]); self.tbl_decisions.setMinimumHeight(160)
+        # "دلیل" is the column this table exists for, and it was being elided to "not enoug…".
+        # Let it take the slack and show the whole sentence on hover.
+        from PySide6.QtWidgets import QHeaderView as _HV
+        _h = self.tbl_decisions.horizontalHeader()
+        _h.setSectionResizeMode(5, _HV.Stretch)
+        self.tbl_decisions.setWordWrap(False)
+        self.tbl_decisions.setTextElideMode(Qt.ElideRight)
         self.empty_dec = Empty("هنوز تصمیمی ثبت نشده. «شروع» را بزن تا ربات بازار را بررسی کند.")
         c4.add(self.tbl_decisions); c4.add(self.empty_dec)
         low.addWidget(c3, 1); low.addWidget(c4, 1)
@@ -1297,7 +1325,7 @@ class MainWindow(QMainWindow):
         s.risk.trail_after_r = self.s_trail.value()
         s.computer.enabled = self.s_cu_on.isChecked(); s.computer.confirm_before_submit = self.s_cu_confirm.isChecked()
         s.computer.exchange_notes = self.s_cu_notes.toPlainText()
-        problems = s.validate(); s.save()
+        problems = s.validate() + s.advisories(); s.save()
         for combo in (self.ch_symbol, self.bt_symbol):
             cur = combo.currentText(); combo.blockSignals(True); combo.clear(); combo.addItems(s.symbols)
             combo.setCurrentText(cur if cur in s.symbols else (s.symbols[0] if s.symbols else "")); combo.blockSignals(False)
@@ -1339,6 +1367,10 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         s = self.settings; mode = self.live_mode()
+        advice = s.advisories()
+        if hasattr(self, "lbl_advice"):
+            self.lbl_advice.setText("⚠ " + "  ·  ".join(advice) if advice else "")
+            self.lbl_advice.setVisible(bool(advice))
         running = bool(self.engine and self.engine.running())
         from ..risk.manager import RiskManager
         rm = RiskManager(s.risk, self.db, mode)
@@ -1503,15 +1535,32 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._watch_cache = syms      # replaced whole, never mutated in place
+        focus = []
+        for combo_name in ("ch_symbol", "desk_symbol"):
+            try:
+                cs = getattr(self, combo_name).currentText().strip().upper()
+                if cs and cs not in focus:
+                    focus.append(cs)
+            except Exception:
+                pass
+        if self.settings.symbols and self.settings.symbols[0] not in focus:
+            focus.append(self.settings.symbols[0])    # the dashboard chart
+        self._focus_cache = focus
 
     def _watch_symbols(self) -> list[str]:
         # Called from the feed thread: a plain read of a list the GUI thread swapped in.
         return list(getattr(self, "_watch_cache", None) or self.settings.symbols)
 
+    def _watch_split(self) -> tuple[list[str], list[str]]:
+        """(what is on screen, everything else). Read from caches the GUI thread fills."""
+        focus = [s for s in (getattr(self, "_focus_cache", None) or []) if s]
+        rest = [s for s in self._watch_symbols() if s not in focus]
+        return focus, rest
+
     def _start_feed(self):
         self._stop_feed()
         self._sync_watch_symbols()
-        self._feed = PriceFeed(self.settings, self._watch_symbols)
+        self._feed = PriceFeed(self.settings, self._watch_split)
         self._feed.tick.connect(self._on_tick)
         self._feed.start()
 

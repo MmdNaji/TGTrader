@@ -71,6 +71,7 @@ class Engine:
         self._order_err: dict[str, str] = {}       # symbol -> last order error (de-duplicates the log)
         self._reconciled = False
         self._leader_regime: str | None = None   # trend of BTC on this pass
+        self._unmanaged: dict[str, float] = {}   # symbol -> when its price last went missing
         self.status: dict[str, Any] = {"running": False, "last_loop": 0.0, "error": ""}
         load_seed_skills(db)
         self.strategies = ([Scalp()] + list(DEFAULT_STRATEGIES)
@@ -198,6 +199,13 @@ class Engine:
                 if self._order_err.get(f"loop:{symbol}") != msg:
                     self.log(f"symbol pass failed - {msg}", "warn")
                     self._order_err[f"loop:{symbol}"] = msg
+                # An OPEN position still needs its stop checked. Candles come from the kline
+                # endpoint and the price from the ticker endpoint - they fail independently, and
+                # a rate limit usually hits the heavier one first. Skipping the whole symbol
+                # meant a live position sat for hours with nobody watching its stop.
+                pos = next((p for p in open_positions if p["symbol"] == symbol), None)
+                if pos and self._manage_on_price_alone(pos):
+                    open_positions = [p for p in open_positions if p["id"] != pos["id"]]
                 continue
             self._order_err.pop(f"loop:{symbol}", None)
         if self.last_prices:
@@ -426,6 +434,45 @@ class Engine:
         # bar made a two-bar cooldown last three outside scalp mode.
         closed_ts = float(df.index[-2].timestamp()) if len(df) > 1 else float(df.index[-1].timestamp())
         return self.close_position(pos, price, why, bar_ts=closed_ts)
+
+    def _manage_on_price_alone(self, pos: dict) -> bool:
+        """Stop and target only, from the live price, when candles are unavailable.
+
+        No regime exit and no trailing here: both need candles, and inventing them from a
+        single tick would be worse than waiting. Returns True if the position was closed.
+        """
+        sym = pos["symbol"]
+        try:
+            price = float(self.market.price(sym))
+        except Exception as exc:
+            first = self._unmanaged.setdefault(sym, time.time())
+            mins = (time.time() - first) / 60.0
+            key = f"unmanaged:{sym}"
+            if mins > 5 and self._order_err.get(key) != f"{int(mins)}":
+                self._order_err[key] = f"{int(mins)}"
+                self.log(f"UNMANAGED: {sym} has had no price for {mins:.0f} minutes - its stop "
+                         f"is not being checked ({exc})", "error")
+            return False
+        self._unmanaged.pop(sym, None)
+        self._order_err.pop(f"unmanaged:{sym}", None)
+        self.last_prices[sym] = price
+        side, stop = pos["side"], float(pos["stop_price"])
+        tp = float(pos["take_profit"] or 0)
+        why = None
+        if side == "long":
+            if price <= stop:
+                why = "stop"
+            elif tp and price >= tp:
+                why = "target"
+        else:
+            if price >= stop:
+                why = "stop"
+            elif tp and price <= tp:
+                why = "target"
+        if why is None:
+            return False
+        self.log(f"{sym}: closing on the live price alone - candles are unavailable", "warn")
+        return self.close_position(pos, price, why)
 
     def close_position(self, pos: dict, price: float, why: str, bar_ts: float | None = None) -> bool:
         side = pos["side"]

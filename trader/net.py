@@ -46,12 +46,23 @@ def httpx_client(settings: Settings, timeout: float = 30.0):
 
 
 def ccxt_proxy_params(settings: Settings) -> dict[str, Any]:
+    """EXACTLY ONE proxy key, or ccxt refuses the request outright.
+
+    ccxt counts how many of httpProxy / httpsProxy / socksProxy are set and raises
+    InvalidProxySettings when more than one is: "you have multiple conflicting proxy
+    settings(httpProxy,httpsProxy)". We were setting both, so with a proxy configured EVERY
+    ccxt exchange failed on every call - bybit, mexc, htx, bitget, all of them. The only
+    source that kept working was KCEX, which talks httpx directly, and it was then carrying
+    every symbol on its own until it started answering "Too Many Requests".
+
+    httpsProxy is the right single key: every exchange endpoint is https, and an http:// URL
+    here describes the PROXY, not the target."""
     proxy = resolve_proxy(settings)
     if not proxy:
         return {}
     if proxy.startswith("socks"):
         return {"socksProxy": proxy}
-    return {"httpProxy": proxy, "httpsProxy": proxy}
+    return {"httpsProxy": proxy}
 
 
 def anthropic_http_client(settings: Settings):

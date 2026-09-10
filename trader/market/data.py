@@ -41,7 +41,20 @@ def ohlcv_to_frame(rows: list[list[float]]) -> pd.DataFrame:
 
 # Public market-data sources tried in order when the configured exchange is unreachable
 # (Bybit, Binance, OKX and KuCoin answer 403 "blocked from your country" from Iran).
-FALLBACK_SOURCES = ["mexc", "kcex", "gateio", "htx", "bitget"]
+# "gate", not "gateio": ccxt renamed the id and `ccxt.gateio` does not exist, so that entry
+# was a guaranteed AttributeError in the middle of every fallback walk. Anything listed here
+# is checked against the installed ccxt at import time below, so a rename cannot go unnoticed
+# again.
+FALLBACK_SOURCES = ["mexc", "kcex", "gate", "htx", "bitget", "kucoin"]
+
+
+def available_sources() -> list[str]:
+    """The fallback list, minus anything this build of ccxt does not actually have."""
+    try:
+        import ccxt
+    except Exception:
+        return list(FALLBACK_SOURCES)
+    return [s for s in FALLBACK_SOURCES if s == "kcex" or hasattr(ccxt, s)]
 
 
 def _blocked(exc: Exception) -> bool:
@@ -74,7 +87,7 @@ class MarketData:
         pref = (getattr(self.settings, "data_source", "auto") or "auto").lower()
         if pref != "auto":
             return [pref]
-        return [cfg] + [f for f in FALLBACK_SOURCES if f != cfg]
+        return [cfg] + [f for f in available_sources() if f != cfg]
 
     @property
     def is_kcex(self) -> bool:

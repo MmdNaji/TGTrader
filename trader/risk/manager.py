@@ -12,6 +12,10 @@ from pathlib import Path
 from ..config import RiskSettings, data_dir
 
 
+# The smallest position worth opening, as a fraction of the capital limit.
+MIN_NOTIONAL_FRAC = 0.02
+
+
 @dataclass
 class Sizing:
     qty: float
@@ -121,29 +125,43 @@ class RiskManager:
             risk_amount = self.risk.risk_per_trade * base
             qty = risk_amount / stop_distance
             max_notional = hard_cap
-        # Total open risk across every position at once. Deliberately its own setting and NOT
-        # the daily loss limit: that one is about losses already realised today, this is about
-        # how much can be lost simultaneously if a correlated market takes every stop together.
-        risk_budget = abs(getattr(self.risk, "max_open_risk", 0.0) * self.risk.capital_limit)
-        if risk_budget > 0:
-            left = risk_budget - self.open_risk(open_positions or [])
-            want = qty * stop_distance
-            # Refuse rather than shrink to a token size. A position sized down to a fraction of
-            # normal still pays a full round trip in fees, and shrinking makes a trade's size
-            # depend on what happened to be open when it arrived rather than on the setup.
-            if left < min(want, self.risk.risk_per_trade * base) * 0.5:
-                return None
-            if want > left:
-                qty = left / stop_distance
-                max_notional = min(max_notional, qty * price)
         if cash is not None and cash > 0:
             # never try to spend more than is actually available (leave room for fee + slippage)
             max_notional = min(max_notional, cash * 0.97)
         if qty * price > max_notional:
             qty = max_notional / price
+
+        # Total open risk across every position at once. Deliberately its own setting and NOT
+        # the daily loss limit: that one is about losses already realised today, this is about
+        # how much can be lost simultaneously if a correlated market takes every stop together.
+        #
+        # It runs HERE, after every other cap, because it has to judge the position that will
+        # actually be traded. Run earlier it saw the raw risk_per_trade size - and with a
+        # capital limit that caps the notional far below it, that number is fiction. Measured
+        # on the owner's own settings (risk 10%, open-risk cap 6%, capital 1000): the real
+        # second position risked $28 of a $60 budget with $31 free, and was refused because the
+        # check was comparing against an imaginary $100. One position, for hours, and nothing
+        # said why.
+        risk_budget = abs(getattr(self.risk, "max_open_risk", 0.0) * self.risk.capital_limit)
+        if risk_budget > 0:
+            left = risk_budget - self.open_risk(open_positions or [])
+            want = qty * stop_distance
+            if want > left:
+                # Trim to what is left, then refuse if the remainder is not worth a round trip:
+                # a token position pays full fees for a fraction of the edge.
+                if left < want * 0.5:
+                    return None
+                qty = left / stop_distance
+
         if qty_step > 0:
             qty = (qty // qty_step) * qty_step
         if qty <= 0 or (min_qty and qty < min_qty):
+            return None
+        # A dust position is not a small trade, it is a pointless one. Once the cash is nearly
+        # spent the caps above happily produce a $15 or a $0.40 position: it pays a full round
+        # trip and two spreads to put a rounding error to work, and it clutters the journal
+        # with trades that cannot move the account either way.
+        if qty * price < MIN_NOTIONAL_FRAC * self.risk.capital_limit:
             return None
         if side == "long":
             stop = price - stop_distance

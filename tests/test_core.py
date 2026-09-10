@@ -778,3 +778,138 @@ def test_engine_stop_can_wait_for_its_own_thread():
     assert eng.stop(wait=10.0) is True, "stop(wait) must return True once the thread has ended"
     assert not eng.running()
     assert not any(t.name == "engine" and t.is_alive() for t in threading.enumerate())
+
+
+def test_the_open_risk_cap_judges_the_position_that_will_actually_be_traded():
+    """It used to run before the notional and cash caps, so it compared against the raw
+    risk_per_trade size. With a capital limit that caps the notional far below that, the number
+    it judged was fiction: measured on the owner's own settings the real second position risked
+    $28 of a $60 budget with $31 free, and was refused because the check thought it wanted $100.
+    One position, for hours, and nothing said why."""
+    r = RiskSettings(capital_limit=1000, risk_per_trade=0.10, max_open_risk=0.06,
+                     max_daily_loss=0.045, max_position_frac=0.5, max_open_positions=20)
+    rm = RiskManager(r, None, "paper")
+    opens, cash = [], 1000.0
+    for _ in range(6):
+        sz = rm.size("short", 0.0838, 0.004776, 1000.0, cash=cash, open_positions=opens)
+        if sz is None:
+            break
+        opens.append({"entry_price": 0.0838, "init_stop": 0.0886, "qty": sz.qty})
+        cash -= sz.notional
+    assert len(opens) >= 2, "a second position must fit inside the open-risk budget"
+    assert rm.open_risk(opens) <= 0.06 * 1000 + 1e-9, "and the cap must still hold"
+    # with settings that fit each other it fills up to the cap instead of stopping at one
+    r2 = RiskSettings(capital_limit=1000, risk_per_trade=0.01, max_open_risk=0.06,
+                      max_position_frac=0.2)
+    rm2 = RiskManager(r2, None, "paper")
+    opens2, cash2 = [], 1000.0
+    for _ in range(10):
+        sz = rm2.size("short", 0.0838, 0.004776, 1000.0, cash=cash2, open_positions=opens2)
+        if sz is None:
+            break
+        opens2.append({"entry_price": 0.0838, "init_stop": 0.0886, "qty": sz.qty})
+        cash2 -= sz.notional
+    assert len(opens2) >= 5 and rm2.open_risk(opens2) <= 0.06 * 1000 + 1e-9
+
+
+def test_no_dust_positions():
+    """Once the cash is nearly spent the caps happily produce a $15 or a $0.40 position: a full
+    round trip and two spreads to put a rounding error to work."""
+    r = RiskSettings(capital_limit=1000, risk_per_trade=0.01, max_open_risk=0.5,
+                     max_position_frac=0.5)
+    rm = RiskManager(r, None, "paper")
+    assert rm.size("long", 100.0, 2.0, 1000.0, cash=1000.0) is not None
+    assert rm.size("long", 100.0, 2.0, 1000.0, cash=5.0) is None, "a $5 position is not a trade"
+
+
+def test_ccxt_is_given_exactly_one_proxy_key():
+    """ccxt counts how many of httpProxy/httpsProxy/socksProxy are set and REFUSES the request
+    when more than one is. Setting both broke every ccxt exchange for anyone using a proxy, and
+    left KCEX carrying every symbol alone until it started answering "Too Many Requests"."""
+    from trader import net
+    s = Settings(); s.proxy_mode = "manual"
+    s.exchange.proxy = "http://127.0.0.1:10809"
+    p = net.ccxt_proxy_params(s)
+    assert len(p) == 1 and "httpsProxy" in p, p
+    s.exchange.proxy = "socks5://127.0.0.1:10808"
+    p = net.ccxt_proxy_params(s)
+    assert len(p) == 1 and "socksProxy" in p, p
+    s.proxy_mode = "none"
+    assert net.ccxt_proxy_params(s) == {}
+
+
+def test_every_fallback_source_exists_in_this_ccxt():
+    """"gateio" was in the list and ccxt renamed it to "gate", so that entry was a guaranteed
+    AttributeError in the middle of every fallback walk."""
+    import ccxt
+    from trader.market.data import FALLBACK_SOURCES, available_sources
+    missing = [s for s in FALLBACK_SOURCES if s != "kcex" and not hasattr(ccxt, s)]
+    assert not missing, f"these fallback sources do not exist in ccxt: {missing}"
+    assert "kcex" in available_sources()
+
+
+def test_settings_warn_when_the_risk_knobs_contradict_each_other():
+    s = Settings()
+    s.risk.capital_limit = 1000
+    s.risk.risk_per_trade = 0.10        # $100 a trade
+    s.risk.max_open_risk = 0.06         # but only $60 may be at risk at once
+    s.risk.max_open_positions = 20
+    s.risk.max_position_frac = 0.5      # and each position takes half the account
+    advice = s.advisories()
+    assert any("سقف ریسک همزمان" in p for p in advice), advice
+    assert any("نقدینگی" in p for p in advice), advice
+    # ...but an advisory must NEVER stop the engine starting - validate() is the blocker list
+    assert not [p for p in s.validate() if "ریسک همزمان" in p or "نقدینگی" in p], \
+        "a contradictory-but-legal setting is a warning, not a refusal to run"
+
+    ok = Settings()
+    ok.risk.capital_limit = 1000; ok.risk.risk_per_trade = 0.01
+    ok.risk.max_open_risk = 0.06; ok.risk.max_open_positions = 5
+    ok.risk.max_position_frac = 0.2
+    ok.symbols = ["BTC/USDT"]
+    assert ok.advisories() == [], ok.advisories()
+
+    # and the SHIPPED defaults must not contradict themselves
+    d = Settings(); d.symbols = d.symbols[: d.risk.max_open_positions]
+    assert d.advisories() == [], f"the default settings fight each other: {d.advisories()}"
+
+
+def test_a_position_is_still_managed_when_candles_are_unavailable():
+    """Candles come from the kline endpoint and the price from the ticker endpoint; they fail
+    independently, and a rate limit usually hits the heavier one first. Skipping the whole
+    symbol meant a live position sat for hours with nobody watching its stop."""
+    s, db, pb, eng = _engine("t_nocandles.db", symbols=("X/Y",))
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 95.0, 110.0, "t", "r",
+                  entry_fee=fill.fee)
+
+    class KlinesDown:
+        """The exact shape of the failure in the owner's log: klines rate-limited, ticker fine."""
+        is_kcex = False
+        price_now = 120.0
+        def candles(self, symbol, timeframe=None, limit=400, max_age=20.0):
+            raise RuntimeError("KCEX kline: Too Many Requests")
+        def price(self, symbol):
+            return self.price_now
+
+    eng.market = KlinesDown()
+    eng.loop_once()
+    assert not db.open_trades("paper"), "the target was passed and nobody closed it"
+    row = dict(db.closed_trades("paper")[0])
+    assert row["exit_price"] > 100.0
+
+    # and when even the price is gone, it says so instead of failing silently
+    s2, db2, pb2, eng2 = _engine("t_noprice.db", symbols=("X/Y",))
+    f2 = pb2.market_order("X/Y", "buy", 1.0, 100.0)
+    db2.open_trade("paper", "X/Y", "long", f2.qty, f2.price, 95.0, 110.0, "t", "r", entry_fee=f2.fee)
+
+    class AllDown(KlinesDown):
+        def price(self, symbol):
+            raise RuntimeError("no market-data source reachable")
+
+    eng2.market = AllDown()
+    eng2._unmanaged["X/Y"] = time.time() - 600      # ten minutes with no price
+    eng2.loop_once()
+    assert db2.open_trades("paper"), "it cannot close a position it has no price for"
+    assert any("UNMANAGED" in (l["message"] or "") for l in db2.recent_journal(50)), \
+        "a position nobody can watch must be reported, not skipped in silence"
