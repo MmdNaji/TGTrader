@@ -72,11 +72,28 @@ class BtResult:
         }
 
 
+def engine_params(settings) -> dict:
+    """Everything about the LIVE engine that changes what a backtest would do.
+
+    One place on purpose. These arguments were being passed differently by the Backtest page,
+    the self-test page and the CLI, so the same app reported three different backtests for one
+    set of settings - and the scalp preset was measured against a strategy list that did not
+    include Scalp, which is the only strategy that preset exists for.
+    """
+    from ..strategy.builtin import DEFAULT_STRATEGIES, Scalp
+    agg = getattr(settings, "aggressiveness", "normal")
+    return {
+        "min_confidence": {"high": 0.4, "scalp": 0.0}.get(agg, 0.55),
+        "position_pct": getattr(settings, "position_pct", 0.0),
+        "strategies": ([Scalp()] + list(DEFAULT_STRATEGIES)) if agg == "scalp" else list(DEFAULT_STRATEGIES),
+    }
+
+
 def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity: float = 1000.0,
                  strategies: list[Strategy] | None = None, fee_rate: float = 0.001, slippage: float = 0.0005,
                  warmup: int = 60, allow_short: bool = True,
                  leader_regimes: pd.Series | None = None, min_confidence: float = 0.0,
-                 position_pct: float = 0.0) -> BtResult:
+                 position_pct: float = 0.0, cooldown_bars: float = 2.0) -> BtResult:
     """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
     a long is refused while the leader is in ``trend_down`` and a short while it is in
     ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
@@ -97,6 +114,7 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
     strategies = strategies or DEFAULT_STRATEGIES
     rr, atr_mult = risk.reward_risk, risk.atr_stop_mult
     rm = RiskManager(risk, None, "backtest")     # the same sizing code the live loop runs
+    cooldown_until = -1                          # bar index before which no new entry is taken
 
     for i in range(warmup, len(data)):
         bar = data.iloc[i]
@@ -132,6 +150,14 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 elif l <= t.tp:
                     exit_px, why = t.tp, "target"
             if exit_px is None:
+                # The engine closes a trend trade when the regime flips against it, on every
+                # pass. Without it here the backtest models a system that holds every trade to
+                # its stop or its target, which is not the system being run.
+                reg_now = detect_regime(data.iloc[: i + 1])
+                if (t.side == "long" and reg_now == "trend_down") or \
+                   (t.side == "short" and reg_now == "trend_up"):
+                    exit_px, why = c, "regime flipped"
+            if exit_px is None:
                 # R from the ORIGINAL stop. Measuring it from the already-trailed stop shrinks it
                 # every bar, so the stop walks into the price and closes every winner for nothing.
                 t.stop = rm.trail_stop(t.side, t.entry, t.stop, c, t.init_stop or t.stop)
@@ -149,9 +175,14 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 equity += pnl + t.entry_fee   # entry fee was already taken from equity when the trade opened
                 res.trades.append(t)
                 open_t = None
+                if why == "stop":
+                    # The engine sits out COOLDOWN_BARS after a stop-out; without the same rule
+                    # here the backtest re-enters the losing idea on the next bar and reports a
+                    # trade count the engine will never produce.
+                    cooldown_until = i + int(cooldown_bars)
 
         # 3. look for a new signal on the closed bar
-        if open_t is None and pending is None:
+        if open_t is None and pending is None and i >= cooldown_until:
             window = data.iloc[: i + 1]
             regime = detect_regime(window)
             if regime not in ("volatile", "unknown"):

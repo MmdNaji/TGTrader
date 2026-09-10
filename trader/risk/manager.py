@@ -102,9 +102,12 @@ class RiskManager:
         base = min(equity, self.risk.capital_limit)
         hard_cap = self.risk.max_position_frac * self.risk.capital_limit
         if position_pct and position_pct > 0:
-            # explicit "spend this percent of capital on each trade" - still inside the hard caps:
-            # it scales with the account (base, not capital_limit), never exceeds max_position_frac,
-            # and can never risk more than risk_per_trade if the stop is hit.
+            # Explicit "spend this percent of capital on each trade". It stays inside the hard
+            # caps - it scales with the account (base, not capital_limit) and never exceeds
+            # max_position_frac - but it deliberately OVERRIDES risk_per_trade, which is the
+            # whole point of the knob and is why it is the most damaging setting in the app.
+            # The only loss ceiling left on this path is the daily budget, applied below; at the
+            # shipped defaults that is three times risk_per_trade, not equal to it.
             max_notional = min((position_pct / 100.0) * base, hard_cap)
             qty = max_notional / price
             # An explicit percent deliberately overrides risk_per_trade - that is what the knob is

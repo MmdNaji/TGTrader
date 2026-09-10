@@ -52,9 +52,29 @@ class CcxtBroker(Broker):
             order = self.ex.fetch_order(order["id"], symbol)
         except Exception:
             pass
+        filled = float(order.get("filled") or 0.0)
+        if filled <= 0:
+            # Never report a fill the exchange did not make. Falling back to the requested
+            # amount opened a journal position that does not exist, and the next close then
+            # tried to sell coins that were never bought.
+            raise RuntimeError(f"{symbol}: exchange reported no fill (status={order.get('status')})")
         price = float(order.get("average") or order.get("price") or price_hint)
-        filled = float(order.get("filled") or amount)
+        # Fee.cost carries a CURRENCY, and on a spot buy most exchanges charge it in the BASE
+        # asset - so the number is a quantity of coins, not money. Everything above this layer
+        # subtracts Fill.fee from a quote-currency P&L, so a base-currency fee must be
+        # converted at the fill price, and a fee in some third currency (a BNB/KCS discount)
+        # is not a cost against this trade's quote balance at all.
         fee = 0.0
-        if order.get("fee") and order["fee"].get("cost"):
-            fee = float(order["fee"]["cost"])
+        f = order.get("fee") or {}
+        cost = f.get("cost")
+        if cost:
+            cur = (f.get("currency") or "").upper()
+            quote = self._quote(symbol).upper()
+            base = symbol.split("/")[0].upper()
+            if cur in ("", quote):
+                fee = abs(float(cost))
+            elif cur == base:
+                fee = abs(float(cost)) * price
+            # any other currency: the trade's quote balance did not pay it, so it is not
+            # this trade's cost. Left at 0 deliberately rather than guessing a rate.
         return Fill(symbol, side, filled, price, fee, order_id=str(order.get("id", "")))

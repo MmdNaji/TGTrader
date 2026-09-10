@@ -20,10 +20,11 @@ class PaperBroker(Broker):
         self._cash = start_balance
         try:
             self._load(start_balance)
-        except RuntimeError:
-            # Surfaced through the log rather than blocking startup; the balance is already
-            # back at start_balance and the damaged file is kept.
-            self.load_error = True
+        except RuntimeError as exc:
+            # Kept as a MESSAGE, not a bare flag. The first version set self.load_error = True
+            # and nothing ever read it, so a damaged file still reset the balance in silence -
+            # which looks exactly like a run that made no money.
+            self.load_error = str(exc)
 
     def _load(self, start_balance: float) -> None:
         if not self._state_file.exists():

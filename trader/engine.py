@@ -117,6 +117,9 @@ class Engine:
     def _run(self) -> None:
         self.status["running"] = True
         self.log(f"engine started: mode={self.mode} market={self.settings.market} symbols={self.settings.symbols}")
+        err = getattr(self.broker, "load_error", None)
+        if err:
+            self.log(f"paper account: {err}", "warn")
         while not self._stop.is_set():
             try:
                 self.loop_once()
@@ -144,7 +147,12 @@ class Engine:
             if row["symbol"] in have:
                 continue
             price = float(row["entry_price"])
-            self.db.close_trade(row["id"], price, 0.0, None)
+            # Under the same lock as every other write to this table. Without it, a manual
+            # close running on the GUI thread could have its real P&L overwritten with zero
+            # between its own status check and its db.close_trade.
+            with self._trade_lock:
+                if not self.db.close_trade(row["id"], price, 0.0, None):
+                    continue
             self.log(f"reconciled {row['symbol']}: the broker holds no such position, "
                      f"trade #{row['id']} marked closed at entry", "warn")
 
@@ -389,8 +397,11 @@ class Engine:
             elif tp and price <= tp:
                 why = "target"
         if why is None:
-            # trend-change exit for trend trades
-            regime = detect_regime(df)
+            # trend-change exit for trend trades, read off the CLOSED bar. Entries were moved
+            # off the forming bar in this same file because a signal on it can un-happen before
+            # the bar closes; an EXIT decided that way is the same mistake, and it closes a
+            # position for real money.
+            regime = detect_regime(df.iloc[:-1] if len(df) > 80 else df)
             if (side == "long" and regime == "trend_down") or (side == "short" and regime == "trend_up"):
                 why = "regime flipped"
         if why is None:
@@ -401,7 +412,10 @@ class Engine:
                 self.db.update_stop(pos["id"], new_stop)
                 self.log(f"trail {pos['symbol']} stop {stop:g} -> {new_stop:g}")
             return False
-        return self.close_position(pos, price, why, bar_ts=float(df.index[-1].timestamp()))
+        # The CLOSED bar, to match what _consider_entry compares against. Stamping the forming
+        # bar made a two-bar cooldown last three outside scalp mode.
+        closed_ts = float(df.index[-2].timestamp()) if len(df) > 1 else float(df.index[-1].timestamp())
+        return self.close_position(pos, price, why, bar_ts=closed_ts)
 
     def close_position(self, pos: dict, price: float, why: str, bar_ts: float | None = None) -> bool:
         side = pos["side"]

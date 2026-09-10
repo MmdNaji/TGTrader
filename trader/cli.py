@@ -27,7 +27,9 @@ def cmd_backtest(a):
         s.timeframe = a.tf
     md = MarketData(s)
     df = md.candles(a.symbol, s.timeframe, limit=a.bars)
-    res = run_backtest(a.symbol, df, s.risk, start_equity=s.risk.capital_limit, allow_short=a.short)
+    from .backtest.engine import engine_params
+    res = run_backtest(a.symbol, df, s.risk, start_equity=s.risk.capital_limit, allow_short=a.short,
+                       **engine_params(s))
     st = res.stats()
     print(json.dumps(st, indent=2))
     if a.trades:

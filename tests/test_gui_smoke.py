@@ -114,18 +114,26 @@ def test_a_chart_refresh_does_not_throw_the_view_away(win):
 
 def test_closing_the_window_cannot_abort_the_process():
     """A QThread still running when Python lets go of it makes Qt abort the whole process.
-    The price feed loads an exchange's market list, which can outlast any sane wait, so the
-    close path has to join what it can and terminate what it cannot."""
-    from trader.gui.app import MainWindow, _join_threads
+
+    This test used to iterate w._workers and w._retiring_feeds AFTER closeEvent had emptied
+    both lists, so its loop body never ran: it passed for a whole release while the price feed
+    was not being stopped at all. It now asserts on the module's own thread registry, which
+    nothing clears, and only about the threads this window started.
+    """
+    from trader.gui.app import MainWindow, _join_threads, live_threads
     app = QApplication.instance() or QApplication([])
+    # The registry is global and the module-scoped fixture keeps its own window - and its own
+    # feed - open, so measure against a baseline rather than expecting an empty registry.
+    baseline = set(live_threads())
     w = MainWindow()
     w.show()
     app.processEvents()
+    mine = set(live_threads()) - baseline
+    assert mine, "the window should have started at least one thread of its own"
     w.close()
     app.processEvents()
-    _join_threads(list(w._workers) + list(w._retiring_feeds), ms=3000)
-    for t in list(w._workers) + list(w._retiring_feeds):
-        assert t.isFinished(), "a thread survived the close path and would abort the process"
+    still = _join_threads([t for t in live_threads() if t in mine], ms=5000)
+    assert not still, f"threads survived the close path: {[type(t).__name__ for t in still]}"
 
 
 def test_the_real_main_starts_and_exits_cleanly():
@@ -141,6 +149,11 @@ def test_the_real_main_starts_and_exits_cleanly():
         import os, sys, tempfile
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         os.environ["TGTRADER_HOME"] = tempfile.mkdtemp(prefix="mainexit-")
+        # The rest of the suite switches the startup update check off; this test must NOT.
+        # That check is the thread that reached the network, built an SSL context, and was
+        # still in flight at shutdown - the exact case that crashed on Windows. Quitting at
+        # 5s lands right on top of it.
+        os.environ.pop("TGTRADER_NO_AUTOUPDATE", None)
         from PySide6.QtWidgets import QApplication, QMessageBox
         from PySide6.QtCore import QTimer
         QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
@@ -148,14 +161,47 @@ def test_the_real_main_starts_and_exits_cleanly():
         QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.No)
         _exec = QApplication.exec
         def _patched(*a, **k):
-            QTimer.singleShot(3000, QApplication.instance().quit)
+            QTimer.singleShot(5000, QApplication.instance().quit)
             return _exec()
         QApplication.exec = staticmethod(_patched)
         import trader.gui.app as A
         sys.exit(A.main())
     ''')
     r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=180)
-    assert r.returncode == 0, (
-        f"main() exited {r.returncode} "
-        f"({'killed by signal ' + str(-r.returncode) if r.returncode < 0 else 'error'})\n"
-        f"{r.stderr[-2000:]}")
+    # A POSIX signal shows up as a negative returncode; Windows reports an unhandled SEH
+    # exception or an abort() as a large unsigned value (0xC0000409, 0xC0000005 and friends),
+    # which the old message called simply "error" on the one platform where this crash was seen.
+    if r.returncode < 0:
+        how = f"killed by signal {-r.returncode}"
+    elif r.returncode > 0x8000_0000 // 2:
+        how = f"crashed, Windows status 0x{r.returncode & 0xFFFFFFFF:08X}"
+    else:
+        how = "exited with an error"
+    assert r.returncode == 0, f"main() {how} (code {r.returncode})\n{r.stderr[-2000:]}"
+
+
+def test_join_threads_never_terminates_a_thread():
+    """QThread.terminate() kills a thread wherever it is. CI caught it killing one inside
+    OpenSSL's create_default_context: "Windows fatal exception: access violation" - a corrupted
+    process instead of a clean one. Waiting, then leaving via os._exit, is the safe pair."""
+    import ast
+    import inspect
+    from trader.gui import app as A
+
+    # Parse it, do not grep it: the explanation of why terminate() is absent naturally
+    # contains the word, and a text search on the source calls that a violation.
+    tree = ast.parse(inspect.getsource(A))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "terminate"]
+    assert not calls, f"terminate() is called again at line(s) {[c.lineno for c in calls]}"
+
+    class Stuck:
+        def __init__(self): self.waited = 0
+        def wait(self, ms): self.waited += 1; return False      # never finishes
+        def terminate(self): raise AssertionError("must never be called")
+
+    s = Stuck()
+    still = A._join_threads([s], ms=1)
+    assert still == [s], "a thread that will not stop must be REPORTED, not killed"
+    assert s.waited == 1

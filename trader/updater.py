@@ -12,10 +12,13 @@ the mirror ever wedged - the app reported "you are up to date" while a newer bui
 
 How an update is applied (Windows)
 ----------------------------------
-``install()`` writes a small .cmd helper that waits for this process to exit, runs the
-installer silently INTO THE FOLDER THE APP IS RUNNING FROM (so it can never install a second
-copy somewhere else and relaunch the old one), logs to %TEMP%\\tgtrader-update.log, and starts
-the new exe. If that folder is not writable (Program Files) the helper is started elevated.
+``download()`` fetches the installer through the app's own proxy and verifies its SHA-256
+against the figure the mirror publishes. ``install()`` then opens it the ordinary way - the
+same thing as double-clicking it - and the caller QUITS immediately, because Windows will not
+let the Inno wizard replace an exe that is still running. That is the whole mechanism: no .cmd
+helper, no silent flags, no self-restart. Every one of those was tried and each produced the
+same download loop on the owner's machine.
+
 A loop guard refuses to auto-install the same version twice within 30 minutes.
 """
 from __future__ import annotations
@@ -53,6 +56,7 @@ class Release:
     sha256: str = ""
     source: str = "server"
     kind: str = "exe"          # only full installers are shipped; the zip-overlay path is gone
+    verified: bool = False     # set by download(): was the SHA-256 actually compared?
 
 
 def base_version() -> str:
@@ -180,10 +184,10 @@ def download(rel: Release, progress: Callable[[int, int], None] | None = None) -
     if rel.sha256 and h.hexdigest().lower() != rel.sha256.lower():
         dest.unlink(missing_ok=True)
         raise RuntimeError("downloaded file is corrupted (checksum mismatch), try again")
-    if not rel.sha256:
-        # Say so rather than implying the file was checked. Everything here travels over plain
-        # HTTP, so an unverified installer is a real (if small) risk worth naming.
-        pass
+    # rel.verified says whether the checksum was actually compared. Everything here travels
+    # over plain HTTP, so "downloaded" and "verified" are different claims and the UI must be
+    # able to tell them apart instead of implying the stronger one.
+    rel.verified = bool(rel.sha256)
     return dest
 
 
@@ -206,19 +210,6 @@ def mark_attempt(version: str) -> None:
         _guard_file().write_text(json.dumps({"version": version, "ts": time.time(), "from": __version__}))
     except Exception:
         pass
-
-
-def log_path() -> Path:
-    return Path(tempfile.gettempdir()) / "tgtrader-update.log"
-
-
-def _writable(p: Path) -> bool:
-    try:
-        t = p / ".write_test"
-        t.write_text("x"); t.unlink()
-        return True
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------- install

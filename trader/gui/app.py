@@ -46,7 +46,39 @@ NAV = [
 
 
 # ---------------------------------------------------------------- threading helpers
-class Worker(QThread):
+# Every QThread this app starts, so the exit path can find them ALL.
+#
+# QApplication.findChildren(QThread) was used for this and returns an empty list: both thread
+# classes here call super().__init__() with no parent, so they are not children of anything Qt
+# can walk. The shutdown guard built on it looked thorough and was doing nothing whatsoever.
+_LIVE_THREADS: set = set()
+
+
+def live_threads() -> list:
+    """Threads that have been started and have not finished. Used by the exit path and by the
+    test suite's session teardown."""
+    return [t for t in list(_LIVE_THREADS) if _is_running(t)]
+
+
+def _is_running(t) -> bool:
+    try:
+        return bool(t.isRunning())
+    except RuntimeError:
+        return False          # already deleted on the C++ side
+
+
+class _Tracked(QThread):
+    """A QThread that puts itself in _LIVE_THREADS for as long as it is running."""
+
+    def start(self, *a, **k):
+        _LIVE_THREADS.add(self)
+        super().start(*a, **k)
+
+    def _retire(self):
+        _LIVE_THREADS.discard(self)
+
+
+class Worker(_Tracked):
     done = Signal(object)
     failed = Signal(str)
     progress = Signal(int, int)
@@ -54,6 +86,7 @@ class Worker(QThread):
     def __init__(self, fn: Callable[[], Any]):
         super().__init__()
         self.fn = fn
+        self.finished.connect(self._retire)
 
     def run(self):
         try:
@@ -93,7 +126,7 @@ class Bridge(QObject):
     confirm_request = Signal(str)
 
 
-class PriceFeed(QThread):
+class PriceFeed(_Tracked):
     """Streams the latest price for the watched symbols about once a second, so the chart,
     the stop/target zones and the floating P&L move live. One second is the fastest that is
     safe against an exchange's request limits - true millisecond ticks are not possible over
@@ -105,6 +138,7 @@ class PriceFeed(QThread):
         self._settings = settings
         self._symbols_fn = symbols_fn
         self._stop = threading.Event()
+        self.finished.connect(self._retire)
 
     def run(self):
         from ..market.data import MarketData
@@ -179,7 +213,12 @@ class MainWindow(QMainWindow):
         self.goto("dashboard")
         self._feed: PriceFeed | None = None
         self._start_feed()
-        QTimer.singleShot(4000, lambda: self._check_update(manual=False))
+        if not os.environ.get("TGTRADER_NO_AUTOUPDATE"):
+            # `self` is the CONTEXT object, not just a closure target. Without it the timer
+            # belongs to nobody: it was measured firing five seconds AFTER the window had been
+            # closed and its threads joined, starting a fresh network thread on a dead window
+            # that nothing could ever join. That is the thread that crashed the Windows build.
+            QTimer.singleShot(4000, self, lambda: self._check_update(manual=False))
 
     # ------------------------------------------------------------ frame: sidebar + topbar
     def _sidebar(self) -> QWidget:
@@ -197,8 +236,11 @@ class MainWindow(QMainWindow):
                 v.addSpacing(10)
         v.addStretch()
         self.side_status = pill("متوقف", "muted"); v.addWidget(self.side_status, 0, Qt.AlignHCenter)
-        base = updater.base_version()
-        foot = QLabel(f"نسخه {__version__}" + (f" (exe {base})" if base != __version__ else "")); foot.setObjectName("sideFoot"); foot.setAlignment(Qt.AlignCenter); v.addWidget(foot)
+        # One version, always. The "(exe N)" suffix existed for the code-overlay layer, where
+        # the running code and the installed exe could genuinely differ; that layer is gone, so
+        # the suffix could never render and only invited the question of which number was real.
+        foot = QLabel(f"نسخه {__version__}")
+        foot.setObjectName("sideFoot"); foot.setAlignment(Qt.AlignCenter); v.addWidget(foot)
         return side
 
     def _topbar(self) -> QWidget:
@@ -411,7 +453,10 @@ class MainWindow(QMainWindow):
             if manual:
                 QMessageBox.information(self, "به‌روزرسانی", "این نسخه از سورس اجرا شده و مخزن به‌روزرسانی تنظیم نشده است.")
             return
-        self._run_bg(updater.check, lambda rel: self._update_checked(rel, manual),
+        # A short timeout on the AUTOMATIC check: it fires seconds after the window opens, and
+        # a slow update server must not leave a thread in flight for the rest of the session.
+        self._run_bg(lambda: updater.check(timeout=20.0 if manual else 8.0),
+                     lambda rel: self._update_checked(rel, manual),
                      (lambda m: QMessageBox.warning(self, "به‌روزرسانی", f"بررسی انجام نشد:\n{m.splitlines()[0]}")) if manual
                      else (lambda m: self._on_event("[update] check failed: " + m.splitlines()[0])))
 
@@ -489,15 +534,21 @@ class MainWindow(QMainWindow):
 
         def on_progress(d, t):
             if dlg.wasCanceled():
-                return
+                return          # here it is genuine: the dialog is still open
             dlg.setMaximum(max(t, 1)); dlg.setValue(min(d, t) if t else 0)
             dlg.setLabelText(f"در حال دانلود نسخه‌ی {rel.version}…  {d / 1048576:.0f} از {t / 1048576:.0f} مگابایت")
 
         def on_done(path):
+            # Read the cancel flag BEFORE closing. QProgressDialog::close() emits canceled(),
+            # which is connected to cancel() by default, so wasCanceled() is True immediately
+            # after close() whatever the user did - and this branch then returned on every
+            # single successful download. The in-app update never installed anything.
+            was_canceled = dlg.wasCanceled()
             dlg.close()
-            if dlg.wasCanceled():
+            if was_canceled:
                 return
-            verified = "بررسی‌شده با SHA-256" if rel.sha256 else "بدون checksum منتشر شده"
+            verified = ("بررسی‌شده با SHA-256" if getattr(rel, "verified", False)
+                        else "⚠ بدون checksum منتشر شده — صحتش بررسی نشد")
             self._on_event(f"[update] downloaded {rel.version} to {path} ({verified})")
             if QMessageBox.question(self, "به‌روزرسانی",
                     f"دانلود تمام شد ({verified}).\n\nحالا نصب‌کننده باز می‌شود و این برنامه بسته می‌شود.\n"
@@ -515,7 +566,10 @@ class MainWindow(QMainWindow):
             QApplication.instance().quit()
 
         def on_fail(msg):
+            was_canceled = dlg.wasCanceled()
             dlg.close()
+            if was_canceled:
+                return
             first = msg.splitlines()[0]
             self._on_event(f"[update] download failed: {first}")
             if QMessageBox.question(self, "به‌روزرسانی",
@@ -566,7 +620,7 @@ class MainWindow(QMainWindow):
         split.addWidget(ctop); split.addWidget(cbot); split.setSizes([520, 260])
         v.addWidget(split, 1)
         self._desk_chart_last = 0.0
-        QTimer.singleShot(700, self.refresh_desk_chart)
+        QTimer.singleShot(700, self, self.refresh_desk_chart)
         return w
 
     def refresh_desk_chart(self):
@@ -853,13 +907,10 @@ class MainWindow(QMainWindow):
 
         def job():
             df = self.market_data().candles(sym, tf, limit=bars)
+            from ..backtest.engine import engine_params
             return run_backtest(sym, df, self.settings.risk,
                                  start_equity=self.settings.risk.capital_limit, allow_short=short,
-                                 # the SAME confidence gate the engine will apply, so the page
-                                 # cannot promise trades the engine then refuses to take
-                                 min_confidence={"high": 0.4, "scalp": 0.0}.get(
-                                     self.settings.aggressiveness, 0.55),
-                                 position_pct=getattr(self.settings, "position_pct", 0.0))
+                                 **engine_params(self.settings))
 
         def done(res):
             self.btn_bt.setEnabled(True)
@@ -967,11 +1018,14 @@ class MainWindow(QMainWindow):
         prow.addStretch()
         cp.add_layout(prow)
         cp.add(hint(
-            "اندازه‌گیری واقعی روی ۸ ارز و ۱۰۰۰ کندل (کارمزد ۰.۱٪ در هر طرف حساب شده):\n"
-            "• تایم‌فریم روزانه: میانگین +۶.۷٪ ، ۷ ارز از ۸ سودده — هر تنظیمی که امتحان شد مثبت بود.\n"
-            "• تایم‌فریم ۴ ساعته و ۱ ساعته: همیشه منفی (۱ از ۸).\n"
-            "• اسکالپ روی ۵ و ۱۵ دقیقه: ۰ از ۶ سودده، بین -۹٪ تا -۱۸٪. سرعت زیاد یعنی کارمزد زیاد، نه سود زیاد.\n"
-            "«هوشمند چندارزی» به همین دلیل روی تایم‌فریم روزانه تنظیم می‌شود، نه ۵ دقیقه. سود تضمینی نیست."))
+            "اندازه‌گیری واقعی روی ۸ ارز و ۸۰۰ کندل روزانه، با کارمزد ۰.۱٪ در هر طرف و لغزش قیمت:\n"
+            "• هر ارز با حساب مستقل خودش: میانگین +۴.۲٪ ، ۷ ارز از ۸ سودده.\n"
+            "• ولی با یک حساب ۱۰۰۰ دلاری مشترک بین ارزها (کاری که برنامه واقعاً می‌کند): "
+            "۳ ارز حدود +۰.۵٪ و ۸ ارز ‎-۶.۴٪‎ — یعنی تقریباً سربه‌سر، نه سودِ چشمگیر.\n"
+            "• تایم‌فریم ۴ ساعته و ۱ ساعته: همیشه منفی. اسکالپ روی ۵ و ۱۵ دقیقه: ۰ از ۶ سودده، "
+            "بین ‎-۹٪‎ تا ‎-۱۸٪‎. سرعت زیاد یعنی کارمزد زیاد، نه سود زیاد.\n"
+            "این عددها گذشته است و تضمین آینده نیست. قوانین پایه‌ی برنامه لبه‌ی بزرگی ندارند؛ "
+            "کاری که واقعاً کمک می‌کند اضافه‌کردن مهارت و تحلیل هوش مصنوعی روی همین پایه است."))
         v.addWidget(cp)
 
         grid = QGridLayout(); grid.setSpacing(14)
@@ -1050,8 +1104,9 @@ class MainWindow(QMainWindow):
                        "چند درصد پول در هر معامله گذاشته شود. ۰ = خودکار (اندازه از روی فاصله‌ی حد ضرر).\n"
                        "⚠ این حالت فاصله‌ی حد ضرر را نادیده می‌گیرد، پس معامله‌ای با حد ضرر دور "
                        "چند برابر بقیه ریسک می‌کند — سود و ضرر هر دو بزرگ‌تر می‌شوند.\n"
-                       "در شبیه‌سازی موتور روی یک حساب مشترک با ۵ ارز، عدد ۲۰ به‌جای ۰ نتیجه را از "
-                       "‎-۴٪‎ به ‎-۲۹٪‎ برد و بیشترین افت را از ۱۴٪ به ۳۲٪ رساند. ۰ توصیه می‌شود."))
+                       "در شبیه‌سازی خودِ موتور روی یک حساب مشترک با ۸ ارز، عدد ۲۰ به‌جای ۰ نتیجه را "
+                       "از ‎-۶.۴٪‎ به ‎-۲۹.۹٪‎ برد و بیشترین افت را از ۱۸.۶٪ به ۳۶.۹٪ رساند. "
+                       "با ۳ ارز هم +۰.۵٪ را به ‎-۰.۱٪‎ برد. ۰ توصیه می‌شود."))
         c3.add(FormRow("سقف ریسک همزمان همه‌ی پوزیشن‌ها", self.s_openrisk,
                        "اگر همه‌ی پوزیشن‌های باز با هم حد ضرر بخورند، حداکثر چند درصد سرمایه از دست می‌رود. "
                        "۰ = بدون سقف. با ۶٪ و ریسک ۱٪ در هر معامله، حدود ۶ پوزیشن همزمان جا می‌شود."))
@@ -1107,8 +1162,8 @@ class MainWindow(QMainWindow):
             self.s_pospct.setValue(0)
             self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
             msg = ("حالت هوشمند چندارزی اعمال شد: ۸ ارز، تایم‌فریم روزانه، دقت max، تا ۸ پوزیشن.\n\n"
-                   "صادقانه بگویم: در شبیه‌سازی موتور روی یک حساب ۱۰۰۰ دلاری و ۶۰۰ کندل روزانه، "
-                   "پخش‌کردن همان پول روی ۸ ارز بدتر از ۳ ارز درآمد (‎-۵.۶٪‎ در برابر ‎+۱.۴٪‎)، "
+                   "صادقانه بگویم: در شبیه‌سازی خودِ موتور روی یک حساب ۱۰۰۰ دلاری و ۶۰۰ کندل روزانه، "
+                   "پخش‌کردن همان پول روی ۸ ارز بدتر از ۳ ارز درآمد (‎-۶.۴٪‎ در برابر ‎+۰.۵٪‎)، "
                    "چون نقدینگی بین همه تقسیم می‌شود. اگر هدف سود است، «جدی و صبور» را بزن.")
         elif kind == "serious":
             self.s_agg.setCurrentText("normal"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
@@ -1116,9 +1171,10 @@ class MainWindow(QMainWindow):
             self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60); self.s_pospct.setValue(0)
             self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
             msg = ("حالت جدی و صبور اعمال شد: روزانه، normal، ۳ ارز، اندازه‌ی خودکار.\n\n"
-                   "این بهترین ترکیبی بود که اندازه‌گیری شد: ‎+۱.۴٪‎ روی حساب مشترک ۱۰۰۰ دلاری "
-                   "با بیشترین افت ۹٪ — در حالی که همان قوانین با ۸ ارز ‎-۵.۶٪‎ و با «۲۰٪ در هر "
-                   "معامله» ‎-۲۶٪‎ دادند. عددها از ۶۰۰ کندل روزانه با کارمزد واقعی است، نه تضمین.")
+                   "بهترین ترکیبی بود که اندازه‌گیری شد، ولی بزرگش نمی‌کنم: ‎+۰.۵٪‎ روی حساب مشترک "
+                   "۱۰۰۰ دلاری با بیشترین افت ۹.۳٪ — یعنی عملاً سربه‌سر. همان قوانین با ۸ ارز "
+                   "‎-۶.۴٪‎ و با «۲۰٪ در هر معامله» ‎-۳۰٪‎ دادند، پس ارزشِ این تنظیم در نبردنِ پول است.\n"
+                   "عددها از ۶۰۰ کندل روزانه با کارمزد و لغزش واقعی است، نه تضمین آینده.")
         else:  # scalp
             self.s_agg.setCurrentText("scalp"); self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT")
             # 5m, not 1m: of the fast timeframes it was the least bad when measured
@@ -1306,7 +1362,12 @@ class MainWindow(QMainWindow):
         tp = float(r["take_profit"] or 0); qty = float(r["qty"])
         px = self._live.get(sym) or (self.engine.last_prices.get(sym) if self.engine else None) or entry
         fl = ((px - entry) if side == "long" else (entry - px)) * qty
-        rdist = abs(entry - stop) if stop else 0
+        fl -= float(r.get("entry_fee") or 0.0)      # the fee is already spent, so it is P&L
+        # R is measured from the ORIGINAL stop. Using the current one means a trade that has
+        # trailed to break-even reports an enormous R and then an infinite one - the same bug
+        # the engine and the backtest were both fixed for.
+        init_stop = r.get("init_stop") or stop
+        rdist = abs(entry - float(init_stop)) if init_stop else 0
         r_now = (fl / (qty * rdist)) if rdist else 0.0
         to_stop = (px - stop) / px * 100 if stop else 0
         to_tp = (tp - px) / px * 100 if tp else 0
@@ -1449,35 +1510,49 @@ class MainWindow(QMainWindow):
                     "موتور در حال اجراست. با بستن برنامه معامله متوقف می‌شود (پوزیشن‌های باز روی صرافی می‌مانند). خارج شوم؟") != QMessageBox.Yes:
                 ev.ignore(); return
             self.engine.stop()
+            # Wait for it. The engine thread is a daemon, so without this the process could
+            # leave between placing a real exchange order and writing it to the journal - the
+            # trade exists on the exchange and nowhere else. Two seconds is one loop's worth
+            # of slack; if it is still busy, main() reports it rather than pretending.
+            th = getattr(self.engine, "_thread", None)
+            if th is not None:
+                th.join(timeout=2.0)
         # Only now, once the quit is certain. Stopping the feed before the question meant that
         # cancelling the quit left the window open with dead prices and no way back short of a
         # restart - and an edit that was supposed to re-add this line silently did not apply,
         # so for one release the feed was never stopped at all and Qt aborted on every exit.
         self._stop_feed()
-        # Background workers must be joined before the window goes: Qt aborts the process with
-        # "QThread: Destroyed while thread is still running" if one is alive at teardown, which
-        # the user sees as the app crashing on exit.
-        _join_threads(list(self._workers) + list(getattr(self, "_retiring_feeds", [])))
-        self._workers.clear()
-        self._retiring_feeds = []
+        # Background threads must be joined before the window goes: Qt aborts the process with
+        # "QThread: Destroyed while thread is still running" if one is alive at teardown.
+        #
+        # The lists are NOT cleared afterwards. Clearing them dropped the last Python reference
+        # to any thread that had not stopped - which is precisely the object that must stay
+        # alive - and it also emptied the lists main() checks, so the os._exit safety net after
+        # app.exec() was reading two empty lists and never fired.
+        _join_threads(live_threads(), ms=3000)
         ev.accept()
 
 
-def _join_threads(threads: list, ms: int = 5000) -> None:
-    """Wait for background threads, and terminate whatever will not stop.
+def _join_threads(threads: list, ms: int = 5000) -> list:
+    """Wait for background threads. Returns whichever are STILL running.
 
-    Loading an exchange's market list can take much longer than any reasonable wait, and that
-    call is inside the price feed. A QThread still running when Python releases it makes Qt
-    abort the process - which the user sees as the app crashing every time they close it while
-    the connection is slow. Terminating a thread is ugly; aborting on exit is worse."""
+    It deliberately does NOT call QThread.terminate(). That was tried and it is far worse than
+    the problem it solves: terminate() kills a thread wherever it happens to be, and CI caught
+    it killing one inside OpenSSL's create_default_context - "Windows fatal exception: access
+    violation", a corrupted process rather than a cleanly failing one. Qt's own documentation
+    warns about exactly this.
+
+    A thread blocked in a network call cannot be interrupted at all, so the honest options are
+    to wait for it or to leave the process. The caller does the second, with os._exit, which is
+    immediate and cannot corrupt anything because nothing runs after it."""
+    stuck = []
     for t in threads:
         try:
-            if t.wait(ms):
-                continue
-            t.terminate()
-            t.wait(2000)
+            if not t.wait(ms):
+                stuck.append(t)
         except Exception:
             pass
+    return stuck
 
 
 def main() -> int:
@@ -1492,20 +1567,21 @@ def main() -> int:
     # Belt and braces: anything still alive after the window closed is joined or terminated
     # here, so the process can never abort on the way out.
     win._stop_feed()
-    _join_threads(list(win._workers) + list(win._retiring_feeds), ms=3000)
+    _join_threads(live_threads(), ms=3000)
     # Tear the window down while the QApplication is definitely still alive. Left to the
     # interpreter, the order is undefined and Qt can be asked to destroy widgets after its
     # own application object has gone - which is a segfault, not an exception.
     win.deleteLater()
     app.processEvents()
-    stuck = [t for t in list(win._workers) + list(win._retiring_feeds) if not t.isFinished()]
+    stuck = live_threads()
     del win
     if stuck:
-        # A QThread blocked inside a network call cannot always be joined or terminated, and Qt
-        # aborts the process when it is destroyed while running - which the user sees as "the
-        # app crashed when I closed it". Everything is already on disk (every DB write commits
-        # immediately, settings and the paper state are written synchronously), so leaving by
-        # the front door is strictly better than being killed on the way out.
+        # A QThread blocked in a network call cannot be interrupted, and Qt aborts the process
+        # when it is destroyed while running - which the user sees as "it crashed when I closed
+        # it". Everything is already on disk (every DB write commits immediately, settings and
+        # the paper state are written synchronously), so leaving by the front door is strictly
+        # better than being killed on the way out - and unlike terminate(), it cannot corrupt
+        # anything, because nothing runs after it.
         sys.stdout.flush(); sys.stderr.flush()
         os._exit(code)
     return code

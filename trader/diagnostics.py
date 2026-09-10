@@ -137,7 +137,10 @@ def run_all(settings: Settings, db: Database, progress: Callable[[str], None] | 
 
     def c_backtest():
         from .backtest.engine import run_backtest
-        st = run_backtest(ctx["sym"], ctx["df"], settings.risk, start_equity=settings.risk.capital_limit).stats()
+        from .backtest.engine import engine_params
+        st = run_backtest(ctx["sym"], ctx["df"], settings.risk,
+                          start_equity=settings.risk.capital_limit,
+                          **engine_params(settings)).stats()
         return (f"{st['trades']} trades, return {st['return_pct']}%, PF {st['profit_factor']}, avgR {st['avg_r']}", st)
     run("بک‌تست", c_backtest)
 

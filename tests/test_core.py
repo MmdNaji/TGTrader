@@ -98,8 +98,31 @@ def test_backtest_runs_and_accounts():
     total = sum(t.pnl for t in res.trades)
     # equity moves by closed-trade P&L (fees included) plus the mark-to-market of a trade still open at the end
     assert abs((res.equity[-1] - 1000) - total) < 0.02 * 1000
+    reasons = {t.reason.rsplit("-> ", 1)[-1] for t in res.trades}
     for t in res.trades:
-        assert t.exit > 0 and ("stop" in t.reason or "target" in t.reason)
+        assert t.exit > 0
+        assert t.reason.rsplit("-> ", 1)[-1] in ("stop", "target", "regime flipped"), t.reason
+    # the engine closes a trend trade when the regime turns against it; the backtest models a
+    # different system if it does not, so prove that exit really fires here
+    assert "regime flipped" in reasons
+
+
+def test_the_backtest_sits_out_after_a_stop_like_the_engine():
+    """The engine refuses a symbol for COOLDOWN_BARS after a stop-out. Without the same rule
+    the backtest re-enters the losing idea on the next bar and reports a trade count the engine
+    will never produce."""
+    df = synth(1200, seed=11)
+    risk = RiskSettings(capital_limit=1000)
+    none = run_backtest("X/Y", df, risk, start_equity=1000, cooldown_bars=0)
+    two = run_backtest("X/Y", df, risk, start_equity=1000, cooldown_bars=2)
+    assert len(two.trades) < len(none.trades), "the cooldown must actually remove entries"
+    # and after every stop, the next entry is at least two bars later
+    stops = [t for t in two.trades if t.reason.endswith("stop")]
+    assert stops, "the sample should contain at least one stop-out"
+    for st in stops:
+        after = [t for t in two.trades if t.entry_i > st.exit_i]
+        if after:
+            assert min(t.entry_i for t in after) >= st.exit_i + 2
 
 
 def test_knowledge_and_skills():
@@ -474,16 +497,32 @@ class FakeMt5:
                          price=req["price"], order=1, deal=2)
 
 
-def _mt5_broker(fake):
+@pytest.fixture
+def mt5_module():
+    """Put the fake in sys.modules and take it out again.
+
+    requirements.txt installs the REAL MetaTrader5 on Windows, so leaving an instance of a fake
+    behind under that name shadows a genuine package for every test that runs afterwards - and
+    it is an instance, not a module, so the shadowing is not even type-correct."""
     import sys as _sys
+    saved = _sys.modules.get("MetaTrader5", None)
+    had = "MetaTrader5" in _sys.modules
+    yield lambda fake: _sys.modules.__setitem__("MetaTrader5", fake)
+    if had:
+        _sys.modules["MetaTrader5"] = saved
+    else:
+        _sys.modules.pop("MetaTrader5", None)
+
+
+def _mt5_broker(fake, install):
     from trader.execution.mt5_broker import Mt5Broker
-    _sys.modules["MetaTrader5"] = fake
+    install(fake)
     return Mt5Broker(Settings())
 
 
-def test_mt5_sizes_in_lots_while_the_engine_sizes_in_units():
+def test_mt5_sizes_in_lots_while_the_engine_sizes_in_units(mt5_module):
     fake = FakeMt5()
-    b = _mt5_broker(fake)
+    b = _mt5_broker(fake, mt5_module)
     # limits must come back in UNITS, or the risk manager compares 0.01 against 20000
     assert b.limits("EUR/USD") == (0.01 * 100000, 0.01 * 100000)
     fill = b.market_order("EUR/USD", "buy", 20000.0, 1.10)     # 20,000 units = 0.2 lots
@@ -497,17 +536,17 @@ def test_mt5_sizes_in_lots_while_the_engine_sizes_in_units():
         b.market_order("EUR/USD", "buy", 500.0, 1.10)
 
 
-def test_mt5_closes_by_ticket_not_by_an_opposite_deal():
+def test_mt5_closes_by_ticket_not_by_an_opposite_deal(mt5_module):
     pos = FakeMt5._Obj(magic=777001, ticket=555, volume=0.2)
     fake = FakeMt5(positions=[pos])
-    b = _mt5_broker(fake)
+    b = _mt5_broker(fake, mt5_module)
     b.market_order("EUR/USD", "sell", 20000.0, 1.10, close=True)
     req = fake.sent[-1]
     assert req.get("position") == 555, "a hedging account needs the ticket, or this opens a short"
     assert req["volume"] == pytest.approx(0.2)
     # nothing open -> refuse, never open the other side
     empty = FakeMt5()
-    b2 = _mt5_broker(empty)
+    b2 = _mt5_broker(empty, mt5_module)
     with pytest.raises(RuntimeError, match="no open"):
         b2.market_order("EUR/USD", "sell", 20000.0, 1.10, close=True)
     assert not empty.sent
@@ -602,3 +641,84 @@ def test_a_deleted_seed_skill_stays_deleted():
     assert not db.skill_exists(row["name"])
     db.restore_seed_skill(row["name"])
     assert load_seed_skills(db) == 1 and db.skill_exists(row["name"])
+
+
+class FakeCcxt:
+    """Enough of a ccxt exchange to drive CcxtBroker without a network or an account."""
+
+    def __init__(self, order):
+        self.order = order
+        self.sent = []
+
+    def load_markets(self): return {}
+    def amount_to_precision(self, symbol, qty): return f"{float(qty):.8f}"
+    def create_order(self, symbol, type_, side, amount):
+        self.sent.append((symbol, type_, side, amount))
+        return dict(self.order, id="1")
+    def fetch_order(self, oid, symbol): return self.order
+
+
+def _ccxt_broker(order):
+    from trader.execution.ccxt_broker import CcxtBroker
+    b = CcxtBroker.__new__(CcxtBroker)
+    b.settings = Settings()
+    b.ex = FakeCcxt(order)
+    return b
+
+
+def test_ccxt_never_reports_a_fill_the_exchange_did_not_make():
+    """Falling back to the requested amount opened a journal position that did not exist, and
+    the next close then tried to sell coins that were never bought."""
+    b = _ccxt_broker({"filled": 0, "status": "canceled", "average": None, "price": None})
+    with pytest.raises(RuntimeError, match="no fill"):
+        b.market_order("BTC/USDT", "buy", 0.5, 30000.0)
+
+
+def test_ccxt_converts_a_base_currency_fee_into_money():
+    """On a spot buy most exchanges charge the fee in the BASE asset, so fee.cost is a quantity
+    of coins. Everything above this layer subtracts Fill.fee from a quote-currency P&L, so
+    taking that number as dollars understated the cost by roughly the price."""
+    quote_fee = _ccxt_broker({"filled": 0.5, "average": 30000.0,
+                              "fee": {"cost": 15.0, "currency": "USDT"}})
+    assert quote_fee.market_order("BTC/USDT", "buy", 0.5, 30000.0).fee == pytest.approx(15.0)
+
+    base_fee = _ccxt_broker({"filled": 0.5, "average": 30000.0,
+                             "fee": {"cost": 0.0005, "currency": "BTC"}})
+    assert base_fee.market_order("BTC/USDT", "buy", 0.5, 30000.0).fee == pytest.approx(15.0)
+
+    # a discount token is not a cost against this trade's quote balance, and is not guessed at
+    bnb_fee = _ccxt_broker({"filled": 0.5, "average": 30000.0,
+                            "fee": {"cost": 0.02, "currency": "BNB"}})
+    assert bnb_fee.market_order("BTC/USDT", "buy", 0.5, 30000.0).fee == 0.0
+
+    # no currency reported at all: assume the quote, which is what ccxt's unified format means
+    bare = _ccxt_broker({"filled": 0.5, "average": 30000.0, "fee": {"cost": 15.0}})
+    assert bare.market_order("BTC/USDT", "buy", 0.5, 30000.0).fee == pytest.approx(15.0)
+
+
+def test_every_backtest_in_the_app_runs_the_same_system():
+    """The Backtest page, the self-test page and the CLI each built their own argument list, so
+    one app reported three different backtests for one set of settings - and the scalp preset
+    was measured against a strategy list with no Scalp strategy in it."""
+    import inspect
+    from trader.backtest.engine import engine_params
+    from trader.strategy.builtin import Scalp
+
+    s = Settings(); s.aggressiveness = "scalp"; s.position_pct = 12.0
+    p = engine_params(s)
+    assert p["min_confidence"] == 0.0 and p["position_pct"] == 12.0
+    assert any(isinstance(x, Scalp) for x in p["strategies"]), \
+        "the scalp preset must be measured WITH the scalp strategy"
+
+    s.aggressiveness = "normal"
+    p = engine_params(s)
+    assert p["min_confidence"] == 0.55
+    assert not any(isinstance(x, Scalp) for x in p["strategies"])
+
+    # every caller goes through the helper rather than spelling the arguments out again
+    from trader.gui import app as gui
+    from trader import diagnostics, cli
+    for mod in (gui, diagnostics, cli):
+        src = inspect.getsource(mod)
+        if "run_backtest(" in src:
+            assert "engine_params(" in src, f"{mod.__name__} builds its own backtest arguments"
