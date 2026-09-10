@@ -193,3 +193,27 @@ def test_proxy_policy():
     assert net.ccxt_proxy_params(s) == {"socksProxy": "socks5://127.0.0.1:2"}
     s.proxy_mode = "system"; s.exchange.proxy = ""
     assert net.resolve_proxy(s) in (None,) or isinstance(net.resolve_proxy(s), str)
+
+
+def test_engine_one_decision_per_bar():
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.risk.capital_limit = 1000
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t4.db")
+    pb = PaperBroker(1000); pb.reset(1000)
+    eng = Engine(s, db, broker=pb)
+    df = enrich(synth(400, seed=7))
+    # feed the SAME frame (same last bar) twice; with no signals the second pass must be skipped
+    from trader.strategy.builtin import evaluate_all as _ev
+    from trader.strategy.regime import detect_regime as _reg
+    quiet = None
+    for i in range(200, len(df)):
+        w = df.iloc[: i + 1]
+        if not _ev("X/Y", w, _reg(w)):
+            quiet = w; break
+    assert quiet is not None
+    eng.last_prices["X/Y"] = float(quiet["close"].iloc[-1])
+    before = len(db.recent_decisions(999))
+    eng._consider_entry("X/Y", quiet, float(quiet["close"].iloc[-1]), [])
+    eng._consider_entry("X/Y", quiet, float(quiet["close"].iloc[-1]), [])  # same bar again -> skipped
+    after = len(db.recent_decisions(999))
+    assert after - before <= 1

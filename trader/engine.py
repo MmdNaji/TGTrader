@@ -38,6 +38,7 @@ class Engine:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_prices: dict[str, float] = {}
+        self._last_bar: dict[str, float] = {}   # last candle a symbol was evaluated on
         self.status: dict[str, Any] = {"running": False, "last_loop": 0.0, "error": ""}
         load_seed_skills(db)
 
@@ -110,6 +111,12 @@ class Engine:
         signals = evaluate_all(symbol, df, regime)
         if not self.broker.supports_short():
             signals = [s for s in signals if s.side == "long"]
+        # One evaluation per candle unless a fresh rule signal appears: a 1h/1d snapshot barely
+        # changes within the same bar, so re-asking the model every loop only burns API cost.
+        bar_ts = float(df.index[-1].timestamp())
+        if not signals and self._last_bar.get(symbol) == bar_ts:
+            return
+        self._last_bar[symbol] = bar_ts
         snap = snapshot(df)
         equity = self.broker.equity(self.last_prices)
 
