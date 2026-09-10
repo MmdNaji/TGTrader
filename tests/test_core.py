@@ -327,7 +327,7 @@ def test_no_re_entry_on_the_same_bar_and_a_cooldown_after_a_stop():
     db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 99.0, 200.0, "t", "r", entry_fee=fill.fee)
     pos = dict(db.open_trades("paper")[0])
     assert eng.close_position(pos, 98.0, "stop")
-    assert eng._cooldown["X/Y"] > time.time(), "a stop-out must start a cooldown"
+    assert eng._cooldown["X/Y"] is not None, "a stop-out must start a cooldown"
     df = enrich(synth(400, seed=13))
     before = len(db.recent_decisions(9999))
     eng._consider_entry("X/Y", df, float(df["close"].iloc[-1]), [])
@@ -349,19 +349,35 @@ def test_a_model_failure_holds_instead_of_falling_back_to_the_raw_rules():
     assert any("model unavailable" in (d["reason"] or "") for d in db.recent_decisions(9999))
 
 
-def test_total_open_risk_never_exceeds_the_daily_loss_budget():
-    rm = RiskManager(RiskSettings(capital_limit=1000, risk_per_trade=0.01, max_daily_loss=0.03),
-                     None, "paper")
-    budget = 0.03 * 1000
+def test_total_open_risk_is_capped_by_its_own_setting():
+    """max_open_risk is about simultaneous exposure; max_daily_loss is about losses already
+    realised today. Conflating them (the first version of this did) costs about 9% of return,
+    because a 3% cap turns every trade after the third into a token position."""
+    rm = RiskManager(RiskSettings(capital_limit=1000, risk_per_trade=0.01, max_daily_loss=0.03,
+                                  max_open_risk=0.06), None, "paper")
+    budget = 0.06 * 1000
     opens = []
-    for _ in range(10):
+    for _ in range(20):
         sz = rm.size("long", 100.0, 2.0, 1000.0, open_positions=opens)
         if sz is None:
             break
         opens.append({"entry_price": 100.0, "init_stop": 98.0, "qty": sz.qty})
         assert rm.open_risk(opens) <= budget + 1e-9
-    assert rm.open_risk(opens) <= budget + 1e-9 and len(opens) >= 3
+    assert len(opens) >= 5, "a 6% cap at 1% risk per trade must allow around six positions"
     assert rm.size("long", 100.0, 2.0, 1000.0, open_positions=opens) is None
+    # it refuses rather than handing back a token position that still pays a full round trip
+    nearly_full = [{"entry_price": 100.0, "init_stop": 98.0, "qty": 29.0}]   # 58 of 60 used
+    assert rm.size("long", 100.0, 2.0, 1000.0, open_positions=nearly_full) is None
+    # and with the cap off it never interferes
+    rm.risk.max_open_risk = 0.0
+    assert rm.size("long", 100.0, 2.0, 1000.0, open_positions=opens) is not None
+
+
+def test_the_day_boundary_is_exactly_utc_midnight():
+    rm = RiskManager(RiskSettings(), None, "paper")
+    d = rm.day_start()
+    assert time.gmtime(d)[3:6] == (0, 0, 0)
+    assert 0 <= time.time() - d < 86400
 
 
 def test_a_target_that_does_not_clear_the_fees_is_refused():

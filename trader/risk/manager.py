@@ -40,8 +40,14 @@ class RiskManager:
 
     # ------------------------------------------------------------ daily loss
     def day_start(self) -> float:
-        t = time.gmtime()
-        return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, 0)) - time.timezone
+        """UTC midnight, computed straight from the epoch.
+
+        The previous version built a tuple from gmtime, passed it to mktime (which reads a tuple
+        as LOCAL time) and then subtracted time.timezone to undo that. It lands on the right
+        second in a fixed-offset zone and is off by an hour in a DST one - which silently moves
+        the daily loss limit's reset by an hour twice a year. The epoch has no such ambiguity."""
+        now = time.time()
+        return now - (now % 86400.0)
 
     def daily_pnl(self) -> float:
         return self.db.pnl_since(self.mode, self.day_start())
@@ -112,14 +118,21 @@ class RiskManager:
             risk_amount = self.risk.risk_per_trade * base
             qty = risk_amount / stop_distance
             max_notional = hard_cap
-        # Total open risk may never exceed the daily loss budget. Without this, five positions
-        # stopping out together take more in one hour than the daily limit is meant to allow.
-        risk_budget = abs(self.risk.max_daily_loss * self.risk.capital_limit)
+        # Total open risk across every position at once. Deliberately its own setting and NOT
+        # the daily loss limit: that one is about losses already realised today, this is about
+        # how much can be lost simultaneously if a correlated market takes every stop together.
+        risk_budget = abs(getattr(self.risk, "max_open_risk", 0.0) * self.risk.capital_limit)
         if risk_budget > 0:
             left = risk_budget - self.open_risk(open_positions or [])
-            if left <= 0:
+            want = qty * stop_distance
+            # Refuse rather than shrink to a token size. A position sized down to a fraction of
+            # normal still pays a full round trip in fees, and shrinking makes a trade's size
+            # depend on what happened to be open when it arrived rather than on the setup.
+            if left < min(want, self.risk.risk_per_trade * base) * 0.5:
                 return None
-            max_notional = min(max_notional, (left / stop_distance) * price)
+            if want > left:
+                qty = left / stop_distance
+                max_notional = min(max_notional, qty * price)
         if cash is not None and cash > 0:
             # never try to spend more than is actually available (leave room for fee + slippage)
             max_notional = min(max_notional, cash * 0.97)

@@ -4,6 +4,7 @@ The engine runs in its own thread; the window only reads state and issues comman
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -1027,6 +1028,8 @@ class MainWindow(QMainWindow):
         self.s_cap = QDoubleSpinBox(); self.s_cap.setRange(1, 1e9); self.s_cap.setValue(s.risk.capital_limit)
         self.s_rpt = QDoubleSpinBox(); self.s_rpt.setRange(0.1, 10); self.s_rpt.setSuffix(" %"); self.s_rpt.setValue(s.risk.risk_per_trade * 100)
         self.s_pospct = QDoubleSpinBox(); self.s_pospct.setRange(0, 100); self.s_pospct.setSuffix(" %"); self.s_pospct.setValue(getattr(s, "position_pct", 0.0))
+        self.s_openrisk = QDoubleSpinBox(); self.s_openrisk.setRange(0, 50); self.s_openrisk.setSuffix(" %")
+        self.s_openrisk.setValue(getattr(s.risk, "max_open_risk", 0.06) * 100)
         self.s_dl = QDoubleSpinBox(); self.s_dl.setRange(0.5, 50); self.s_dl.setSuffix(" %"); self.s_dl.setValue(s.risk.max_daily_loss * 100)
         self.s_maxpos = QSpinBox(); self.s_maxpos.setRange(1, 20); self.s_maxpos.setValue(s.risk.max_open_positions)
         self.s_atr = QDoubleSpinBox(); self.s_atr.setRange(0.5, 6); self.s_atr.setValue(s.risk.atr_stop_mult)
@@ -1034,7 +1037,14 @@ class MainWindow(QMainWindow):
         self.s_trail = QDoubleSpinBox(); self.s_trail.setRange(0, 5); self.s_trail.setValue(s.risk.trail_after_r)
         c3.add(FormRow("سقف سرمایه‌ی ربات", self.s_cap, "ربات هرگز بیش از این مبلغ را درگیر نمی‌کند"))
         c3.add(FormRow("ریسک هر معامله", self.s_rpt, "حداکثر ضرر یک معامله، درصدی از سقف. ۱٪ = با سقف ۱۰۰ دلار، ۱ دلار"))
-        c3.add(FormRow("درصد سرمایه در هر معامله", self.s_pospct, "چند درصد پول در هر معامله گذاشته شود. ۰ = خودکار (بر اساس ریسک). مثلاً ۲۰ یعنی هر معامله با ۲۰٪ سرمایه."))
+        c3.add(FormRow("درصد سرمایه در هر معامله", self.s_pospct,
+                       "چند درصد پول در هر معامله گذاشته شود. ۰ = خودکار (اندازه از روی فاصله‌ی حد ضرر).\n"
+                       "⚠ در بک‌تست، عدد ۲۰ به‌جای ۰ نتیجه را از ‎-۴٪‎ به ‎-۲۹٪‎ برد و بیشترین افت "
+                       "را از ۱۴٪ به ۳۲٪ رساند: این حالت فاصله‌ی حد ضرر را نادیده می‌گیرد، پس یک "
+                       "معامله با حد ضرر دور، چند برابر بقیه ریسک می‌کند. ۰ توصیه می‌شود."))
+        c3.add(FormRow("سقف ریسک همزمان همه‌ی پوزیشن‌ها", self.s_openrisk,
+                       "اگر همه‌ی پوزیشن‌های باز با هم حد ضرر بخورند، حداکثر چند درصد سرمایه از دست می‌رود. "
+                       "۰ = بدون سقف. با ۶٪ و ریسک ۱٪ در هر معامله، حدود ۶ پوزیشن همزمان جا می‌شود."))
         c3.add(FormRow("حداکثر زیان روزانه", self.s_dl, "با رسیدن به آن، تا فردا معامله‌ی جدیدی باز نمی‌شود"))
         c3.add(FormRow("حداکثر پوزیشن باز", self.s_maxpos))
         c3.add(FormRow("حد ضرر (ATR ×)", self.s_atr, "۲ = دو برابر نوسان معمول یک کندل"))
@@ -1079,16 +1089,26 @@ class MainWindow(QMainWindow):
             self.s_agg.setCurrentText("high"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT, DOGE/USDT, ADA/USDT, AVAX/USDT")
             self.s_maxpos.setValue(8); self.s_tf.setCurrentText("1d")
-            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_loop.setValue(30); self.s_pospct.setValue(20)
+            self.s_cap.setValue(1000); self.s_paper_bal.setValue(1000); self.s_loop.setValue(30)
+            # position_pct 0 = size from the stop. Measured on the same 8 coins and the same
+            # 600 daily bars: auto sizing -5.6%, "20% of capital per trade" -18.5%, and the
+            # worst drawdown went 20% -> 30%. Sizing by notional ignores the stop distance, so
+            # a wide-stop trade risks several times what a tight-stop one does.
+            self.s_pospct.setValue(0)
             self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
-            msg = ("حالت هوشمند چندارزی اعمال شد: ۸ ارز، تایم‌فریم روزانه، دقت max، تا ۸ پوزیشن.\n"
-                   "در بک‌تست همین ترکیب روی ۸ ارز: میانگین +۶.۷٪ و ۷ ارز از ۸ سودده.")
+            msg = ("حالت هوشمند چندارزی اعمال شد: ۸ ارز، تایم‌فریم روزانه، دقت max، تا ۸ پوزیشن.\n\n"
+                   "صادقانه بگویم: روی یک حساب ۱۰۰۰ دلاری، پخش‌کردن پول روی ۸ ارز در همین بازه "
+                   "بدتر از ۳ ارز درآمد (۸ ارز ‎-۵.۶٪‎ در برابر ۳ ارز ‎+۱.۴٪‎)، چون پول نقد بین "
+                   "همه تقسیم می‌شود. اگر هدف سود است، «جدی و صبور» را بزن.")
         elif kind == "serious":
             self.s_agg.setCurrentText("normal"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT")
             self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60); self.s_pospct.setValue(0)
             self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
-            msg = "حالت جدی و صبور اعمال شد: روزانه، normal، ۳ ارز، برای پول واقعی."
+            msg = ("حالت جدی و صبور اعمال شد: روزانه، normal، ۳ ارز، اندازه‌ی خودکار.\n\n"
+                   "این بهترین ترکیبی است که اندازه‌گیری شد: ‎+۱.۴٪‎ روی حساب مشترک ۱۰۰۰ دلاری "
+                   "با بیشترین افت ۹٪ — در حالی که همان قوانین با ۸ ارز ‎-۵.۶٪‎ و با «۲۰٪ در هر "
+                   "معامله» ‎-۲۶٪‎ دادند.")
         else:  # scalp
             self.s_agg.setCurrentText("scalp"); self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT")
             # 5m, not 1m: of the fast timeframes it was the least bad when measured
@@ -1136,6 +1156,7 @@ class MainWindow(QMainWindow):
         s.risk.capital_limit = self.s_cap.value(); s.risk.risk_per_trade = self.s_rpt.value() / 100; s.risk.max_daily_loss = self.s_dl.value() / 100
         s.position_pct = self.s_pospct.value()
         s.risk.max_open_positions = self.s_maxpos.value(); s.risk.atr_stop_mult = self.s_atr.value(); s.risk.reward_risk = self.s_rr.value()
+        s.risk.max_open_risk = self.s_openrisk.value() / 100
         s.risk.trail_after_r = self.s_trail.value()
         s.computer.enabled = self.s_cu_on.isChecked(); s.computer.confirm_before_submit = self.s_cu_confirm.isChecked()
         s.computer.exchange_notes = self.s_cu_notes.toPlainText()
@@ -1446,4 +1467,19 @@ def main() -> int:
     # here, so the process can never abort on the way out.
     win._stop_feed()
     _join_threads(list(win._workers) + list(win._retiring_feeds), ms=3000)
+    # Tear the window down while the QApplication is definitely still alive. Left to the
+    # interpreter, the order is undefined and Qt can be asked to destroy widgets after its
+    # own application object has gone - which is a segfault, not an exception.
+    win.deleteLater()
+    app.processEvents()
+    stuck = [t for t in list(win._workers) + list(win._retiring_feeds) if not t.isFinished()]
+    del win
+    if stuck:
+        # A QThread blocked inside a network call cannot always be joined or terminated, and Qt
+        # aborts the process when it is destroyed while running - which the user sees as "the
+        # app crashed when I closed it". Everything is already on disk (every DB write commits
+        # immediately, settings and the paper state are written synchronously), so leaving by
+        # the front door is strictly better than being killed on the way out.
+        sys.stdout.flush(); sys.stderr.flush()
+        os._exit(code)
     return code

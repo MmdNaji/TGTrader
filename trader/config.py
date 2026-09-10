@@ -48,6 +48,11 @@ class RiskSettings:
     trail_after_r: float = 1.0
     # Largest single position as a fraction of the capital limit.
     max_position_frac: float = 0.5
+    # Ceiling on the TOTAL money at risk across every open position at once (entry to original
+    # stop), as a fraction of the capital limit. This is a different thing from max_daily_loss:
+    # that one is about losses already taken today, this one is about how much can be lost at
+    # the same moment if a correlated market takes every stop out together. 0 = no cap.
+    max_open_risk: float = 0.06
 
 
 @dataclass

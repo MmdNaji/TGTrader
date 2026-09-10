@@ -32,9 +32,16 @@ from .risk.manager import RiskManager
 from .strategy.builtin import evaluate_all, DEFAULT_STRATEGIES, Scalp
 from .strategy.regime import detect_regime
 
-# Seconds a symbol is left alone after it stopped us out. Re-entering the same losing idea
-# inside the same bar is the single most expensive habit a fast loop has.
-COOLDOWN_AFTER_STOP = {"1m": 180, "5m": 900, "15m": 1800, "1h": 3600, "4h": 7200, "1d": 14400}
+# Length of one bar, per timeframe.
+TF_SECONDS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+              "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
+              "1d": 86400, "1w": 604800}
+
+# How long a symbol is left alone after it stopped us out, IN BARS. Re-entering the same losing
+# idea immediately is the most expensive habit a fast loop has. Counted in bars rather than in
+# seconds on purpose: a fixed number of seconds is three bars on a 1m chart and a sixth of a bar
+# on a daily one, so it silently meant something different on every timeframe.
+COOLDOWN_BARS = 2.0
 
 # The market leader every other crypto follows. Its trend is a filter, not a detail.
 LEADER_SYMBOLS = ("BTC/USDT", "BTC/USD", "BTC/USDT:USDT", "BTC/BUSD")
@@ -82,6 +89,9 @@ class Engine:
     def log(self, msg: str, level: str = "info") -> None:
         self.db.log(msg, level)
         self.on_event(f"[{level}] {msg}")
+
+    def bar_seconds(self) -> float:
+        return float(TF_SECONDS.get(self.settings.timeframe, 3600))
 
     def fee_rate(self) -> float:
         """Taker fee per side as a fraction. The paper broker knows its own; for a live
@@ -200,9 +210,6 @@ class Engine:
 
     # ------------------------------------------------------------ entries
     def _consider_entry(self, symbol: str, df, price: float, open_positions: list[dict]) -> None:
-        now = time.time()
-        if now < self._cooldown.get(symbol, 0.0):
-            return
         agg = self.settings.aggressiveness
         # Outside scalping, evaluate on the CLOSED bar. The last row of the frame is the bar
         # still forming: a signal read off it can un-happen before the bar closes, which is a
@@ -216,6 +223,9 @@ class Engine:
         # Never take the same bar twice: after a quick stop-out the same closed-bar signal is
         # still sitting there and would be re-entered immediately.
         if self._entered_bar.get(symbol) == bar_ts:
+            return
+        stopped_at = self._cooldown.get(symbol)
+        if stopped_at is not None and bar_ts - stopped_at < COOLDOWN_BARS * self.bar_seconds():
             return
         # One evaluation per candle unless a fresh rule signal appears: a 1h/1d snapshot barely
         # changes within the same bar, so re-asking the model every loop only burns API cost.
@@ -383,9 +393,9 @@ class Engine:
                 self.db.update_stop(pos["id"], new_stop)
                 self.log(f"trail {pos['symbol']} stop {stop:g} -> {new_stop:g}")
             return False
-        return self.close_position(pos, price, why)
+        return self.close_position(pos, price, why, bar_ts=float(df.index[-1].timestamp()))
 
-    def close_position(self, pos: dict, price: float, why: str) -> bool:
+    def close_position(self, pos: dict, price: float, why: str, bar_ts: float | None = None) -> bool:
         side = pos["side"]
         with self._trade_lock:
             # Idempotency starts here: if the row is no longer open, somebody else closed it.
@@ -419,8 +429,9 @@ class Engine:
             if not self.db.close_trade(pos["id"], fill.price, pnl, r):
                 return False
         if why == "stop":
-            self._cooldown[pos["symbol"]] = time.time() + COOLDOWN_AFTER_STOP.get(
-                self.settings.timeframe, 1800)
+            # Stamped with the BAR this happened on (epoch seconds either way), so the cooldown
+            # is measured in market time and behaves identically live and in a replay.
+            self._cooldown[pos["symbol"]] = bar_ts if bar_ts else time.time()
         self.db.add_decision(pos["symbol"], "close", None, "risk", why,
                              {"pnl": pnl, "r": r, "fees": fill.fee + entry_fee})
         self.log(f"CLOSE {side} {pos['symbol']} @ {fill.price:g} pnl={pnl:+.4f} "

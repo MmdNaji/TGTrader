@@ -126,3 +126,36 @@ def test_closing_the_window_cannot_abort_the_process():
     _join_threads(list(w._workers) + list(w._retiring_feeds), ms=3000)
     for t in list(w._workers) + list(w._retiring_feeds):
         assert t.isFinished(), "a thread survived the close path and would abort the process"
+
+
+def test_the_real_main_starts_and_exits_cleanly():
+    """Runs trader.gui.app.main() in a subprocess and quits it from inside its own event loop -
+    which is exactly what closing the window does. Checks the PROCESS exit code, because the
+    failure mode here is a SIGABRT/SIGSEGV during teardown, not a Python exception: nothing is
+    raised, nothing is logged, the window just disappears and Windows reports a crash."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent('''
+        import os, sys, tempfile
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TGTRADER_HOME"] = tempfile.mkdtemp(prefix="mainexit-")
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtCore import QTimer
+        QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
+        QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Ok)
+        QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.No)
+        _exec = QApplication.exec
+        def _patched(*a, **k):
+            QTimer.singleShot(3000, QApplication.instance().quit)
+            return _exec()
+        QApplication.exec = staticmethod(_patched)
+        import trader.gui.app as A
+        sys.exit(A.main())
+    ''')
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, (
+        f"main() exited {r.returncode} "
+        f"({'killed by signal ' + str(-r.returncode) if r.returncode < 0 else 'error'})\n"
+        f"{r.stderr[-2000:]}")
