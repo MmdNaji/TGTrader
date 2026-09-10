@@ -66,7 +66,7 @@ class RiskManager:
 
     # ------------------------------------------------------------ sizing
     def size(self, side: str, price: float, stop_distance: float, equity: float,
-             min_qty: float = 0.0, qty_step: float = 0.0) -> Sizing | None:
+             min_qty: float = 0.0, qty_step: float = 0.0, cash: float | None = None) -> Sizing | None:
         """Position size from the money at risk, never from conviction.
 
         risk_amount = risk_per_trade * min(equity, capital_limit)
@@ -79,6 +79,9 @@ class RiskManager:
         risk_amount = self.risk.risk_per_trade * base
         qty = risk_amount / stop_distance
         max_notional = self.risk.max_position_frac * self.risk.capital_limit
+        if cash is not None and cash > 0:
+            # never try to spend more than is actually available (leave room for fee + slippage)
+            max_notional = min(max_notional, cash * 0.97)
         if qty * price > max_notional:
             qty = max_notional / price
         if qty_step > 0:

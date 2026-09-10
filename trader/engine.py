@@ -176,18 +176,26 @@ class Engine:
                 min_qty, step = self.market.kcex.limits(symbol)
             except Exception:
                 pass
-        sizing = self.risk.size(side, price, stop_distance, equity, min_qty, step)
+        try:
+            cash = self.broker.cash()
+        except Exception:
+            cash = equity
+        sizing = self.risk.size(side, price, stop_distance, equity, min_qty, step, cash=cash)
         if sizing is None:
             self.db.add_decision(symbol, "hold", decision["confidence"], "risk",
-                                 "position too small for the exchange minimum or the capital limit", payload)
+                                 "not enough free cash for a new position at the capital limit", payload)
             return
         strategy = decision.get("strategy") or ("llm" if source == "llm" else "rules")
         self.db.add_decision(symbol, action, decision["confidence"], source, decision.get("reason", ""), payload)
         try:
             fill = self.broker.market_order(symbol, "buy" if side == "long" else "sell", sizing.qty, price)
         except Exception as exc:
-            self.log(f"order failed on {symbol}: {exc}", "error")
+            # de-duplicate: an order that cannot fill (e.g. no free cash) would otherwise log every loop
+            msg = f"order failed on {symbol}: {exc}"
+            if msg != getattr(self, "_last_order_err", None):
+                self.log(msg, "warn"); self._last_order_err = msg
             return
+        self._last_order_err = None
         # stops are recomputed from the actual fill price
         stop = fill.price - stop_distance if side == "long" else fill.price + stop_distance
         tp = fill.price + self.settings.risk.reward_risk * stop_distance if side == "long" \

@@ -245,7 +245,8 @@ class MainWindow(QMainWindow):
 
         low = QHBoxLayout(); low.setSpacing(12)
         c3 = Card("پوزیشن‌های باز")
-        self.tbl_positions = table(["نماد", "جهت", "مقدار", "ورود", "قیمت", "حد ضرر", "هدف", "سود شناور", "استراتژی"])
+        self.tbl_positions = table(["نماد", "جهت", "ورود", "قیمت", "حد ضرر", "هدف", "سود شناور"])
+        self.tbl_positions.setTextElideMode(Qt.ElideNone)
         self.tbl_positions.setMinimumHeight(160)
         self.empty_pos = Empty("پوزیشن بازی نیست. وقتی شرایط ورود جور شود، این‌جا ظاهر می‌شود.")
         c3.add(self.tbl_positions); c3.add(self.empty_pos)
@@ -970,9 +971,10 @@ class MainWindow(QMainWindow):
         for r in opens:
             px = prices.get(r["symbol"])
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
-            rows.append([r["symbol"], r["side"], f"{r['qty']:g}", f"{r['entry_price']:g}", f"{px:g}" if px else "", f"{r['stop_price']:g}",
-                         f"{r['take_profit']:g}" if r["take_profit"] else "", f"{fl:+.4f}" if fl is not None else "", r["strategy"]])
-        fill(self.tbl_positions, rows, tones={7: "pnl"}); self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
+            rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
+                         f"{px:g}" if px else "—", f"{r['stop_price']:g}",
+                         f"{r['take_profit']:g}" if r["take_profit"] else "—", f"{fl:+.4f}" if fl is not None else "—"])
+        fill(self.tbl_positions, rows, tones={6: "pnl"}); self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
         decs = self.db.recent_decisions(30)
         fa = {"buy": "خرید", "sell": "فروش", "hold": "نگه‌دار", "close": "بستن"}
         fill(self.tbl_decisions, [[self._ts(d["ts"]), d["symbol"], fa.get(d["action"], d["action"]), f"{d['confidence']:.2f}" if d["confidence"] is not None else "",
@@ -1041,10 +1043,10 @@ class MainWindow(QMainWindow):
         for r in opens:
             px = self._live.get(r["symbol"])
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
-            rows.append([r["symbol"], r["side"], f"{r['qty']:g}", f"{r['entry_price']:g}", f"{px:g}" if px else "",
-                         f"{r['stop_price']:g}", f"{r['take_profit']:g}" if r["take_profit"] else "",
-                         f"{fl:+.4f}" if fl is not None else "", r["strategy"]])
-        fill(self.tbl_positions, rows, tones={7: "pnl"})
+            rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
+                         f"{px:g}" if px else "—", f"{r['stop_price']:g}",
+                         f"{r['take_profit']:g}" if r["take_profit"] else "—", f"{fl:+.4f}" if fl is not None else "—"])
+        fill(self.tbl_positions, rows, tones={6: "pnl"})
         self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
         if self.engine:
             try:

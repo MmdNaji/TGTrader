@@ -234,33 +234,17 @@ def _writable(p: Path) -> bool:
 
 # ---------------------------------------------------------------- install
 def install(setup_path: Path) -> None:
-    """Start the silent installer through a helper that waits for this process to exit.
-    The caller must quit the app right after this returns."""
+    """Open the downloaded installer the ordinary way - exactly what works when the user runs
+    it by hand. No silent flags, no file-swapping, no self-restart (those caused the update
+    loop on Windows). The Inno wizard closes the running app, installs into the same folder it
+    remembers, and offers 'Run TGTrader' at the end. The caller quits right after so nothing is
+    locked."""
     if not sys.platform.startswith("win"):
         raise RuntimeError("the installer only runs on Windows")
-    target = install_dir()
-    log = log_path()
-    script = Path(tempfile.gettempdir()) / "tgtrader-update.cmd"
-    pid = os.getpid()
-    script.write_text(
-        "@echo off\r\n"
-        "setlocal\r\n"
-        ":wait\r\n"
-        f"tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n"
-        "if not errorlevel 1 ( timeout /t 1 /nobreak >nul & goto wait )\r\n"
-        f"\"{setup_path}\" /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS "
-        f"/DIR=\"{target}\" /LOG=\"{log}\"\r\n"
-        f"if exist \"{target}\\TGTrader.exe\" start \"\" \"{target}\\TGTrader.exe\"\r\n",
-        encoding="utf-8",
-    )
-    if _writable(target):
-        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen(["cmd.exe", "/c", str(script)], close_fds=True, creationflags=flags)
-    else:
-        # Program Files: ask for elevation once (UAC), then the same helper runs as admin.
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f'/c "{script}"', None, 0)  # type: ignore[attr-defined]
-        if int(rc) <= 32:
-            raise RuntimeError(f"elevation refused (code {rc}); install manually from {setup_path}")
+    try:
+        os.startfile(str(setup_path))  # type: ignore[attr-defined]  # like double-clicking it
+    except Exception:
+        subprocess.Popen([str(setup_path)], close_fds=True)
 
 
 # ---------------------------------------------------------------- optional components
