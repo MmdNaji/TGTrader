@@ -154,6 +154,9 @@ def test_the_real_main_starts_and_exits_cleanly():
         # still in flight at shutdown - the exact case that crashed on Windows. Quitting at
         # 5s lands right on top of it.
         os.environ.pop("TGTRADER_NO_AUTOUPDATE", None)
+        # Ask main() to report the stuck-thread escape hatch as 70 instead of 0, so this test
+        # fails when the close path silently leaves a thread behind instead of joining it.
+        os.environ["TGTRADER_STRICT_EXIT"] = "1"
         from PySide6.QtWidgets import QApplication, QMessageBox
         from PySide6.QtCore import QTimer
         QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
@@ -177,6 +180,10 @@ def test_the_real_main_starts_and_exits_cleanly():
         how = f"crashed, Windows status 0x{r.returncode & 0xFFFFFFFF:08X}"
     else:
         how = "exited with an error"
+    if r.returncode == 70:
+        raise AssertionError(
+            "main() had to leave through os._exit because a thread would not stop - the close "
+            f"path did not actually join everything.\n{r.stderr[-2000:]}")
     assert r.returncode == 0, f"main() {how} (code {r.returncode})\n{r.stderr[-2000:]}"
 
 
@@ -205,3 +212,138 @@ def test_join_threads_never_terminates_a_thread():
     still = A._join_threads([s], ms=1)
     assert still == [s], "a thread that will not stop must be REPORTED, not killed"
     assert s.waited == 1
+
+
+def test_reset_test_wipes_everything_and_sets_the_new_balance(win, monkeypatch):
+    """One button: no open trades, no history, no equity curve, no leftover cooldowns, and the
+    account back at a balance the user chooses."""
+    from PySide6.QtWidgets import QInputDialog
+    from trader.execution.paper import PaperBroker
+    from trader.risk.manager import RiskManager
+
+    app = QApplication.instance()
+    db = win.db
+    win.settings.mode = "paper"
+
+    # a used account: an open trade, a closed one, equity points, decisions, a hot cooldown
+    pb = PaperBroker(500.0)
+    pb.reset(500.0)
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 95.0, 110.0, "t", "r",
+                  entry_fee=fill.fee)
+    tid = db.open_trade("paper", "A/B", "long", 1.0, 10.0, 9.0, 12.0, "t", "r")
+    db.close_trade(tid, 11.0, 1.0, 1.0)
+    db.record_equity("paper", 501.0)
+    db.add_decision("X/Y", "buy", 0.9, "rules", "because")
+    assert db.open_trades("paper") and db.closed_trades("paper") and db.equity_curve("paper")
+    RiskManager(win.settings.risk, db, "paper").set_kill_switch(True)
+
+    monkeypatch.setattr(QInputDialog, "getDouble", staticmethod(lambda *a, **k: (1000.0, True)))
+    win.reset_test()
+    app.processEvents()
+
+    assert db.open_trades("paper") == [], "open positions must be gone"
+    assert db.closed_trades("paper") == [], "trade history must be gone"
+    assert db.trade_stats("paper")["trades"] == 0, "the P&L statistics must be back to zero"
+    curve = db.equity_curve("paper")
+    assert len(curve) == 1 and curve[0][1] == 1000.0, "the equity curve restarts at the new balance"
+    assert win.settings.paper_start_balance == 1000.0
+    # and it must be on DISK, not only in memory: a balance that is right until the next
+    # restart is the exact complaint this button exists to answer.
+    from trader.config import Settings as _S
+    assert _S.load().paper_start_balance == 1000.0, "the new balance did not survive a reload"
+    assert PaperBroker(1000.0).cash() == 1000.0, "the broker's own state file must be reset too"
+    assert not RiskManager(win.settings.risk, db, "paper").kill_switch_on(), \
+        "an emergency stop left on from the last run would silently refuse every new trade"
+
+
+def test_reset_test_refuses_to_touch_a_live_account(win, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+    asked = {"n": 0}
+    monkeypatch.setattr(QInputDialog, "getDouble",
+                        staticmethod(lambda *a, **k: (asked.__setitem__("n", asked["n"] + 1), (1.0, True))[1]))
+    win.settings.mode = "live"
+    try:
+        win.reset_test()
+        assert asked["n"] == 0, "it must refuse before asking for a balance, not wipe a live journal"
+    finally:
+        win.settings.mode = "paper"
+
+
+def test_a_closed_window_starts_no_more_background_work():
+    """Joining the threads that exist at one instant is not a barrier. The periodic refresh is
+    a child of the window and keeps firing after close(), and refresh() can start a chart load,
+    so a fresh network thread could appear right after the close path finished waiting."""
+    from trader.gui.app import MainWindow, live_threads, _join_threads
+    app = QApplication.instance() or QApplication([])
+    baseline = set(live_threads())
+    w = MainWindow()
+    w.show()
+    app.processEvents()
+    w.close()
+    assert w._closing is True
+    assert not w.timer.isActive(), "the refresh timer must not keep running on a closed window"
+    # drive the event loop hard, and force the timer's own slot, the way a real session would
+    for _ in range(5):
+        app.processEvents()
+    w.timer.timeout.emit()
+    app.processEvents()
+    assert w._run_bg(lambda: None, lambda _: None) is None, \
+        "no new background work may be started once the window is closing"
+    new = [t for t in live_threads() if t not in baseline]
+    still = _join_threads(new, ms=5000)
+    assert not still, f"threads survived or were started after close: {[type(t).__name__ for t in still]}"
+
+
+def test_reset_while_the_engine_is_running_stops_it_wipes_and_restarts(win, monkeypatch):
+    """The realistic case. Wiping the journal underneath a running loop is a race: the pass
+    already in flight holds its own list of open positions and its own view of the cash."""
+    from PySide6.QtWidgets import QInputDialog
+    from trader.engine import Engine
+    from trader.execution.paper import PaperBroker
+
+    app = QApplication.instance()
+    win.settings.mode = "paper"
+    win.settings.use_llm_for_decisions = False
+
+    pb = PaperBroker(750.0)
+    pb.reset(750.0)
+    win.engine = Engine(win.settings, win.db, broker=pb)
+
+    import numpy as np
+    import pandas as pd
+    from trader.market.indicators import enrich
+
+    def synth(n=600):
+        rng = np.random.default_rng(2)
+        close = 100 * np.exp(np.cumsum(rng.normal(0.0005, 0.01, n)))
+        opn = np.roll(close, 1); opn[0] = close[0]
+        idx = pd.date_range("2025-01-01", periods=n, freq="h", tz="UTC")
+        return enrich(pd.DataFrame({"open": opn, "high": close * 1.004, "low": close * 0.996,
+                                    "close": close, "volume": rng.uniform(1, 9, n)}, index=idx))
+
+    frame = synth()
+
+    class Fake:
+        is_kcex = False
+        def candles(self, symbol, timeframe=None, limit=400, max_age=20.0): return frame
+        def price(self, symbol): return float(frame["close"].iloc[-1])
+
+    win.engine.market = Fake()
+    win.engine.start()
+    app.processEvents()
+    assert win.engine.running()
+
+    win.db.open_trade("paper", "X/Y", "long", 1.0, 100.0, 95.0, 110.0, "t", "r", entry_fee=0.1)
+    monkeypatch.setattr(QInputDialog, "getDouble", staticmethod(lambda *a, **k: (1000.0, True)))
+    win.reset_test()
+    app.processEvents()
+
+    assert win.db.open_trades("paper") == [], "the wipe must have happened"
+    assert win.engine.running(), "an engine that was running must be running again afterwards"
+    assert isinstance(win.engine.broker, PaperBroker)
+    assert win.engine.broker.cash() == 1000.0, "the restarted engine trades the new balance"
+    assert win.engine._cooldown == {} and win.engine._llm_bar == {}, \
+        "a reset means start over: no cooldowns or per-bar marks may carry across"
+    win.engine.stop(wait=5.0)
+    win.engine = None

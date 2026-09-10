@@ -108,8 +108,18 @@ class Engine:
         self._thread = threading.Thread(target=self._run, name="engine", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, wait: float = 0.0) -> bool:
+        """Ask the loop to stop. With ``wait`` seconds, also wait for it to actually finish.
+
+        The thread is a daemon, so a caller that stops the engine and then lets the process go
+        can cut the loop between placing a real exchange order and writing it to the journal -
+        the trade would exist on the exchange and nowhere else. Returns True if it stopped.
+        """
         self._stop.set()
+        th = self._thread
+        if wait > 0 and th is not None and th.is_alive():
+            th.join(timeout=wait)
+        return not (th is not None and th.is_alive())
 
     def running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())

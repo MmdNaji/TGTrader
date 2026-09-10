@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -64,6 +64,9 @@ class MarketData:
         self.active_source: str | None = None
         self.notice: str | None = None
         self.on_notice = on_notice or (lambda s: None)
+        # Set by a caller that can be asked to stop (the GUI price feed). Returning True makes
+        # the fallback chain give up instead of walking every remaining source.
+        self.abort: Callable[[], bool] = lambda: False
 
     # ------------------------------------------------------------ sources
     def _sources(self) -> list[str]:
@@ -105,11 +108,17 @@ class MarketData:
         return self._ex((self.active_source or self.settings.exchange.exchange_id).lower())
 
     def _try_sources(self, what: str, fn):
-        """Run fn(source) on the active source, else walk the chain; remember what worked."""
+        """Run fn(source) on the active source, else walk the chain; remember what worked.
+
+        ``abort`` lets a caller that has been asked to shut down stop walking the chain. Six
+        sources at a 20-second timeout is two minutes of work nobody wants any more, and that
+        is the whole reason a price feed could not be joined when the window closed."""
         order = [self.active_source] if self.active_source else []
         order += [s for s in self._sources() if s not in order]
         errors: list[str] = []
         for src in order:
+            if self.abort():
+                raise RuntimeError(f"{what}: abandoned, shutting down")
             try:
                 out = fn(src)
                 if self.active_source != src:

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QFileDialog, QMessageBox, QPlainTextEdit,
     QSplitter, QProgressDialog, QTextBrowser, QStackedWidget, QScrollArea, QButtonGroup, QFrame,
-    QAbstractSpinBox, QSlider,
+    QAbstractSpinBox, QSlider, QInputDialog,
 )
 
 from .. import __version__, updater
@@ -98,6 +98,19 @@ class Worker(_Tracked):
 # U+2066 LEFT-TO-RIGHT ISOLATE ... U+2069 POP DIRECTIONAL ISOLATE. The whole app runs RTL, and
 # bidi reordering turns "+1.23$ (+0.45%)" into something that reads as a different number - the
 # sign ends up on the wrong end and the two figures swap. Isolating the run fixes it for good.
+def profit_factor(st: dict) -> str:
+    """Profit factor for display, or "—" when the number would only mislead.
+
+    With wins and no losses yet the arithmetic gives infinity, and the dashboard printed "∞"
+    next to a 100% win rate after ONE trade. That reads as a flawless system; it means the
+    sample is too small to divide by. The bot's own skills put the minimum at thirty trades."""
+    n = int(st.get("trades") or 0)
+    pf = st.get("profit_factor")
+    if not n or pf is None or pf == float("inf"):
+        return "—"
+    return f"{pf:.2f}"
+
+
 def money_pct(amount: float | None, pct: float | None) -> str:
     if amount is None:
         return "—"
@@ -148,6 +161,9 @@ class PriceFeed(_Tracked):
             md = MarketData(self._settings)
         except Exception:
             return
+        # Let the data layer abandon its fallback chain the moment we are asked to stop, instead
+        # of walking six sources at 20 seconds each while the window waits to close.
+        md.abort = self._stop.is_set
         if self._stop.is_set():
             return          # asked to stop while the exchange was still loading
         while not self._stop.is_set():
@@ -185,6 +201,7 @@ class MainWindow(QMainWindow):
         self.teach_history: list[dict[str, str]] = []
         self._pending_update: updater.Release | None = None
         self._quit_for_update = False
+        self._closing = False
         self._retiring_feeds: list[PriceFeed] = []   # feeds asked to stop that have not yet
         self._chart_last = 0.0
         self._dash_chart_last = 0.0
@@ -255,6 +272,9 @@ class MainWindow(QMainWindow):
         self.pill_state = pill("متوقف", "muted"); h.addWidget(self.pill_state)
         self.btn_run = button("▶  شروع", "primary", self.toggle_engine); h.addWidget(self.btn_run)
         self.btn_kill = button("⛔ اضطراری", "ghost", self.toggle_kill); self.btn_kill.setToolTip("هیچ معامله‌ی جدیدی باز نمی‌شود تا خاموشش کنی"); h.addWidget(self.btn_kill)
+        self.btn_reset = button("🧪 ریست تست", "ghost", self.reset_test)
+        self.btn_reset.setToolTip("پاک‌کردن معامله‌ها، سود/زیان و نمودار سرمایه، و شروع دوباره با موجودی دلخواه")
+        h.addWidget(self.btn_reset)
         self.btn_update = button("🔄", "ghost", lambda: self._check_update(manual=True)); self.btn_update.setToolTip("بررسی و نصب خودکار نسخه‌ی جدید"); h.addWidget(self.btn_update)
         return bar
 
@@ -274,7 +294,13 @@ class MainWindow(QMainWindow):
             self.refresh_docs()
 
     # ------------------------------------------------------------ helpers
-    def _run_bg(self, fn: Callable[[], Any], on_done: Callable[[Any], None], on_fail: Callable[[str], None] | None = None) -> Worker:
+    def _run_bg(self, fn: Callable[[], Any], on_done: Callable[[Any], None], on_fail: Callable[[str], None] | None = None) -> Worker | None:
+        if self._closing:
+            # Nothing new once the window is going. Joining the threads that exist at one
+            # instant is not a barrier: the periodic refresh kept running on the closed window
+            # and re-armed a chart load, so a fresh network thread started right after the
+            # close path had finished waiting for the old ones.
+            return None
         w = Worker(fn)
         w.done.connect(on_done)
         w.failed.connect(on_fail or (lambda m: QMessageBox.critical(self, "خطا", m.splitlines()[0])))
@@ -346,7 +372,8 @@ class MainWindow(QMainWindow):
         pd.addLayout(pdbtn)
         self.pos_detail.hide()
         c3.add(self.pos_detail)
-        c3.add_action(button("بستن همه", "danger", self.close_all)); c3.add_action(button("ریست کاغذی", "ghost", self.reset_paper))
+        c3.add_action(button("بستن همه", "danger", self.close_all))
+        c3.add_action(button("🧪 ریست تست", "ghost", self.reset_test))
         c4 = Card("آخرین تصمیم‌ها", "نگه‌داشتن هم یک تصمیم است؛ دلیلش را بخوان")
         self.tbl_decisions = table(["زمان", "نماد", "اقدام", "اطمینان", "منبع", "دلیل"]); self.tbl_decisions.setMinimumHeight(160)
         self.empty_dec = Empty("هنوز تصمیمی ثبت نشده. «شروع» را بزن تا ربات بازار را بررسی کند.")
@@ -403,18 +430,52 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "", "همه پوزیشن‌ها با قیمت بازار بسته شوند؟") == QMessageBox.Yes:
             self._run_bg(lambda: self.engine.close_all("manual"), lambda _: self.refresh())
 
-    def reset_paper(self):
-        if QMessageBox.question(self, "ریست کامل",
-                                "همه‌ی معاملات و تاریخچه‌ی حساب کاغذی پاک می‌شوند و موجودی به عدد تنظیمات برمی‌گردد. مطمئنی؟") != QMessageBox.Yes:
+    def reset_test(self):
+        """Start a fresh test: wipe the paper journal and choose the starting balance."""
+        if self.live_mode() == "live":
+            QMessageBox.warning(self, "ریست تست",
+                                "الان روی حالت «واقعی» هستی. این دکمه فقط حساب تمرینی (کاغذی) را "
+                                "پاک می‌کند و به تاریخچه‌ی معامله‌های واقعی دست نمی‌زند.\n\n"
+                                "برای تست، از تنظیمات حالت را روی paper بگذار.")
             return
-        self._reset_paper_now()
-        QMessageBox.information(self, "انجام شد", f"حساب کاغذی پاک شد. موجودی: {self.settings.paper_start_balance:g}")
+        n_open = len(self.db.open_trades("paper"))
+        n_closed = len(self.db.closed_trades("paper", 100000))
+        bal, ok = QInputDialog.getDouble(
+            self, "ریست تست",
+            f"یک تست تازه شروع می‌شود.\n\n"
+            f"پاک می‌شود: {n_closed} معامله‌ی بسته، {n_open} پوزیشن باز، نمودار سرمایه و تصمیم‌ها.\n"
+            f"نگه داشته می‌شود: تنظیمات، مهارت‌ها، کتابخانه و گزارش سیستم.\n\n"
+            f"موجودی شروع (دلار):",
+            1000.0, 1.0, 10_000_000.0, 2)
+        if not ok:
+            return
+        was_running = bool(self.engine and self.engine.running())
+        self._reset_paper_now(balance=float(bal))
+        QMessageBox.information(
+            self, "انجام شد",
+            f"حساب تمرینی پاک شد و موجودی روی {bal:g} دلار تنظیم شد.\n"
+            + ("موتور دوباره راه افتاد؛ از همین‌جا تست را ادامه بده."
+               if was_running else "حالا «شروع» را بزن تا تست شروع شود."))
 
-    def _reset_paper_now(self):
-        """Wipe paper trades/decisions/equity and set cash to the configured start balance,
-        including the engine's in-memory broker if it is running."""
+    def _reset_paper_now(self, balance: float | None = None):
+        """Wipe the paper journal and set the account back to a starting balance.
+
+        The engine is STOPPED first if it is running. It is not enough to hold the trade lock:
+        a loop pass that is already under way is holding its own list of open positions and its
+        own view of the broker's cash, and would carry on managing rows that no longer exist.
+        """
         from ..execution.paper import PaperBroker
+        if balance is not None:
+            self.settings.paper_start_balance = float(balance)
+            self.settings.save()
+            if hasattr(self, "s_paper_bal"):
+                self.s_paper_bal.setValue(float(balance))
         bal = float(self.settings.paper_start_balance)
+
+        was_running = bool(self.engine and self.engine.running())
+        if was_running:
+            self.engine.stop(wait=5.0)
+
         self.db.reset_mode("paper")
         PaperBroker(bal).reset(bal)
         if self.engine and isinstance(self.engine.broker, PaperBroker):
@@ -426,11 +487,19 @@ class MainWindow(QMainWindow):
             self.engine._cooldown.clear()
             self.engine._entered_bar.clear()
             self.engine._last_bar.clear()
+            self.engine._llm_bar.clear()
             self.engine._order_err.clear()
             self.engine._reconciled = True     # nothing is open; do not re-scan
+        # An emergency stop left on from the previous run would silently refuse every trade of
+        # the new one, and the only symptom is a bot that does nothing.
+        from ..risk.manager import RiskManager
+        RiskManager(self.settings.risk, self.db, "paper").set_kill_switch(False)
         self.db.record_equity("paper", bal)
         self._live = {}
+        self._pos_data = []
         self._hide_pos_detail()
+        if was_running:
+            self.start_engine()      # a fresh Engine, so nothing carries over
         self.refresh()
 
     def _confirm_blocking(self, summary: str) -> bool:
@@ -917,7 +986,8 @@ class MainWindow(QMainWindow):
             st = res.stats()
             self.kpi_bt["return_pct"].set(f"{st['return_pct']:+.2f}%", tone="green" if st["return_pct"] > 0 else "red")
             self.kpi_bt["max_drawdown_pct"].set(f"{st['max_drawdown_pct']:.2f}%")
-            self.kpi_bt["profit_factor"].set(f"{st['profit_factor']:.2f}" if st["profit_factor"] != float("inf") else "∞", tone="green" if st["profit_factor"] > 1 else "red")
+            self.kpi_bt["profit_factor"].set(profit_factor(st),
+                                             tone="green" if st["profit_factor"] > 1 else "red")
             self.kpi_bt["avg_r"].set(f"{st['avg_r']:+.2f}", tone="green" if st["avg_r"] > 0 else "red")
             self.kpi_bt["trades"].set(str(st["trades"])); self.kpi_bt["win_rate"].set(f"{st['win_rate']*100:.0f}%")
             if st["trades"] < 10:
@@ -1298,8 +1368,12 @@ class MainWindow(QMainWindow):
         st = self.db.trade_stats(mode)
         self.kpi_win.set(f"{st['win_rate']*100:.0f}%" if st["trades"] else "—", f"{st['trades']} معامله بسته‌شده")
         self.eq_curve.set_points(curve)
-        pf = (f"{st['profit_factor']:.2f}" if st["profit_factor"] != float("inf") else "∞")
-        self.lbl_stats_mini.setText(f"سود خالص {st['pnl']:+.4f} · ضریب سود {pf} · میانگین R {st['avg_r']:+.2f}" if st["trades"] else "")
+        pf = profit_factor(st)
+        small = st["trades"] < 30
+        self.lbl_stats_mini.setText(
+            f"سود خالص {st['pnl']:+.4f} · ضریب سود {pf} · میانگین R {st['avg_r']:+.2f}"
+            + (f" · فقط {st['trades']} معامله — برای قضاوت کم است" if small else "")
+            if st["trades"] else "")
 
         prices = {**(self.engine.last_prices if self.engine else {}), **self._live}
         rows = []
@@ -1509,14 +1583,16 @@ class MainWindow(QMainWindow):
                     self, "خروج",
                     "موتور در حال اجراست. با بستن برنامه معامله متوقف می‌شود (پوزیشن‌های باز روی صرافی می‌مانند). خارج شوم؟") != QMessageBox.Yes:
                 ev.ignore(); return
-            self.engine.stop()
-            # Wait for it. The engine thread is a daemon, so without this the process could
-            # leave between placing a real exchange order and writing it to the journal - the
-            # trade exists on the exchange and nowhere else. Two seconds is one loop's worth
-            # of slack; if it is still busy, main() reports it rather than pretending.
-            th = getattr(self.engine, "_thread", None)
-            if th is not None:
-                th.join(timeout=2.0)
+            # Wait for it: the thread is a daemon, so leaving without it can cut the loop
+            # between placing a real exchange order and writing it to the journal.
+            self.engine.stop(wait=5.0)
+        # From here the window is going. Set the barrier BEFORE joining anything: the periodic
+        # refresh is a child of the window and keeps firing after close(), and refresh() can
+        # start a chart load - so without this the close path joins the threads that happen to
+        # exist at that instant and a fresh one starts on the next event-loop turn.
+        self._closing = True
+        if getattr(self, "timer", None) is not None:
+            self.timer.stop()
         # Only now, once the quit is certain. Stopping the feed before the question meant that
         # cancelling the quit left the window open with dead prices and no way back short of a
         # restart - and an edit that was supposed to re-add this line silently did not apply,
@@ -1583,5 +1659,8 @@ def main() -> int:
         # better than being killed on the way out - and unlike terminate(), it cannot corrupt
         # anything, because nothing runs after it.
         sys.stdout.flush(); sys.stderr.flush()
-        os._exit(code)
+        # Distinguishable on purpose. A test that only checks "the process exited 0" cannot tell
+        # a clean shutdown from this escape hatch, so it would go on passing after the thing it
+        # was written to catch came back. Production still leaves with the real code.
+        os._exit(70 if os.environ.get("TGTRADER_STRICT_EXIT") else code)
     return code

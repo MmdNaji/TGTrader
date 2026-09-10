@@ -722,3 +722,59 @@ def test_every_backtest_in_the_app_runs_the_same_system():
         src = inspect.getsource(mod)
         if "run_backtest(" in src:
             assert "engine_params(" in src, f"{mod.__name__} builds its own backtest arguments"
+
+
+def test_profit_factor_is_not_shown_as_infinity_on_a_tiny_sample():
+    """The dashboard printed "∞" next to a 100% win rate after one trade. That reads as a
+    flawless system; it means there is nothing to divide by yet."""
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from trader.gui.app import profit_factor
+    assert profit_factor({"trades": 0, "profit_factor": 0.0}) == "—"
+    assert profit_factor({"trades": 1, "profit_factor": float("inf")}) == "—"
+    assert profit_factor({"trades": 40, "profit_factor": 1.83}) == "1.83"
+    assert profit_factor({"trades": 40, "profit_factor": 0.6}) == "0.60"
+
+
+def test_the_data_layer_gives_up_when_the_caller_is_shutting_down():
+    """Six fallback sources at a 20-second timeout is two minutes of work nobody wants any
+    more - and it is the reason a price feed could not be joined when the window closed."""
+    from trader.market.data import MarketData
+    s = Settings(); s.proxy_mode = "none"
+    md = MarketData.__new__(MarketData)
+    md.settings = s; md.active_source = None; md.notice = ""; md.on_notice = lambda m: None
+    md.abort = lambda: False
+    tried = []
+
+    def fn(src):
+        tried.append(src)
+        raise RuntimeError("blocked")
+
+    try:
+        md._try_sources("X/Y", fn)
+    except RuntimeError:
+        pass
+    walked = len(tried)
+    assert walked >= 2, "the chain should normally try more than one source"
+
+    tried.clear()
+    md.abort = lambda: True
+    try:
+        md._try_sources("X/Y", fn)
+        assert False, "an aborted lookup must raise, not return nothing"
+    except RuntimeError as exc:
+        assert "shutting down" in str(exc)
+    assert tried == [], "it must not even try the first source once told to stop"
+
+
+def test_engine_stop_can_wait_for_its_own_thread():
+    """The loop thread is a daemon: a caller that stops the engine and lets the process go can
+    cut it between placing a real exchange order and writing it to the journal."""
+    import threading
+    s, db, pb, eng = _engine("t_stop.db")
+    eng.market = FakeMarket(synth(900, seed=5))
+    eng.start()
+    assert eng.running()
+    assert eng.stop(wait=10.0) is True, "stop(wait) must return True once the thread has ended"
+    assert not eng.running()
+    assert not any(t.name == "engine" and t.is_alive() for t in threading.enumerate())

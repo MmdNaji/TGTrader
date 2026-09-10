@@ -48,15 +48,23 @@ def test_check_prefers_the_newest_source_not_the_first_that_answers(monkeypatch)
 
 
 def test_a_github_release_borrows_the_mirrors_checksum(monkeypatch):
-    server = updater.Release(version="9.9.9", tag="v9.9.9", notes="", asset_url="http://x/a.exe",
+    """The mirror publishes a SHA-256; the GitHub API does not. When the file has to come from
+    GitHub, it must still be verified against the mirror's figure for the same build.
+
+    The server release deliberately carries NO installer here, so GitHub is the only release
+    that can be chosen - otherwise this test passes whichever one wins and proves nothing."""
+    server = updater.Release(version="9.9.9", tag="v9.9.9", notes="", asset_url=None,
                              asset_size=123, page_url="", sha256="deadbeef", source="server")
     github = updater.Release(version="9.9.9", tag="v9.9.9", notes="", asset_url="http://y/b.exe",
                              asset_size=0, page_url="", source="github")
     monkeypatch.setattr(updater, "_check_server", lambda t: server)
     monkeypatch.setattr(updater, "_check_github", lambda t: github)
     rel = updater.check(timeout=1)
-    # whichever of the two equal versions is chosen, it must carry a checksum to verify against
-    assert rel and rel.sha256 == "deadbeef"
+    assert rel is not None
+    assert rel.source == "github" and rel.asset_url == "http://y/b.exe", \
+        "the release with no installer cannot be the one offered"
+    assert rel.sha256 == "deadbeef", "the GitHub download must borrow the mirror's checksum"
+    assert rel.asset_size == 123, "and its size, so a truncated download is still caught"
 
 
 def test_a_release_candidate_never_outranks_its_own_release():
