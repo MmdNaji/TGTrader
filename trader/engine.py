@@ -20,7 +20,7 @@ from .knowledge.skills import skills_prompt_block, load_seed_skills
 from .market.data import MarketData
 from .market.indicators import enrich, snapshot
 from .risk.manager import RiskManager
-from .strategy.builtin import evaluate_all
+from .strategy.builtin import evaluate_all, DEFAULT_STRATEGIES, Scalp
 from .strategy.regime import detect_regime
 
 
@@ -41,6 +41,8 @@ class Engine:
         self._last_bar: dict[str, float] = {}   # last candle a symbol was evaluated on
         self.status: dict[str, Any] = {"running": False, "last_loop": 0.0, "error": ""}
         load_seed_skills(db)
+        self.strategies = ([Scalp()] + list(DEFAULT_STRATEGIES)
+                           if settings.aggressiveness == "scalp" else list(DEFAULT_STRATEGIES))
 
     # ------------------------------------------------------------ setup
     def _make_broker(self) -> Broker:
@@ -108,7 +110,7 @@ class Engine:
     # ------------------------------------------------------------ entries
     def _consider_entry(self, symbol: str, df, price: float, open_positions: list[dict]) -> None:
         regime = detect_regime(df)
-        signals = evaluate_all(symbol, df, regime)
+        signals = evaluate_all(symbol, df, regime, self.strategies)
         if not self.broker.supports_short():
             signals = [s for s in signals if s.side == "long"]
         # One evaluation per candle unless a fresh rule signal appears: a 1h/1d snapshot barely
@@ -126,9 +128,14 @@ class Engine:
                 self.db.add_decision(symbol, "hold", None, "risk", refuse, {"regime": regime})
             return
 
+        agg = self.settings.aggressiveness
+        min_conf = {"high": 0.4, "scalp": 0.0}.get(agg, 0.55)
+        # In scalp mode we act on the rule signals directly: the model is deliberately patient
+        # ("hold is usually right"), which is the opposite of what this preset is for.
+        use_llm = self.settings.use_llm_for_decisions and self.brain is not None and agg != "scalp"
         decision: dict[str, Any] | None = None
         source = "rules"
-        if self.settings.use_llm_for_decisions and self.brain is not None and (signals or regime in ("trend_up", "trend_down")):
+        if use_llm and (signals or regime in ("trend_up", "trend_down")):
             try:
                 knowledge = [r["content"] for r in self.db.search_knowledge(f"{regime} {' '.join(s.strategy for s in signals)}", limit=3)]
                 decision = self.brain.decide(
@@ -151,7 +158,7 @@ class Engine:
 
         action = decision["action"]
         payload = {"regime": regime, "snapshot": snap, "signals": [s.reason for s in signals], "decision": decision}
-        if action not in ("buy", "sell") or decision["confidence"] < 0.55:
+        if action not in ("buy", "sell") or decision["confidence"] < min_conf:
             self.db.add_decision(symbol, "hold", decision.get("confidence"), source, decision.get("reason", ""), payload)
             return
         side = "long" if action == "buy" else "short"

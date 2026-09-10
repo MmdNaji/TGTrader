@@ -87,6 +87,10 @@ class Settings:
     effort: str = "high"          # low | medium | high | xhigh | max
     use_llm_for_decisions: bool = True
     auto_update: bool = True
+    # How eager to open trades: normal (patient, waits for a real setup),
+    # high (lower bar), scalp (rules-only, trades on almost any momentum signal,
+    # meant for watching activity on a short timeframe - not a profit setting).
+    aggressiveness: str = "normal"   # normal | high | scalp
 
     # --- trading ---
     mode: str = "paper"           # paper | live

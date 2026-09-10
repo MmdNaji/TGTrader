@@ -82,6 +82,27 @@ class DonchianBreakout(Strategy):
         return None
 
 
+class Scalp(Strategy):
+    """Frequent momentum entries, for a short timeframe and the 'scalp' aggressiveness preset.
+    It is NOT an edge - it exists so the machinery visibly opens and closes trades: long when
+    the close is above EMA20 and rising, short the mirror, with a tight one-ATR stop."""
+    name = "scalp"
+    regimes = ()  # any regime
+
+    def evaluate(self, symbol, df, regime):
+        if len(df) < 25:
+            return None
+        cur, prev = df.iloc[-1], df.iloc[-2]
+        if not _ok(cur["ema20"], cur["atr14"]):
+            return None
+        stop = 1.0 * float(cur["atr14"])
+        if cur["close"] > cur["ema20"] and cur["close"] > prev["close"]:
+            return Signal(symbol, "long", 0.6, self.name, "scalp: momentum up over EMA20", stop_distance=stop)
+        if cur["close"] < cur["ema20"] and cur["close"] < prev["close"]:
+            return Signal(symbol, "short", 0.6, self.name, "scalp: momentum down under EMA20", stop_distance=stop)
+        return None
+
+
 DEFAULT_STRATEGIES: list[Strategy] = [EmaTrend(), RsiReversion(), DonchianBreakout()]
 
 

@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         col.addWidget(self.stack, 1)
         h.addLayout(col, 1)
 
-        self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(3000)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(1500)
         self.refresh()
         self.goto("dashboard")
         QTimer.singleShot(4000, lambda: self._check_update(manual=False))
@@ -750,6 +750,8 @@ class MainWindow(QMainWindow):
         self.s_oai_model = QLineEdit(s.openai_model)
         self.s_effort = QComboBox(); self.s_effort.addItems(["low", "medium", "high", "xhigh", "max"]); self.s_effort.setCurrentText(s.effort)
         self.s_llm = QCheckBox("تصمیم نهایی با هوش مصنوعی و مهارت‌ها (خاموش = فقط قوانین پایه)"); self.s_llm.setChecked(s.use_llm_for_decisions)
+        self.s_agg = QComboBox()
+        self.s_agg.addItems(["normal", "high", "scalp"]); self.s_agg.setCurrentText(getattr(s, "aggressiveness", "normal"))
         self.s_autoupd = QCheckBox("به‌روزرسانی خودکار موقع باز شدن برنامه"); self.s_autoupd.setChecked(s.auto_update)
         c1.add(FormRow("تصمیم‌گیرنده", self.s_provider, "کلید همان را وارد کن. کنترل صفحه همیشه با Claude است."))
         c1.add(FormRow("Claude API key", self.s_key, "از console.anthropic.com"))
@@ -757,7 +759,11 @@ class MainWindow(QMainWindow):
         c1.add(FormRow("OpenAI API key", self.s_oai_key, "از platform.openai.com"))
         c1.add(FormRow("مدل OpenAI", self.s_oai_model, "پیش‌فرض gpt-5"))
         c1.add(FormRow("دقت (effort)", self.s_effort, "high برای تصمیم معامله کافی است"))
-        c1.add(self.s_llm); c1.add(self.s_autoupd)
+        c1.add(self.s_llm)
+        c1.add(FormRow("میزان تهاجم", self.s_agg,
+                       "normal = صبور، منتظر ستاپ واقعی · high = آستانه پایین‌تر، معامله‌ی بیشتر · "
+                       "scalp = فقط قوانین، روی هر مومنتوم وارد می‌شود (برای دیدن فعالیت روی تایم‌فریم کوتاه، نه برای سود)"))
+        c1.add(self.s_autoupd)
         c1.add_action(button("تست اتصال", "", self._test_llm))
         grid.addWidget(c1, 0, 0)
 
@@ -816,10 +822,10 @@ class MainWindow(QMainWindow):
         self.lbl_proxy_probe = hint(""); c4.add(self.lbl_proxy_probe)
         c4.add(button("🌐 تست اتصال از این پروکسی (نمایش IP و کشور)", "", self._probe_proxy))
         c4.add(section("پیشرفته"))
-        self.s_loop = QSpinBox(); self.s_loop.setRange(10, 3600); self.s_loop.setValue(s.loop_seconds)
+        self.s_loop = QSpinBox(); self.s_loop.setRange(2, 3600); self.s_loop.setValue(s.loop_seconds)
         self.s_mt5_login = QLineEdit(str(s.mt5_login or "")); self.s_mt5_pass = QLineEdit(s.mt5_password); self.s_mt5_pass.setEchoMode(QLineEdit.Password)
         self.s_mt5_server = QLineEdit(s.mt5_server)
-        c4.add(FormRow("فاصله بررسی (ثانیه)", self.s_loop, "۶۰ برای ساعتی و روزانه کافی است"))
+        c4.add(FormRow("فاصله بررسی (ثانیه)", self.s_loop, "هر چند ثانیه بازار بررسی شود. ۶۰ برای روزانه؛ برای scalp روی تایم‌فریم کوتاه ۲ تا ۵"))
         c4.add(FormRow("MT5 login", self.s_mt5_login, "فقط فارکس")); c4.add(FormRow("MT5 password", self.s_mt5_pass)); c4.add(FormRow("MT5 server", self.s_mt5_server))
         c4.add(button("⬇ دانلود و نصب MetaTrader 5", "ghost", self._install_mt5))
         grid.addWidget(c4, 1, 1)
@@ -849,6 +855,7 @@ class MainWindow(QMainWindow):
         s.ai_provider = self.s_provider.currentText(); s.openai_api_key = self.s_oai_key.text().strip(); s.openai_model = self.s_oai_model.text().strip() or "gpt-5"
         s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText(); s.effort = self.s_effort.currentText()
         s.use_llm_for_decisions = self.s_llm.isChecked(); s.auto_update = self.s_autoupd.isChecked()
+        s.aggressiveness = self.s_agg.currentText()
         s.mode = self.s_mode.currentText(); s.market = self.s_market.currentText()
         s.exchange.exchange_id = self.s_exchange.currentText().strip().lower(); s.data_source = self.s_data_source.currentText()
         s.exchange.api_key = self.s_ex_key.text().strip(); s.exchange.secret = self.s_ex_secret.text().strip()
