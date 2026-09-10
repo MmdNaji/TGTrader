@@ -177,6 +177,13 @@ class Database:
         }
 
     # ------------------------------------------------------------ equity
+    def reset_mode(self, mode: str) -> None:
+        """Wipe all trades and the equity history for a mode, and clear the decision log
+        (decisions are not tagged by mode - they are a shared display log)."""
+        self.execute("DELETE FROM trades WHERE mode=?", (mode,))
+        self.execute("DELETE FROM equity WHERE mode=?", (mode,))
+        self.execute("DELETE FROM decisions")
+
     def record_equity(self, mode: str, equity: float) -> None:
         self.execute("INSERT INTO equity(ts, mode, equity) VALUES (?,?,?)", (time.time(), mode, equity))
 

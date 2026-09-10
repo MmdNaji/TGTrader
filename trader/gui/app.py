@@ -325,12 +325,26 @@ class MainWindow(QMainWindow):
             self._run_bg(lambda: self.engine.close_all("manual"), lambda _: self.refresh())
 
     def reset_paper(self):
+        if QMessageBox.question(self, "ریست کامل",
+                                "همه‌ی معاملات و تاریخچه‌ی حساب کاغذی پاک می‌شوند و موجودی به عدد تنظیمات برمی‌گردد. مطمئنی؟") != QMessageBox.Yes:
+            return
+        self._reset_paper_now()
+        QMessageBox.information(self, "انجام شد", f"حساب کاغذی پاک شد. موجودی: {self.settings.paper_start_balance:g}")
+
+    def _reset_paper_now(self):
+        """Wipe paper trades/decisions/equity and set cash to the configured start balance,
+        including the engine's in-memory broker if it is running."""
         from ..execution.paper import PaperBroker
-        if QMessageBox.question(self, "", "حساب کاغذی ریست شود؟ (معاملات باز کاغذی بسته حساب می‌شوند)") == QMessageBox.Yes:
-            PaperBroker(self.settings.paper_start_balance).reset(self.settings.paper_start_balance)
-            for r in self.db.open_trades("paper"):
-                self.db.close_trade(r["id"], r["entry_price"], 0.0, 0.0)
-            self.refresh()
+        bal = float(self.settings.paper_start_balance)
+        self.db.reset_mode("paper")
+        PaperBroker(bal).reset(bal)
+        if self.engine and isinstance(self.engine.broker, PaperBroker):
+            self.engine.broker.reset(bal)
+            self.engine.last_prices.clear()
+        self.db.record_equity("paper", bal)
+        self._live = {}
+        self._hide_pos_detail()
+        self.refresh()
 
     def _confirm_blocking(self, summary: str) -> bool:
         ev = threading.Event(); self._confirm_result = {"event": ev, "ok": False}
@@ -946,6 +960,7 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         s = self.settings
+        old_paper_bal = s.paper_start_balance
         s.ai_provider = self.s_provider.currentText(); s.openai_api_key = self.s_oai_key.text().strip(); s.openai_model = self.s_oai_model.text().strip() or "gpt-5"
         s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText(); s.effort = self.s_effort.currentText()
         s.use_llm_for_decisions = self.s_llm.isChecked(); s.auto_update = self.s_autoupd.isChecked()
@@ -967,8 +982,14 @@ class MainWindow(QMainWindow):
         for combo in (self.ch_symbol, self.bt_symbol):
             cur = combo.currentText(); combo.blockSignals(True); combo.clear(); combo.addItems(s.symbols)
             combo.setCurrentText(cur if cur in s.symbols else (s.symbols[0] if s.symbols else "")); combo.blockSignals(False)
-        self._market = None; self._dash_chart_last = 0; self._start_feed(); self.refresh()
-        QMessageBox.information(self, "ذخیره شد", "تنظیمات ذخیره شد." + ("\n\nهشدار:\n" + "\n".join(problems) if problems else ""))
+        self._market = None; self._dash_chart_last = 0; self._start_feed()
+        extra = ""
+        if s.mode == "paper" and abs(float(s.paper_start_balance) - float(old_paper_bal)) > 1e-9:
+            self._reset_paper_now()
+            extra = f"\n\nموجودی کاغذی روی {s.paper_start_balance:g} تنظیم و حساب کاغذی ریست شد."
+        else:
+            self.refresh()
+        QMessageBox.information(self, "ذخیره شد", "تنظیمات ذخیره شد." + extra + ("\n\nهشدار:\n" + "\n".join(problems) if problems else ""))
 
     def _probe_proxy(self):
         from ..net import probe
