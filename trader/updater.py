@@ -96,15 +96,8 @@ def _check_server(timeout: float) -> Release | None:
     exe = Release(version=str(d["version"]), tag=str(d.get("tag", "")), notes=str(d.get("notes", "")).strip(),
                   asset_url=d.get("setup_url"), asset_size=int(d.get("setup_size") or 0),
                   page_url=str(d.get("page_url", "")), sha256=str(d.get("setup_sha256", "")), source="server", kind="exe")
-    code = d.get("code") or {}
-    if code.get("version") and code.get("url") and is_frozen():
-        needs = str(code.get("requires_base") or "0")
-        if _vtuple(base_version()) >= _vtuple(needs) and _vtuple(code["version"]) > _vtuple(__version__) \
-                and _vtuple(code["version"]) >= _vtuple(exe.version):
-            return Release(version=str(code["version"]), tag="code", notes=str(code.get("notes", "")).strip(),
-                           asset_url=str(code["url"]), asset_size=int(code.get("size") or 0), page_url=exe.page_url,
-                           sha256=str(code.get("sha256", "")), source="server", kind="code")
-    # a full exe is only worth installing when its bundled code is newer than what we run
+    # Always use the full installer. The code-overlay path did not restart reliably on Windows
+    # and produced a download loop, so it is deliberately not used from the update button.
     return exe
 
 
