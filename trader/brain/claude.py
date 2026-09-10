@@ -66,7 +66,9 @@ def _client(settings: Settings) -> anthropic.Anthropic:
     key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("Anthropic API key is not set (Settings -> Claude)")
-    return anthropic.Anthropic(api_key=key, timeout=180.0)
+    from ..net import anthropic_http_client
+    hc = anthropic_http_client(settings)
+    return anthropic.Anthropic(api_key=key, timeout=180.0, http_client=hc) if hc else anthropic.Anthropic(api_key=key, timeout=180.0)
 
 
 class Brain:

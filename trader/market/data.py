@@ -21,9 +21,8 @@ def _ccxt_exchange(settings: Settings, authenticated: bool = False) -> Any:
         })
         if settings.exchange.password:
             params["password"] = settings.exchange.password
-    if settings.exchange.proxy:
-        params["proxies"] = {"http": settings.exchange.proxy, "https": settings.exchange.proxy}
-        params["httpsProxy"] = settings.exchange.proxy
+    from ..net import ccxt_proxy_params
+    params.update(ccxt_proxy_params(settings))
     ex = ex_cls(params)
     if settings.exchange.sandbox and hasattr(ex, "set_sandbox_mode"):
         try:
@@ -40,32 +39,89 @@ def ohlcv_to_frame(rows: list[list[float]]) -> pd.DataFrame:
     return df.astype(float)
 
 
-class MarketData:
-    """Fetches candles and prices. One instance per engine; caches the exchange object."""
+# Public market-data sources tried in order when the configured exchange is unreachable
+# (Bybit, Binance, OKX and KuCoin answer 403 "blocked from your country" from Iran).
+FALLBACK_SOURCES = ["mexc", "kcex", "gateio", "htx", "bitget"]
 
-    def __init__(self, settings: Settings):
+
+def _blocked(exc: Exception) -> bool:
+    m = str(exc).lower()
+    return any(k in m for k in ("403", "forbidden", "country", "restricted", "cloudfront", "451", "unavailable in your", "timed out", "timeout", "connection", "resolve"))
+
+
+class MarketData:
+    """Fetches candles and prices with an automatic fallback chain of public sources.
+
+    One instance per engine. ``active_source`` says which exchange the data is actually
+    coming from; ``notice`` (str or None) explains a switch so the UI can show it.
+    """
+
+    def __init__(self, settings: Settings, on_notice=None):
         self.settings = settings
-        self._ex = None
+        self._exs: dict[str, object] = {}
         self._kcex = None
         self._cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+        self.active_source: str | None = None
+        self.notice: str | None = None
+        self.on_notice = on_notice or (lambda s: None)
+
+    # ------------------------------------------------------------ sources
+    def _sources(self) -> list[str]:
+        cfg = (self.settings.exchange.exchange_id or "bybit").lower()
+        pref = (getattr(self.settings, "data_source", "auto") or "auto").lower()
+        if pref != "auto":
+            return [pref]
+        return [cfg] + [f for f in FALLBACK_SOURCES if f != cfg]
 
     @property
     def is_kcex(self) -> bool:
-        return self.settings.market == "crypto" and self.settings.exchange.exchange_id.lower() == "kcex"
+        return self.settings.market == "crypto" and (self.active_source or self.settings.exchange.exchange_id).lower() == "kcex"
 
     @property
     def kcex(self):
         if self._kcex is None:
             from .kcex import KcexData
-            self._kcex = KcexData(proxy=self.settings.exchange.proxy)
+            from ..net import resolve_proxy
+            self._kcex = KcexData(proxy=resolve_proxy(self.settings) or "")
         return self._kcex
+
+    def _ex(self, ex_id: str):
+        if ex_id not in self._exs:
+            import ccxt
+            cls = getattr(ccxt, ex_id)
+            from ..net import ccxt_proxy_params
+            params: dict = {"enableRateLimit": True, "timeout": 20000, "options": {"defaultType": "spot"}}
+            params.update(ccxt_proxy_params(self.settings))
+            self._exs[ex_id] = cls(params)
+        return self._exs[ex_id]
 
     @property
     def exchange(self):
-        if self._ex is None:
-            self._ex = _ccxt_exchange(self.settings, authenticated=False)
-        return self._ex
+        return self._ex((self.active_source or self.settings.exchange.exchange_id).lower())
 
+    def _try_sources(self, what: str, fn):
+        """Run fn(source) on the active source, else walk the chain; remember what worked."""
+        order = [self.active_source] if self.active_source else []
+        order += [s for s in self._sources() if s not in order]
+        errors: list[str] = []
+        for src in order:
+            try:
+                out = fn(src)
+                if self.active_source != src:
+                    cfg = self.settings.exchange.exchange_id.lower()
+                    if src != cfg and errors:
+                        self.notice = f"منبع داده: {src} (چون {cfg} از این‌جا در دسترس نیست: {errors[0][:90]})"
+                        self.on_notice(self.notice)
+                    self.active_source = src
+                return out
+            except Exception as exc:
+                errors.append(f"{src}: {str(exc).splitlines()[0][:120]}")
+                if not _blocked(exc) and src == order[0] and len(order) > 1 and "not found" in str(exc).lower():
+                    # a bad symbol, not a blocked exchange - do not hop sources for it
+                    raise
+        raise RuntimeError(f"no market-data source reachable for {what}: " + " | ".join(errors))
+
+    # ------------------------------------------------------------ data
     def candles(self, symbol: str, timeframe: str | None = None, limit: int = 400, max_age: float = 20.0) -> pd.DataFrame:
         tf = timeframe or self.settings.timeframe
         key = (symbol, tf)
@@ -75,11 +131,12 @@ class MarketData:
             return cached[1].tail(limit)
         if self.settings.market == "forex":
             df = self._mt5_candles(symbol, tf, limit)
-        elif self.is_kcex:
-            df = self.kcex.candles(symbol, tf, limit)
         else:
-            rows = self.exchange.fetch_ohlcv(symbol, tf, limit=limit)
-            df = ohlcv_to_frame(rows)
+            def fetch(src: str) -> pd.DataFrame:
+                if src == "kcex":
+                    return self.kcex.candles(symbol, tf, limit)
+                return ohlcv_to_frame(self._ex(src).fetch_ohlcv(symbol, tf, limit=limit))
+            df = self._try_sources(f"{symbol} {tf}", fetch)
         self._cache[key] = (now, df)
         return df
 
@@ -88,10 +145,13 @@ class MarketData:
             import MetaTrader5 as mt5  # type: ignore
             tick = mt5.symbol_info_tick(symbol.replace("/", ""))
             return float((tick.bid + tick.ask) / 2)
-        if self.is_kcex:
-            return self.kcex.price(symbol)
-        t = self.exchange.fetch_ticker(symbol)
-        return float(t["last"] or t["close"])
+
+        def fetch(src: str) -> float:
+            if src == "kcex":
+                return self.kcex.price(symbol)
+            t = self._ex(src).fetch_ticker(symbol)
+            return float(t["last"] or t["close"])
+        return self._try_sources(symbol, fetch)
 
     # ------------------------------------------------------------ forex
     def _mt5_candles(self, symbol: str, tf: str, limit: int) -> pd.DataFrame:

@@ -181,3 +181,15 @@ def test_provider_selection_and_chart_widget():
                 [{"side": "long", "opened_at": 0, "entry_price": 1, "closed_at": 0, "exit_price": 1}])
     img = QImage(900, 500, QImage.Format_ARGB32); ch.render(img)
     assert img.pixelColor(450, 200).isValid()   # rendered without raising
+
+
+def test_proxy_policy():
+    from trader import net
+    s = Settings(); s.proxy_mode = "none"; s.exchange.proxy = "http://127.0.0.1:1"
+    assert net.resolve_proxy(s) is None and net.ccxt_proxy_params(s) == {}
+    s.proxy_mode = "manual"
+    assert net.resolve_proxy(s) == "http://127.0.0.1:1" and net.ccxt_proxy_params(s)["httpsProxy"] == "http://127.0.0.1:1"
+    s.exchange.proxy = "socks5://127.0.0.1:2"
+    assert net.ccxt_proxy_params(s) == {"socksProxy": "socks5://127.0.0.1:2"}
+    s.proxy_mode = "system"; s.exchange.proxy = ""
+    assert net.resolve_proxy(s) in (None,) or isinstance(net.resolve_proxy(s), str)

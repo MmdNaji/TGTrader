@@ -30,7 +30,7 @@ class Engine:
         self.settings = settings
         self.db = db
         self.mode = settings.mode
-        self.market = MarketData(settings)
+        self.market = MarketData(settings, on_notice=lambda m: self.log(m, "warn"))
         self.risk = RiskManager(settings.risk, db, self.mode)
         self.broker = broker or self._make_broker()
         self.brain = brain

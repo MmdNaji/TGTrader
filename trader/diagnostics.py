@@ -50,7 +50,7 @@ def _safe_settings(s: Settings) -> dict[str, Any]:
         "ai_provider": s.ai_provider, "model": s.model, "openai_model": s.openai_model, "effort": s.effort,
         "has_claude_key": bool(s.anthropic_api_key), "has_openai_key": bool(s.openai_api_key),
         "use_llm": s.use_llm_for_decisions, "mode": s.mode, "market": s.market,
-        "exchange": s.exchange.exchange_id, "has_exchange_key": bool(s.exchange.api_key), "proxy": bool(s.exchange.proxy),
+        "exchange": s.exchange.exchange_id, "has_exchange_key": bool(s.exchange.api_key), "proxy_mode": getattr(s, "proxy_mode", "system"), "proxy_set": bool(s.exchange.proxy), "data_source": getattr(s, "data_source", "auto"),
         "symbols": s.symbols, "timeframe": s.timeframe, "loop_seconds": s.loop_seconds,
         "risk": asdict(s.risk), "computer_enabled": s.computer.enabled, "computer_confirm": s.computer.confirm_before_submit,
         "computer_notes_len": len(s.computer.exchange_notes or ""), "auto_update": s.auto_update,
@@ -76,6 +76,13 @@ def run_all(settings: Settings, db: Database, progress: Callable[[str], None] | 
             tb = traceback.format_exc(limit=2).strip().splitlines()[-1]
             rep.checks.append(Check(name, False, f"{exc} | {tb}"[:600], int((time.time() - t0) * 1000)))
 
+    # ------------------------------------------------------------ network
+    def c_net():
+        from .net import probe
+        info = probe(settings)
+        return (f"via {info['proxy']}: ip {info['ip']} {info['country']} {info.get('city','')} ({info.get('org','')})", info)
+    run("اتصال اینترنت / پروکسی", c_net)
+
     # ------------------------------------------------------------ basics
     def c_settings():
         problems = settings.validate()
@@ -98,13 +105,15 @@ def run_all(settings: Settings, db: Database, progress: Callable[[str], None] | 
         df = enrich(md.candles(sym, settings.timeframe, limit=400))
         px = md.price(sym); ctx["df"], ctx["sym"], ctx["md"] = df, sym, md
         snap = snapshot(df); ctx["snap"] = snap; ctx["regime"] = detect_regime(df)
-        return (f"{sym} {settings.timeframe}: {len(df)} bars, price {px:g}, regime {ctx['regime']}, RSI {snap.get('rsi14')}",
-                {"bars": len(df), "price": px, "regime": ctx["regime"]})
+        src = md.active_source or settings.exchange.exchange_id
+        return (f"source {src}: {sym} {settings.timeframe}: {len(df)} bars, price {px:g}, regime {ctx['regime']}, RSI {snap.get('rsi14')}"
+                + (f" | {md.notice}" if md.notice else ""), {"bars": len(df), "price": px, "regime": ctx["regime"], "source": src})
     run(f"داده‌ی بازار ({settings.exchange.exchange_id})", c_market)
 
     def c_kcex():
         from .market.kcex import KcexData
-        k = KcexData(proxy=settings.exchange.proxy)
+        from .net import resolve_proxy
+        k = KcexData(proxy=resolve_proxy(settings) or "")
         px = k.price("BTC/USDT"); df = k.candles("BTC/USDT", "1d", 50)
         return f"KCEX BTC {px:g}, {len(df)} daily bars, {len(k.symbols())} symbols"
     run("داده‌ی KCEX", c_kcex)

@@ -92,6 +92,11 @@ class Settings:
     mode: str = "paper"           # paper | live
     market: str = "crypto"        # crypto | forex
     symbols: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT"])
+    # Where candles/prices come from: "auto" = the trading exchange, then public fallbacks
+    # (mexc, kcex, gateio, htx, bitget) when it is blocked from the user's country.
+    data_source: str = "auto"
+    # none | system (OS proxy set by the VPN app) | manual (exchange.proxy URL)
+    proxy_mode: str = "system"
     timeframe: str = "1d"
     loop_seconds: int = 60
     paper_start_balance: float = 100.0

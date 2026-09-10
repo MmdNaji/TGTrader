@@ -7,6 +7,8 @@ pypdf>=5
 httpx>=0.27
 beautifulsoup4>=4.12
 pydantic>=2
+socksio>=1.0
+PySocks>=1.7
 PySide6-Essentials>=6.7
 # desktop control for exchanges without an API (Windows)
 pyautogui>=0.9.54; sys_platform == "win32"

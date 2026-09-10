@@ -75,8 +75,22 @@ def install_dir() -> Path:
 
 
 # ---------------------------------------------------------------- check
+def _proxy() -> str | None:
+    try:
+        from .config import Settings
+        from .net import resolve_proxy
+        return resolve_proxy(Settings.load())
+    except Exception:
+        return None
+
+
+def _get(url: str, timeout: float, **kw):
+    p = _proxy()
+    return httpx.get(url, timeout=timeout, proxy=p, **kw) if p else httpx.get(url, timeout=timeout, **kw)
+
+
 def _check_server(timeout: float) -> Release | None:
-    r = httpx.get(UPDATE_URL, timeout=timeout, headers=UA)
+    r = _get(UPDATE_URL, timeout, headers=UA)
     r.raise_for_status()
     d = r.json()
     exe = Release(version=str(d["version"]), tag=str(d.get("tag", "")), notes=str(d.get("notes", "")).strip(),
@@ -95,8 +109,8 @@ def _check_server(timeout: float) -> Release | None:
 
 
 def _check_github(timeout: float) -> Release | None:
-    r = httpx.get(API.format(repo=UPDATE_REPO), timeout=timeout, follow_redirects=True,
-                  headers={"Accept": "application/vnd.github+json", **UA})
+    r = _get(API.format(repo=UPDATE_REPO), timeout, follow_redirects=True,
+             headers={"Accept": "application/vnd.github+json", **UA})
     if r.status_code == 404:
         return None
     r.raise_for_status()
@@ -172,7 +186,9 @@ def download(rel: Release, progress: Callable[[int, int], None] | None = None) -
     dest = Path(tempfile.gettempdir()) / (f"TGTrader-code-{rel.version}.zip" if rel.kind == "code" else f"TGTrader-Setup-{rel.version}.exe")
     done = 0
     h = hashlib.sha256()
-    with httpx.stream("GET", rel.asset_url, follow_redirects=True, timeout=120, headers=UA) as r:
+    p = _proxy()
+    client = httpx.Client(proxy=p, follow_redirects=True, timeout=120) if p else httpx.Client(follow_redirects=True, timeout=120)
+    with client, client.stream("GET", rel.asset_url, headers=UA) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length") or rel.asset_size or 0)
         with open(dest, "wb") as f:

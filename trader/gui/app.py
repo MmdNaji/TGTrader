@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
         if self.engine:
             return self.engine.market
         if self._market is None:
-            self._market = MarketData(self.settings)
+            self._market = MarketData(self.settings, on_notice=lambda m: self.bridge.event.emit("[data] " + m))
         return self._market
 
     def _load_chart(self, widget: CandleChart, sym: str, tf: str, on_fail=None):
@@ -767,6 +767,7 @@ class MainWindow(QMainWindow):
         self.s_exchange = QComboBox(); self.s_exchange.setEditable(True)
         self.s_exchange.addItems(["bybit", "binance", "kucoin", "okx", "mexc", "gateio", "bitget", "htx", "kcex"]); self.s_exchange.setCurrentText(s.exchange.exchange_id)
         self.lbl_exchange_note = hint(""); self.lbl_exchange_note.setStyleSheet(f"color:{theme.ACCENT}")
+        self.s_data_source = QComboBox(); self.s_data_source.addItems(["auto", "mexc", "kcex", "gateio", "htx", "bitget", "bybit", "binance", "kucoin", "okx"]); self.s_data_source.setCurrentText(getattr(s, "data_source", "auto"))
         self.s_ex_key = QLineEdit(s.exchange.api_key); self.s_ex_secret = QLineEdit(s.exchange.secret); self.s_ex_secret.setEchoMode(QLineEdit.Password)
         self.s_ex_pass = QLineEdit(s.exchange.password); self.s_ex_pass.setEchoMode(QLineEdit.Password)
         self.s_symbols = QLineEdit(", ".join(s.symbols))
@@ -776,6 +777,7 @@ class MainWindow(QMainWindow):
         c2.add(FormRow("بازار", self.s_market, "فارکس به MetaTrader 5 نیاز دارد (پایین)"))
         c2.add(FormRow("صرافی", self.s_exchange, "قیمت‌ها از این‌جا می‌آید، حتی در حالت کاغذی"))
         c2.add(self.lbl_exchange_note)
+        c2.add(FormRow("منبع داده", self.s_data_source, "auto = همان صرافی، و اگر از ایران بسته بود خودکار MEXC → KCEX → Gate → HTX. برنامه در گزارش می‌گوید کدام را گرفته."))
         c2.add(FormRow("API key صرافی", self.s_ex_key, "فقط برای حالت واقعی. مجوز فقط Trade، بدون Withdrawal."))
         c2.add(FormRow("Secret", self.s_ex_secret)); c2.add(FormRow("Passphrase", self.s_ex_pass, "فقط okx و kucoin"))
         c2.add(FormRow("نمادها", self.s_symbols, "با کاما: BTC/USDT, ETH/USDT"))
@@ -806,11 +808,17 @@ class MainWindow(QMainWindow):
         self.s_cu_notes = QTextEdit(s.computer.exchange_notes); self.s_cu_notes.setMinimumHeight(110)
         self.s_cu_notes.setPlaceholderText("سایت صرافی کجا باز است و فرم سفارش چه شکلی است…")
         c4.add(self.s_cu_on); c4.add(self.s_cu_confirm); c4.add(FormRow("توضیح صرافی", self.s_cu_notes, "با انتخاب kcex خودش پر می‌شود"))
+        c4.add(section("پروکسی / VPN"))
+        self.s_proxy_mode = QComboBox(); self.s_proxy_mode.addItems(["system", "manual", "none"]); self.s_proxy_mode.setCurrentText(getattr(s, "proxy_mode", "system"))
+        self.s_proxy = QLineEdit(s.exchange.proxy); self.s_proxy.setPlaceholderText("http://127.0.0.1:10809")
+        c4.add(FormRow("حالت پروکسی", self.s_proxy_mode, "system = پروکسی سیستم ویندوز که VPN تنظیم می‌کند (یا مستقیم اگر نبود) · manual = آدرس پایین · none = مستقیم"))
+        c4.add(FormRow("آدرس پروکسی", self.s_proxy, "v2rayN: http://127.0.0.1:10809 · Clash: http://127.0.0.1:7890 · Nekoray: http://127.0.0.1:2080"))
+        self.lbl_proxy_probe = hint(""); c4.add(self.lbl_proxy_probe)
+        c4.add(button("🌐 تست اتصال از این پروکسی (نمایش IP و کشور)", "", self._probe_proxy))
         c4.add(section("پیشرفته"))
-        self.s_proxy = QLineEdit(s.exchange.proxy); self.s_loop = QSpinBox(); self.s_loop.setRange(10, 3600); self.s_loop.setValue(s.loop_seconds)
+        self.s_loop = QSpinBox(); self.s_loop.setRange(10, 3600); self.s_loop.setValue(s.loop_seconds)
         self.s_mt5_login = QLineEdit(str(s.mt5_login or "")); self.s_mt5_pass = QLineEdit(s.mt5_password); self.s_mt5_pass.setEchoMode(QLineEdit.Password)
         self.s_mt5_server = QLineEdit(s.mt5_server)
-        c4.add(FormRow("پروکسی", self.s_proxy, "اگر صرافی IP را می‌بندد: socks5://127.0.0.1:1080"))
         c4.add(FormRow("فاصله بررسی (ثانیه)", self.s_loop, "۶۰ برای ساعتی و روزانه کافی است"))
         c4.add(FormRow("MT5 login", self.s_mt5_login, "فقط فارکس")); c4.add(FormRow("MT5 password", self.s_mt5_pass)); c4.add(FormRow("MT5 server", self.s_mt5_server))
         c4.add(button("⬇ دانلود و نصب MetaTrader 5", "ghost", self._install_mt5))
@@ -842,9 +850,9 @@ class MainWindow(QMainWindow):
         s.anthropic_api_key = self.s_key.text().strip(); s.model = self.s_model.currentText(); s.effort = self.s_effort.currentText()
         s.use_llm_for_decisions = self.s_llm.isChecked(); s.auto_update = self.s_autoupd.isChecked()
         s.mode = self.s_mode.currentText(); s.market = self.s_market.currentText()
-        s.exchange.exchange_id = self.s_exchange.currentText().strip().lower()
+        s.exchange.exchange_id = self.s_exchange.currentText().strip().lower(); s.data_source = self.s_data_source.currentText()
         s.exchange.api_key = self.s_ex_key.text().strip(); s.exchange.secret = self.s_ex_secret.text().strip()
-        s.exchange.password = self.s_ex_pass.text().strip(); s.exchange.proxy = self.s_proxy.text().strip()
+        s.exchange.password = self.s_ex_pass.text().strip(); s.exchange.proxy = self.s_proxy.text().strip(); s.proxy_mode = self.s_proxy_mode.currentText()
         s.symbols = [x.strip().upper() for x in self.s_symbols.text().split(",") if x.strip()]
         s.timeframe = self.s_tf.currentText(); s.loop_seconds = self.s_loop.value(); s.paper_start_balance = self.s_paper_bal.value()
         s.mt5_login = int(self.s_mt5_login.text()) if self.s_mt5_login.text().strip().isdigit() else 0
@@ -860,6 +868,15 @@ class MainWindow(QMainWindow):
             combo.setCurrentText(cur if cur in s.symbols else (s.symbols[0] if s.symbols else "")); combo.blockSignals(False)
         self._market = None; self._dash_chart_last = 0; self.refresh()
         QMessageBox.information(self, "ذخیره شد", "تنظیمات ذخیره شد." + ("\n\nهشدار:\n" + "\n".join(problems) if problems else ""))
+
+    def _probe_proxy(self):
+        from ..net import probe
+        self.settings.proxy_mode = self.s_proxy_mode.currentText(); self.settings.exchange.proxy = self.s_proxy.text().strip()
+        self.lbl_proxy_probe.setText("در حال بررسی…")
+        self._run_bg(lambda: probe(self.settings),
+                     lambda i: self.lbl_proxy_probe.setText(f"از طریق {i['proxy']}: IP {i['ip']} · کشور {i['country']} · {i.get('city','')} · {i.get('org','')}"
+                                                            + ("   ⚠ هنوز از ایران دیده می‌شوی؛ Bybit/Binance باز نمی‌شوند، منبع داده خودکار عوض می‌شود." if i.get('country') == 'IR' else "")),
+                     lambda m: self.lbl_proxy_probe.setText("اتصال برقرار نشد: " + m.splitlines()[0]))
 
     def _test_llm(self):
         s = self.settings
