@@ -877,3 +877,91 @@ def test_the_kpi_tiles_go_two_by_two_on_a_narrow_window(win):
     assert set(narrow) == set(win.kpis), "a tile was lost moving the grid around"
     assert {c for _r, c in narrow.values()} == {0, 1}, f"expected two columns: {narrow}"
     assert {r for r, _c in narrow.values()} == {0, 1}, f"expected two rows: {narrow}"
+
+
+def test_the_spot_only_option_is_in_the_shape_ccxt_actually_reads():
+    """`{"fetchMarkets": ["spot"]}` had been in this code for weeks with a comment explaining
+    that it stops an exchange walking four market types. It never did anything: every one of
+    these exchanges reads that option with safe_dict(), which returns None for a LIST and falls
+    back to spot+swap+future+option. The proof it mattered is a Windows test run that exited
+    0xC0000005 with a thread stuck in gate.fetch_future_markets.
+
+    This drives ccxt's own fetch_markets with the four fetchers stubbed, so it checks the shape
+    against the library rather than against my reading of it. No network.
+    """
+    import ccxt
+    from trader.market.data import MarketData
+    from trader.config import Settings
+
+    s = Settings()
+    s.exchange.exchange_id = "gate"
+    md = MarketData(s)
+    os.environ.pop("TGTRADER_OFFLINE", None)
+    try:
+        ex = md._ex("gate")
+    finally:
+        os.environ["TGTRADER_OFFLINE"] = "1"
+
+    called = []
+    for name in ("fetch_spot_markets", "fetch_swap_markets", "fetch_future_markets",
+                 "fetch_option_markets"):
+        setattr(ex, name, (lambda n: (lambda *a, **k: (called.append(n), [])[1]))(name))
+    ex.fetch_markets()
+    assert called == ["fetch_spot_markets"], f"load_markets would fetch {called}"
+
+    # and the bare list really is the broken shape, so this test cannot pass by accident
+    loose = ccxt.gate({"options": {"defaultType": "spot", "fetchMarkets": ["spot"]}})
+    seen = []
+    for name in ("fetch_spot_markets", "fetch_swap_markets", "fetch_future_markets",
+                 "fetch_option_markets"):
+        setattr(loose, name, (lambda n: (lambda *a, **k: (seen.append(n), [])[1]))(name))
+    loose.fetch_markets()
+    assert len(seen) == 4, "the list form was supposed to be the bug; it no longer is"
+
+
+def test_no_test_can_reach_the_network():
+    """A GUI test builds a real window and its chart page starts a candle fetch. On Windows that
+    thread was still in an SSL read when the suite ended, the teardown fell through to os._exit,
+    and tearing an OpenSSL thread down where it stands is itself an access violation: 88 passed,
+    exit 0xC0000005, three runs out of three.
+
+    A test that reaches the internet is not testing this program anyway."""
+    from trader.market.data import MarketData, offline
+    from trader.config import Settings
+
+    assert offline(), "the suite must run with TGTRADER_OFFLINE set"
+    md = MarketData(Settings())
+    for call in (lambda: md._ex("gate"), lambda: md.kcex):
+        try:
+            call()
+        except RuntimeError as exc:
+            assert "OFFLINE" in str(exc)
+        else:
+            raise AssertionError("a network client was built inside the test suite")
+
+
+def test_a_scrollbar_that_cannot_scroll_is_not_shown(win):
+    """At 1366px every column of the positions table was on screen and there was still a bar
+    under it, which dragged nowhere - ResizeToContents pads each section slightly past its hint,
+    so the total lands a few pixels over the viewport with nothing actually hidden. A bar that
+    says "there is more" when there is not is worse than no bar."""
+    from trader.gui.widgets import fill, DEAD_SCROLL
+    app = QApplication.instance() or QApplication([])
+    rows = [["ETH/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
+             "⁦-0.10 $ (-0.20%)⁩"]]
+    win.show()
+    win.goto("dashboard")
+    t = win.tbl_positions
+    useless, useful = {}, 0
+    for width in range(820, 1700, 20):
+        win.resize(width, 900)
+        t.show()
+        fill(t, rows)
+        for _ in range(3):
+            app.processEvents()
+        sb = t.horizontalScrollBar()
+        if sb.isVisible() and sb.maximum() <= DEAD_SCROLL:
+            useless[width] = sb.maximum()
+        if sb.isVisible():
+            useful += 1
+    assert not useless, f"an inert scrollbar was shown at these widths: {useless}"

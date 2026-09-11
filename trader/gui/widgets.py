@@ -223,6 +223,11 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
 _BIDI = "\u2066\u2067\u2068\u2069\u200e\u200f"
 
 
+# Below this many pixels of travel, a horizontal scrollbar is hidden instead of shown: see
+# the note in fit_columns. Well under one character, so nothing readable can hide behind it.
+DEAD_SCROLL = 8
+
+
 def fit_columns(t: QTableWidget) -> None:
     """Stretch the last column only while there is room to spare.
 
@@ -247,6 +252,14 @@ def fit_columns(t: QTableWidget) -> None:
     headroom = 24
     hh.setSectionResizeMode(n - 1, QHeaderView.Stretch if need + headroom <= room
                             else QHeaderView.ResizeToContents)
+    # A scrollbar that can move three pixels is worse than none: it says there is something
+    # hidden when every column is already on screen, and dragging it does nothing anyone can
+    # see. That is what it looked like on a 1366px window - all eight columns visible and an
+    # inert bar under them. ResizeToContents pads each section a little beyond the hint above,
+    # so the total can end up a few pixels over the viewport with no column actually cut.
+    sb = t.horizontalScrollBar()
+    t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff if sb.maximum() <= DEAD_SCROLL
+                                   else Qt.ScrollBarAsNeeded)
 
 
 def fill(t: QTableWidget, rows: list[list[Any]], tones: dict[int, str] | None = None) -> None:

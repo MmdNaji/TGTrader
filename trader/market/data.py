@@ -1,6 +1,7 @@
 """Market data through ccxt (crypto) or MetaTrader 5 (forex, Windows only)."""
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Callable
 
@@ -9,11 +10,31 @@ import pandas as pd
 from ..config import Settings
 
 
+def offline() -> bool:
+    """True when this process must not touch the network.
+
+    The test suite sets TGTRADER_OFFLINE, the same way it already sets TGTRADER_NO_AUTOUPDATE.
+    A GUI test builds a real window, the chart page starts a background candle fetch, and that
+    thread was still waiting on an SSL read when the suite ended - so the teardown fell through
+    to os._exit, which on Windows tears every thread down where it stands. Doing that to a
+    thread inside OpenSSL is itself an access violation, and the whole run exited 0xC0000005
+    with 88 tests passed and nothing reported as failed.
+
+    A test that reaches the internet is not a test of this program anyway: it is slow, it
+    depends on where the machine is, and here it was the difference between a green run and a
+    crash. So the network is closed at the two places that open it.
+    """
+    return bool(os.environ.get("TGTRADER_OFFLINE"))
+
+
 def _ccxt_exchange(settings: Settings, authenticated: bool = False) -> Any:
+    if offline():
+        raise RuntimeError("TGTRADER_OFFLINE: no network in this process")
     import ccxt  # imported lazily so the GUI starts even if ccxt is missing
 
     ex_cls = getattr(ccxt, settings.exchange.exchange_id)
-    params: dict[str, Any] = {"enableRateLimit": True, "options": {"defaultType": "spot"}}
+    params: dict[str, Any] = {"enableRateLimit": True, "timeout": 20000,
+                              "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}}
     if authenticated:
         params.update({
             "apiKey": settings.exchange.api_key,
@@ -95,6 +116,8 @@ class MarketData:
 
     @property
     def kcex(self):
+        if offline():
+            raise RuntimeError("TGTRADER_OFFLINE: no network in this process")
         if self._kcex is None:
             from .kcex import KcexData
             from ..net import resolve_proxy
@@ -102,16 +125,26 @@ class MarketData:
         return self._kcex
 
     def _ex(self, ex_id: str):
+        if offline():
+            raise RuntimeError("TGTRADER_OFFLINE: no network in this process")
         if ex_id not in self._exs:
             import ccxt
             cls = getattr(ccxt, ex_id)
             from ..net import ccxt_proxy_params
             # fetchMarkets is limited to spot on purpose. load_markets() is called implicitly by
-            # the first price/candle request, and on bybit it otherwise walks spot, linear,
-            # inverse AND option markets - each request up to the 20s timeout, so ONE price call
-            # could block a thread for minutes. This app only trades spot.
+            # the first price/candle request, and an exchange otherwise walks spot, swap, future
+            # AND option markets - each a request of its own, so ONE candle call can block a
+            # thread for minutes behind a proxy. This app only trades spot.
+            #
+            # It has to be {"types": [...]}. A bare ["spot"] is what was here, and every one of
+            # these exchanges reads this option with safe_dict(), which returns None for a list
+            # and falls back to all four types - so the limit had never once applied. Proven by
+            # stubbing gate's four fetch_*_markets and calling fetch_markets: the list form ran
+            # all four, the dict form ran spot alone. This is what left a thread stuck in an SSL
+            # read inside gate.fetch_future_markets at the end of the Windows test run, and it
+            # is why a price call was four times the work it needed to be everywhere else.
             params: dict = {"enableRateLimit": True, "timeout": 20000,
-                            "options": {"defaultType": "spot", "fetchMarkets": ["spot"]}}
+                            "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}}
             params.update(ccxt_proxy_params(self.settings))
             self._exs[ex_id] = cls(params)
         return self._exs[ex_id]

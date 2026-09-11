@@ -23,6 +23,12 @@ import sys
 # The window checks for an update four seconds after it opens, in its own thread, over the
 # network. The one test that must exercise that path clears this again for its subprocess.
 os.environ.setdefault("TGTRADER_NO_AUTOUPDATE", "1")
+# And no market data either. A GUI test builds a real window; its chart page starts a candle
+# fetch in the background, and on Windows that thread was still inside an SSL read when the
+# suite finished. The teardown below then fell through to os._exit, which tears every thread
+# down where it stands - and doing that to a thread inside OpenSSL is itself an access
+# violation. The run reported "88 passed" and exited 0xC0000005, three times out of three.
+os.environ.setdefault("TGTRADER_OFFLINE", "1")
 
 _EXIT_STATUS = {"code": 0}
 
