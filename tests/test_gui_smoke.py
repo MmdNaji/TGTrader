@@ -1512,3 +1512,42 @@ def test_the_columns_come_back_when_the_table_comes_back(win):
                                f"six different widths - it was never re-laid-out")
     win.close()
     win.deleteLater()
+
+
+def test_the_reset_button_is_not_a_neighbour_of_the_start_button(win):
+    """Below COMPACT_W the four topbar buttons lose their words and become four similar icons -
+    and one of them erases the whole test account. Reported from a real session: a click meant
+    for ▶ landed on the reset and opened its confirmation. The dialog did its job and nothing
+    was lost, which is what that dialog is for; a destructive control one icon away from a daily
+    one is a trap the dialog should not have to catch.
+
+    So it sits last, behind a gap, and keeps a red edge at every width - because an icon on its
+    own says nothing about what it does."""
+    from trader.gui.app import COMPACT_W
+    app = QApplication.instance() or QApplication([])
+    win.show()
+    win.resize(COMPACT_W - 200, 800)          # compact: every one of them is an icon
+    for _ in range(4):
+        app.processEvents()
+
+    order = [win.btn_run, win.btn_kill, win.btn_update, win.btn_reset]
+    xs = [b.mapTo(win, b.rect().topLeft()).x() for b in order]
+    assert win.btn_reset.objectName() == "dangerGhost", \
+        "the destructive button looks like the others"
+
+    # nothing sits between run and reset by accident: reset is furthest from run
+    dist = {b: abs(xs[i] - xs[0]) for i, b in enumerate(order)}
+    assert dist[win.btn_reset] == max(dist.values()), \
+        "the reset button is not the furthest from the one pressed every day"
+    # and there is real space before it, not just ordering
+    neighbours = sorted(((abs(xs[i] - xs[3]), order[i]) for i in range(3)))
+    gap, closest = neighbours[0]
+    assert gap >= closest.width() + 12, \
+        f"only {gap}px between reset and {closest.text()!r} - that is not a gap"
+
+    # the words come back when there is room, and the red edge does not go away
+    win.resize(COMPACT_W + 300, 800)
+    for _ in range(4):
+        app.processEvents()
+    assert len(win.btn_reset.text().split()) > 1
+    assert win.btn_reset.objectName() == "dangerGhost"

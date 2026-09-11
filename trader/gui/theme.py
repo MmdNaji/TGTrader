@@ -72,6 +72,11 @@ QPushButton#danger {{ background: rgba(248,113,113,0.12); border-color: rgba(248
 QPushButton#danger:hover {{ background: rgba(248,113,113,0.22); }}
 QPushButton#ghost {{ background: transparent; border-color: {BORDER}; color: {MUTED}; }}
 QPushButton#ghost:hover {{ color: {TEXT}; }}
+/* A destructive action that sits in a row of similar buttons. Below the compact width they
+   all lose their words and become four icons, and one of them erases the account - so this
+   one keeps a red edge whatever the width, because an icon on its own says nothing. */
+QPushButton#dangerGhost {{ background: transparent; border-color: {DANGER}; color: {DANGER}; }}
+QPushButton#dangerGhost:hover {{ background: {DANGER}; color: #ffffff; }}
 QPushButton#link {{ background: transparent; border: none; color: {INFO}; padding: 2px 4px; }}
 
 /* ---------- inputs ---------- */

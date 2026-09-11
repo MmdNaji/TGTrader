@@ -366,14 +366,23 @@ class MainWindow(QMainWindow):
         self.btn_kill = button("⛔ اضطراری", "ghost", self.toggle_kill)
         self.btn_kill._tip = "هیچ معامله‌ی جدیدی باز نمی‌شود تا خاموشش کنی"
         h.addWidget(self.btn_kill)
-        self.btn_reset = button("🧪 ریست تست", "ghost", self.reset_test)
-        self.btn_reset._tip = "پاک‌کردن معامله‌ها، سود/زیان و نمودار سرمایه، و شروع دوباره با موجودی دلخواه"
-        h.addWidget(self.btn_reset)
         # It was a bare icon: nothing on it said what it did, and a tooltip is only found by
         # someone who already suspects there is something to find.
         self.btn_update = button("🔄 به‌روزرسانی", "ghost", lambda: self._check_update(manual=True))
         self.btn_update._tip = "بررسی نسخه‌ی جدید و نصب آن"
         h.addWidget(self.btn_update)
+        # RESET LAST, behind a gap, and never beside the button pressed every day.
+        #
+        # Below COMPACT_W all four of these lose their words and become four similar icons in a
+        # row - and one of them erases the whole test account. Reported from a real session: a
+        # click meant for ▶ landed on the reset and opened its confirmation. The dialog did its
+        # job and nothing was lost, which is the point of that dialog; but a destructive control
+        # one icon away from a daily one is a trap the dialog should not have to catch.
+        h.addSpacing(18)
+        self.btn_reset = button("🧪 ریست تست", "ghost", self.reset_test)
+        self.btn_reset._tip = "پاک‌کردن معامله‌ها، سود/زیان و نمودار سرمایه، و شروع دوباره با موجودی دلخواه"
+        self.btn_reset.setObjectName("dangerGhost")
+        h.addWidget(self.btn_reset)
         self._topbar_compact: bool | None = None
         self._apply_topbar_density()
         return bar
