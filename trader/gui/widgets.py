@@ -408,7 +408,14 @@ def fill(t: QTableWidget, rows: list[list[Any]], tones: dict[int, str] | None = 
     t.setRowCount(len(rows))
     for i, row in enumerate(rows):
         for j, v in enumerate(row):
-            it = QTableWidgetItem("" if v is None else str(v))
+            text = "" if v is None else str(v)
+            it = QTableWidgetItem(text)
+            # Every cell carries its own text as a tooltip. A free-text column - the reason a
+            # trade was taken - cannot be made to fit any width worth having, so it will always
+            # be elided somewhere; the fix for that is being able to READ it, not pretending it
+            # fits. Costs nothing and covers every table in the app at once.
+            if text:
+                it.setToolTip(text)
             if tones and j in tones and isinstance(v, str):
                 bare = v.strip(_BIDI).strip()
                 if bare[:1] in "+-":

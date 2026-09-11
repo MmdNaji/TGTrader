@@ -1623,3 +1623,43 @@ def test_no_geometry_test_drags_the_shared_window_in_with_it():
             bad.append(f"{node.name} (line {node.lineno})")
     assert not bad, ("these ask for the shared window AND build their own - drop the parameter: "
                      + ", ".join(bad))
+
+
+def test_the_decisions_table_keeps_which_coin_and_why():
+    """The first version of the drop list only gave up the source and the confidence, and four
+    columns still did not fit at 718 logical: the time, the symbol and the action were all cut,
+    and so was the reason. Reported from the real exe.
+
+    The reason almost always names the action ("scalp: momentum up over EMA20"), and a decision
+    with no timestamp beside it is still readable while a truncated one is not. So at the
+    narrowest width what is left is WHICH COIN and WHY, which is the whole row."""
+    from trader.gui.widgets import fill, _text_width
+    app = QApplication.instance() or QApplication([])
+    win = fresh_window()
+    t = win.tbl_decisions
+    row = ["09-11 10:58", "AVAX/USDT", "خرید", "۶۰٪", "scalp",
+           "scalp: momentum up over EMA20"]
+    cut_at, dropped_somewhere = {}, False
+    for w in (720, 780, 860, 950, 1100, 1366, 1900):
+        win.resize(w, 820)
+        t.show()
+        fill(t, [list(row) for _ in range(4)])
+        for _ in range(5):
+            app.processEvents()
+        shown = [c for c in range(t.columnCount()) if not t.isColumnHidden(c)]
+        if len(shown) < t.columnCount():
+            dropped_somewhere = True
+        # never hide which coin, or why
+        for c, name in ((1, "نماد"), (5, "دلیل")):
+            assert not t.isColumnHidden(c), f"at {w}px the table dropped «{name}»"
+        cut = [t.horizontalHeaderItem(c).text() for c in shown
+               if t.columnWidth(c) < _text_width(t, c) + 2]
+        if cut:
+            cut_at[w] = cut
+    assert not cut_at, f"columns that were kept are still being cut: {cut_at}"
+    assert dropped_somewhere, "nothing was ever dropped - the rule did not run at any width"
+
+    # and the reason is readable even where it cannot fit: a free-text column will always be
+    # elided somewhere, so the fix is being able to read it rather than pretending it fits
+    assert t.item(0, 5).toolTip() == row[5]
+    win.close(); win.deleteLater()

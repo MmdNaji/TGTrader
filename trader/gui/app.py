@@ -552,8 +552,14 @@ class MainWindow(QMainWindow):
         c3.add_action(button("بستن همه", "danger", self.close_all))
         c3.add_action(button("🧪 ریست تست", "ghost", self.reset_test))
         c4 = Card("آخرین تصمیم‌ها", "نگه‌داشتن هم یک تصمیم است؛ دلیلش را بخوان")
+        # زمان 0 · نماد 1 · اقدام 2 · اطمینان 3 · منبع 4 · دلیل 5
+        # Four columns still did not fit at 718 logical - the time, the symbol and the action
+        # were all cut and so was the reason. So the time and the action go too: the reason
+        # almost always names the action ("scalp: momentum up over EMA20"), and a decision with
+        # no timestamp beside it is still readable while a truncated one is not. What is left
+        # at the narrowest width is WHICH COIN and WHY, which is the whole row.
         self.tbl_decisions = table(["زمان", "نماد", "اقدام", "اطمینان", "منبع", "دلیل"],
-                                   optional=(4, 3)); self.tbl_decisions.setMinimumHeight(160)
+                                   optional=(4, 3, 0, 2)); self.tbl_decisions.setMinimumHeight(160)
         self.tbl_decisions.setTextElideMode(Qt.ElideRight)
         self.empty_dec = Empty("هنوز تصمیمی ثبت نشده. «شروع» را بزن تا ربات بازار را بررسی کند.")
         c4.add(self.tbl_decisions); c4.add(self.empty_dec)
