@@ -1327,6 +1327,32 @@ def test_the_analysis_chart_falls_back_to_the_entry_when_the_exit_kept_no_bars(w
         db.close()
 
 
+def fresh_window():
+    """A window of this test's own, with the refresh timer off.
+
+    The `win` fixture is module-scoped and has a live 1.5-second QTimer on it. Two tests today
+    have already been broken by what earlier tests left on that window, and the geometry ones
+    are worse: the dashboard's refresh hides the positions table when the database has no open
+    trades, and Qt does not lay out a hidden widget - so a test that resizes the window and then
+    measures reads the size the table was BORN with. The Windows session spotted the signature:
+    the reported overflow moved exactly 100px for every 100px of window, which means the window
+    was growing around a table that never moved.
+    """
+    from PySide6.QtCore import Qt as _Qt
+    from trader.gui import theme
+    from trader.gui.app import MainWindow
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.QSS)
+    app.setLayoutDirection(_Qt.RightToLeft)
+    w = MainWindow()
+    w.timer.stop()                 # nothing may re-hide the table under the measurement
+    w.show()
+    w.goto("dashboard")
+    for _ in range(4):
+        app.processEvents()
+    return w
+
+
 def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
     """The bug this exists for does not reproduce in a table built on its own.
 
@@ -1342,14 +1368,13 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
     The row count is half the trigger: five rows fine, six cut, eight fine again, because by
     eight the vertical scrollbar was already there when the widths were computed.
     """
-    from trader.gui.widgets import fill, _text_width
+    from trader.gui.widgets import fill
     app = QApplication.instance() or QApplication([])
-    win.show()
-    win.goto("dashboard")
+    win = fresh_window()
     t = win.tbl_positions
     row = ["ETH/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
            "⁦-0.14 $ (-0.28%)⁩"]
-    bad, tight = {}, 0
+    bad, tight, seen_vp = {}, 0, set()
     for rows in (2, 4, 5, 6, 8, 12):
         for w in (900, 1000, 1100, 1381, 1650, 2278):
             win.resize(w, 900)
@@ -1386,6 +1411,7 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
                     why.append(f"col {c} is {t.columnWidth(c)}px, under its content "
                                f"{t.sizeHintForColumn(c)} less the {shaved}px it gave back")
                     break
+            seen_vp.add(t.viewport().width())
             if sum(t.columnWidth(c) for c in range(t.columnCount())) >= t.viewport().width() - 2:
                 tight += 1
             if why:
@@ -1397,6 +1423,15 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
     # refuses to pass if the sweep never gets near the edge again.
     assert tight >= 4, (f"only {tight} of the swept combinations came close to filling the "
                         f"table - the sweep is not reaching the case this test is about")
+    # And the table has to have MOVED. Six window widths that all produce one viewport width
+    # means Qt never laid the table out and every number above is the size it was born with -
+    # which is exactly how this test reported a 406px overflow on a machine where three other
+    # measurements said the table was fine.
+    assert len(seen_vp) >= 4, (f"the table only ever had {sorted(seen_vp)} of viewport across "
+                               f"six window widths - it was never re-laid-out, so this test "
+                               f"measured nothing")
+    win.close()
+    win.deleteLater()
 
 
 def test_price_pills_never_cover_one_another():
@@ -1448,11 +1483,11 @@ def test_the_columns_come_back_when_the_table_comes_back(win):
     """
     from trader.gui.widgets import fill
     app = QApplication.instance() or QApplication([])
-    win.show()
-    win.goto("dashboard")
+    win = fresh_window()
     t = win.tbl_positions
     row = ["BNB/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
            "⁦-0.14 $ (-0.28%)⁩"]
+    seen_vp = set()
 
     def settle(width, rows):
         win.resize(width, 900)
@@ -1461,6 +1496,7 @@ def test_the_columns_come_back_when_the_table_comes_back(win):
             fill(t, [list(row) for _ in range(rows)])
             for _ in range(3):
                 app.processEvents()
+        seen_vp.add(t.viewport().width())
         return [t.columnWidth(c) for c in range(t.columnCount())]
 
     home = (1100, 4)
@@ -1472,3 +1508,7 @@ def test_the_columns_come_back_when_the_table_comes_back(win):
     assert after == before, (
         f"the table did not come back: {sum(before)}px of columns became {sum(after)}px "
         f"after visiting other widths and row counts\n  before {before}\n  after  {after}")
+    assert len(seen_vp) >= 3, (f"the table only ever had {sorted(seen_vp)} of viewport across "
+                               f"six different widths - it was never re-laid-out")
+    win.close()
+    win.deleteLater()
