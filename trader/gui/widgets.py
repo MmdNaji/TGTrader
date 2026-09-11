@@ -350,8 +350,14 @@ def fit_columns(t: QTableWidget) -> None:
         # the padding it is not using and may never give back a character, so nothing here can
         # ever elide anything; when the padding runs out the loop stops and the scrollbar takes
         # over, which is the honest answer to content that genuinely does not fit.
-        floors = [_text_width(t, c) + 6 for c in range(n)]
+        # Two floors, and the second one is because the first depends on measuring text with
+        # the font the cells are actually drawn with - which is not reliably the table's under
+        # a stylesheet. Whatever that measure says, a column never gives back more than an
+        # eighth of itself, so a wrong text width can cost a little padding and can never cost
+        # a character.
+        floors = [max(_text_width(t, c) + 6, int(widths[c] * 0.875)) for c in range(n)]
         donors = [c for c in range(n) if widths[c] > floors[c]]
+        shaved: dict[int, int] = {}
         for _ in range(4):
             if over <= 0 or not donors:
                 break
@@ -366,7 +372,11 @@ def fit_columns(t: QTableWidget) -> None:
                 hh.setSectionResizeMode(c, QHeaderView.Interactive)
                 widths[c] -= give
                 t.setColumnWidth(c, widths[c])
+                shaved[c] = shaved.get(c, 0) + give
                 over -= give
+    # Recorded so a test can tell "this column gave back padding on purpose" from "this column
+    # is too small", without having to measure text in a font it cannot be sure of.
+    t._shaved = locals().get("shaved", {})
     t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff if over <= DEAD_SCROLL
                                    else Qt.ScrollBarAsNeeded)
 

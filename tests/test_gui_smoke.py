@@ -1354,9 +1354,20 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
         for w in (900, 1000, 1100, 1381, 1650, 2278):
             win.resize(w, 900)
             t.show()
-            fill(t, [list(row) for _ in range(rows)])
-            for _ in range(4):
-                app.processEvents()
+            # SETTLE, then judge. A dashboard resize ripples through a scroll area, a card and
+            # a grid before the table's viewport is final, and reading one pass early reports a
+            # viewport hundreds of pixels narrower than it ends up - which is what made this
+            # test fail on Windows at 2278px, a width where nothing can possibly be short. Fill
+            # until the geometry stops moving, exactly as the probe does.
+            before = None
+            for _ in range(6):
+                fill(t, [list(row) for _ in range(rows)])
+                for _ in range(4):
+                    app.processEvents()
+                now = (t.viewport().width(), tuple(t.columnWidth(c) for c in range(t.columnCount())))
+                if now == before:
+                    break
+                before = now
             last = t.columnCount() - 1
             pos = t.columnViewportPosition(last)
             why = []
@@ -1365,8 +1376,15 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
             if pos + t.columnWidth(last) > t.viewport().width() + 1:
                 why.append("ends past the right")
             for c in range(t.columnCount()):
-                if t.columnWidth(c) < _text_width(t, c) + 2:
-                    why.append(f"col {c} narrower than its text")
+                # Against Qt's OWN content width, reduced by what fit_columns says it took.
+                # An absolute text measure needs the font the cells are really drawn with, and
+                # that is not reliably the table's: on Windows this reported every column short
+                # at every width, including one where the card was three times what the table
+                # needed. Qt's hint and our own record of the shave cannot disagree that way.
+                shaved = getattr(t, "_shaved", {}).get(c, 0)
+                if t.columnWidth(c) < t.sizeHintForColumn(c) - shaved - 2:
+                    why.append(f"col {c} is {t.columnWidth(c)}px, under its content "
+                               f"{t.sizeHintForColumn(c)} less the {shaved}px it gave back")
                     break
             if sum(t.columnWidth(c) for c in range(t.columnCount())) >= t.viewport().width() - 2:
                 tight += 1
