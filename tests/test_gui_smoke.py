@@ -1248,8 +1248,67 @@ def test_the_analysis_text_never_reverses_a_signed_number():
                     unprotected.append((kind, head, m.group(0)))
     assert not unprotected, f"signed numbers left for bidi to reverse: {unprotected}"
 
-    # and the view must actually call it - a helper nobody applies is the bug, not the helper
+    # And the view must actually protect them - a helper nobody applies is the bug, not the
+    # helper. In the HTML panel that protection is dir="ltr" rather than the isolate
+    # characters: rendered side by side and looked at, the isolates fix the digit order inside
+    # a run and still leave the sign at the wrong end when the run ends a line, which is where
+    # these lines put them. The dialog's HEADER is a QLabel and keeps the isolate, which is how
+    # one half of one window came out right and the other half did not.
     import inspect
     from trader.gui.app import MainWindow
     src = inspect.getsource(MainWindow._analysis_html)
-    assert "bidi_safe(" in src, "the analysis panel renders raw text straight into the browser"
+    assert 'dir="ltr"' in src, "the analysis panel renders raw numbers straight into the browser"
+    assert "_NUMBER.sub" in src, "the numbers are not being found before they are wrapped"
+
+    # every signed run in a rendered panel comes out inside a span, none left bare
+    import json as _json, re as _re
+    # called unbound: it reads nothing off self, and building a MainWindow here would drag a
+    # database and an engine into a test about text
+    html = MainWindow._analysis_html(
+        None, [{"kind": "close", "payload": _json.dumps(payloads[1][1]), "candles": None}])
+    stripped = _re.sub(r'<span dir="ltr">[^<]*</span>', "", html)
+    leftover = [m.group(0) for m in signed.finditer(_re.sub(r"<[^>]+>", "", stripped))]
+    assert not leftover, f"signed numbers reached the browser unwrapped: {leftover}"
+
+
+def test_the_analysis_chart_falls_back_to_the_entry_when_the_exit_kept_no_bars(win):
+    """The close row exists for every closed trade; its CANDLES column is only filled when the
+    frame the close was decided on was available. close_all, a manual close from the dashboard
+    and the price-only stop check all pass none.
+
+    The first version picked `by_kind.get("close") or by_kind.get("open")` - and a row is truthy
+    even when its candles are NULL - so a trade closed by any of those paths said "no candles
+    stored" while a perfectly good chart sat on its open row. On the Windows build that was
+    EVERY trade: "show me the chart analysis" was the request, and the chart was the empty half.
+    """
+    import json as _json, pathlib, time as _t
+    from trader.db import Database
+    app = QApplication.instance() or QApplication([])
+    db = Database(pathlib.Path(tempfile.mkdtemp(prefix="tg-chartfb-")) / "c.db")
+    keep_db, keep_rows = win.db, getattr(win, "_closed_rows", [])
+    try:
+        bars = [[_t.time() - (160 - i) * 86400, 10.0 + i, 11.0 + i, 9.0 + i, 10.5 + i, 5.0]
+                for i in range(160)]
+        db.add_trade_analysis(7, "open", "ETH/USDT", "1d",
+                              {"entry": 10.0, "stop": 9.0, "target": 12.0, "side": "long",
+                               "regime": "trend_up", "indicators": {}, "signals": [],
+                               "reward_risk": 2.5}, bars)
+        # the close row exists and has NO bars - exactly what close_all leaves behind
+        db.add_trade_analysis(7, "close", "ETH/USDT", "1d",
+                              {"why": "close_all", "entry": 10.0, "exit": 11.0, "side": "long",
+                               "qty": 1.0, "pnl": 1.0, "move": 1.0, "move_pct": 10.0}, None)
+        win.db = db
+        win._closed_rows = [{"id": 7, "symbol": "ETH/USDT", "side": "long", "qty": 1.0,
+                             "entry_price": 10.0, "init_stop": 9.0, "take_profit": 12.0,
+                             "exit_price": 11.0, "pnl": 1.0, "r_multiple": 1.0,
+                             "opened_at": _t.time() - 8 * 86400, "closed_at": _t.time()}]
+        dlg = win._show_trade_analysis(0, show=False)
+        app.processEvents()
+        assert dlg is not None
+        assert dlg._chart.df is not None and len(dlg._chart.df) > 20, \
+            "the entry's chart was on hand and the view showed nothing"
+        assert dlg._chart.position, "entry / stop / target never reached the chart"
+        dlg.deleteLater()
+    finally:
+        win.db, win._closed_rows = keep_db, keep_rows
+        db.close()

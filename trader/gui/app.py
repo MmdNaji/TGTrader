@@ -32,7 +32,7 @@ from . import theme
 from .chart import CandleChart
 from .help_fa import HELP_HTML
 from .widgets import (Card, Kpi, pill, set_pill, hint, section, FormRow, Empty, table, fill, EquityCurve,
-                      button, ElidedLabel, bidi_safe)
+                      button, ElidedLabel, bidi_safe, _NUMBER)
 
 # Below this WINDOW width the topbar buttons keep their icon and drop their words, and the KPI
 # tiles go two by two. The four labelled buttons plus the page subtitle were 764 of the 984
@@ -450,7 +450,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _ts(ts: float | None) -> str:
-        return time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else ""
+        """A timestamp, isolated so the window cannot rearrange it.
+
+        "09-11 09:36" is two Latin groups in a right-to-left line, and bidi swaps them: the
+        trades table showed "09:36 09-11" and the analysis dialog "09:36 11-09" for the SAME
+        trade - read as two different date formats, and in the first twelve days of a month
+        both of them look plausible."""
+        return ltr(time.strftime("%m-%d %H:%M", time.localtime(ts))) if ts else ""
 
     def _scroll(self, inner: QWidget) -> QScrollArea:
         sa = QScrollArea(); sa.setWidgetResizable(True); sa.setWidget(inner); sa.setFrameShape(QFrame.NoFrame)
@@ -1154,8 +1160,17 @@ class MainWindow(QMainWindow):
         # starts at 45/55 in favour of the words - they are what the owner came to read.
         split = QSplitter(Qt.Vertical)
         chart = CandleChart(); chart.setMinimumHeight(180)
+        # Prefer the CLOSE row's chart - it runs up to the exit - but fall back to the OPEN
+        # row's. A close only carries bars when the frame it was decided on was available:
+        # close_all, a manual close from the dashboard and the price-only stop check all pass
+        # none. The first version took `by_kind.get("close") or by_kind.get("open")`, and a row
+        # is truthy even when its candles column is NULL - so every trade closed by one of
+        # those paths showed "no candles stored" while a perfectly good chart sat on its open
+        # row. On the Windows build that was EVERY trade: the half the owner actually asked for
+        # was the empty half.
         by_kind = {r["kind"]: r for r in recs}
-        src = by_kind.get("close") or by_kind.get("open")
+        src = next((by_kind[k] for k in ("close", "open") if by_kind.get(k) and by_kind[k]["candles"]),
+                   by_kind.get("close") or by_kind.get("open"))
         bars = json.loads(src["candles"]) if src and src["candles"] else []
         if bars:
             df = pd.DataFrame(bars, columns=["ts", "open", "high", "low", "close", "volume"])
@@ -1230,15 +1245,17 @@ class MainWindow(QMainWindow):
             payload = json.loads(rec["payload"])
             parts.append(f"<h3>{titles.get(rec['kind'], rec['kind'])}</h3>")
             for headline, text in ana.explain(payload, rec["kind"]):
-                # bidi_safe FIRST, then escape. These sentences are the densest mix of Persian
-                # prose and Latin numbers in the app - "حرکت -2.28 (-5.90٪)" - and in a
-                # right-to-left paragraph bidi moves a leading sign to the other end, so that
-                # reads out as "2.28- (5.90٪-)". Measured on the real output: three lines per
-                # trade carried a signed number with no isolate. The same rule that covers
-                # hints and card subtitles has to cover this, and it is a level further: here
-                # the numbers ARE the content.
-                safe = (bidi_safe(text).replace("&", "&amp;").replace("<", "&lt;")
+                # ESCAPE first, then wrap each number in dir="ltr" - and it has to be the
+                # ATTRIBUTE, not the U+2066 isolate characters that work everywhere else in
+                # this app. Rendered side by side at 19pt and looked at: the isolates fix the
+                # digit order inside a run and still leave the sign at the wrong end when the
+                # run sits at the end of a line, which is exactly where these lines put them
+                # ("سود/زیان خالص -10.50 $"). The span gets it right in every case measured.
+                # The header of this same dialog is a QLabel and keeps the isolate, which is
+                # why one half of one window was right and the other half was not.
+                safe = (text.replace("&", "&amp;").replace("<", "&lt;")
                         .replace(">", "&gt;").replace("\n", "<br>"))
+                safe = _NUMBER.sub(lambda m: f'<span dir="ltr">{m.group(0)}</span>', safe)
                 parts.append(f"<p><span class='k'>{headline}:</span> <b>{safe}</b></p>"
                              if len(safe) < 60 else
                              f"<p><span class='k'>{headline}:</span><br>{safe}</p>")
