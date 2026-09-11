@@ -659,10 +659,29 @@ class MainWindow(QMainWindow):
         # very first press wrote autopilot=True and logged no stop/start at all, and it never
         # reproduced afterwards.
         if self.engine is not None:
+            # stop(wait=...), and the RETURN VALUE matters. `stop()` with no wait only sets a
+            # flag and comes back while the loop is still inside a network request, so building
+            # a second Engine immediately means two of them on one account. The Windows session
+            # caught it on the exe: two "engine started" against one "engine stopped", duplicate
+            # lines from both loops, and about four seconds of overlap. `_trade_lock` is a
+            # per-instance RLock, so the two do not serialise each other at all - on paper that
+            # was one position closed twice; on a real exchange it is the window this engine's
+            # own stop() docstring warns about, between placing an order and journalling it.
+            #
+            # Ignoring the return value only makes that window smaller, it does not close it.
             try:
-                self.engine.stop()
+                stopped = self.engine.stop(wait=5.0)
             except Exception:
-                pass
+                stopped = False
+            if not stopped:
+                # Do NOT start a second one. The setting is saved and takes effect the next
+                # time the bot starts, and saying so is far better than running two.
+                self.refresh()
+                QMessageBox.warning(
+                    self, "خودکار کامل",
+                    "تنظیم ذخیره شد، ولی موتور قبلی هنوز در حال بستن است و تا تمام نشود "
+                    "موتور تازه‌ای ساخته نمی‌شود.\n\nچند ثانیه صبر کن و «شروع» را بزن.")
+                return
             self.engine = None
             # start_engine, NOT toggle_engine: toggle would look at self.engine, find the None
             # just set, and start - which happens to be right, but only by accident. Say what is

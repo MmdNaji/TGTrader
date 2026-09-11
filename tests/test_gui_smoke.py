@@ -1840,7 +1840,7 @@ def test_flipping_autopilot_restarts_a_running_engine_even_one_that_just_started
         class FakeEngine:
             def __init__(self, alive): self._alive = alive; self.stopped = False
             def running(self): return self._alive
-            def stop(self): self.stopped = True
+            def stop(self, wait: float = 0.0): self.stopped = True; return True
 
         w.start_engine = lambda: started.append("start")
 
@@ -1869,4 +1869,82 @@ def test_flipping_autopilot_restarts_a_running_engine_even_one_that_just_started
         assert started == [], "flipping the switch started a bot nobody asked to start"
     finally:
         w.engine = None
+        w.close(); w.deleteLater()
+
+
+def test_flipping_autopilot_never_leaves_two_engines_on_one_account():
+    """A restart must not overlap. The previous test could not see this and said so.
+
+    `Engine.stop()` with no wait only SETS a flag and returns while the loop is still inside a
+    network request. `toggle_autopilot` then built a new Engine straight away, so for about four
+    seconds two of them ran on one account - measured on the real exe: two "engine started"
+    against one "engine stopped", with duplicate lines from both loops in between. `_trade_lock`
+    is a per-instance RLock, so the two serialise nothing for each other.
+
+    The test the last one needed: a REAL Engine with a REAL thread, and afterwards exactly one
+    engine thread alive. With fake objects whose stop() returns instantly the overlap can never
+    happen, which is why the previous test passed on the broken code.
+    """
+    import threading, tempfile, pathlib, time
+    from trader.config import Settings
+    from trader.db import Database
+    from trader.engine import Engine
+    from trader.execution.paper import PaperBroker
+    app = QApplication.instance() or QApplication([])
+    w = fresh_window()
+    db = Database(pathlib.Path(tempfile.mkdtemp(prefix="tg-two-")) / "d.db")
+    made: list = []
+    try:
+        s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+        s.risk.capital_limit = 1000; s.paper_start_balance = 1000; s.loop_seconds = 1
+        w.db, w.settings = db, s
+
+        def build():
+            eng = Engine(s, db, broker=PaperBroker(1000, allow_short=False))
+            eng.log = lambda m, lvl="info": None
+            # a market that just blocks for a while, which is what a real one does
+            class Slow:
+                is_kcex = False
+                active_source = "test"; notice = None
+                abort = staticmethod(lambda: False)
+                # Long enough that the old loop is provably still inside a request when the
+                # window looks. The first version slept 0.4s and the test waited 0.5s, so the
+                # old thread had exited on its own and the test passed with the bug back in -
+                # a timing test whose margin runs the wrong way proves nothing.
+                def candles(self, *a, **k):
+                    time.sleep(2.0); raise RuntimeError("no data")
+                def price(self, *a, **k):
+                    time.sleep(2.0); raise RuntimeError("no price")
+            eng.market = Slow()
+            made.append(eng)
+            eng.start()
+            w.engine = eng
+        w.start_engine = build
+
+        def engine_threads():
+            return [t for t in threading.enumerate()
+                    if t.is_alive() and any(t is getattr(e, "_thread", None) for e in made)]
+
+        build()
+        for _ in range(10):
+            app.processEvents(); time.sleep(0.05)
+        assert len(engine_threads()) == 1, "the test did not manage to get one engine running"
+
+        w.toggle_autopilot()
+        for _ in range(10):
+            app.processEvents(); time.sleep(0.05)
+
+        alive = engine_threads()
+        assert len(alive) <= 1, (
+            f"{len(alive)} engine threads alive after flipping the switch - two engines are "
+            f"trading one account, and they share no lock")
+        assert w.settings.autopilot is True, "the setting did not take"
+    finally:
+        for e in made:
+            try:
+                e.stop(wait=3.0)
+            except Exception:
+                pass
+        w.engine = None
+        db.close()
         w.close(); w.deleteLater()
