@@ -433,6 +433,11 @@ class MainWindow(QMainWindow):
         for k, _, label, sub in NAV:
             if k == key:
                 self.page_title.setText(label); self.page_sub.setText(sub)
+        if key == "settings":
+            # Not left to the refresh timer: someone who flips the switch and walks straight to
+            # this page would find live-looking boxes for fields the bot already owns, and
+            # whatever they typed into them would be quietly ignored.
+            self._apply_autopilot_locks()
         if key == "chart" and time.time() - self._chart_last > 30:
             self.refresh_chart()
         if key == "desk" and time.time() - getattr(self, "_desk_chart_last", 0) > 30:
@@ -491,6 +496,22 @@ class MainWindow(QMainWindow):
         self.lbl_advice = QLabel(""); self.lbl_advice.setObjectName("advice")
         self.lbl_advice.setWordWrap(True); self.lbl_advice.setVisible(False)
         v.addWidget(self.lbl_advice)
+
+        # ONE SWITCH, at the top, above everything it makes unnecessary.
+        # The owner's complaint, in their words: "I said from the start it should be AI-based -
+        # put in one option where it chooses everything itself, watches all the coins, opens
+        # trades, with whatever capital it wants and whatever stop it wants." Every number it
+        # takes over has a measured best value recorded in config.py, and the app was still
+        # asking for them by hand and then putting a banner up when the answer disagreed.
+        self.card_auto = Card("خودکار کامل", "همه‌چیز را خودش انتخاب می‌کند", accent=True)
+        arow = QHBoxLayout(); arow.setSpacing(10)
+        self.btn_auto = button("روشن کردن", "primary", self.toggle_autopilot)
+        self.pill_auto = pill("خاموش", "muted")
+        arow.addWidget(self.btn_auto); arow.addWidget(self.pill_auto); arow.addStretch()
+        self.card_auto.add_layout(arow)
+        self.lbl_auto = QLabel(""); self.lbl_auto.setWordWrap(True); self.lbl_auto.setObjectName("hint")
+        self.card_auto.add(self.lbl_auto)
+        v.addWidget(self.card_auto)
 
         self.card_setup = Card("راه‌اندازی", "سه قدم تا اولین معامله‌ی کاغذی", accent=True)
         self.setup_rows: dict[str, QLabel] = {}
@@ -612,6 +633,35 @@ class MainWindow(QMainWindow):
             self.refresh()
         except Exception as exc:
             QMessageBox.critical(self, "خطا در شروع", str(exc))
+
+    def toggle_autopilot(self):
+        """Hand the bot everything it has evidence about - or take it back.
+
+        Restarting a running engine is the point, not a side effect: a switch that needs the
+        owner to then go and stop and start the bot themselves is the same homework in a
+        different place. Positions are in the database and `_reconcile()` picks them up, so a
+        restart does not close anything.
+        """
+        on = not self.settings.autopilot
+        if on and self.settings.mode == "live":
+            ok = QMessageBox.question(
+                self, "خودکار کامل",
+                "ربات روی «پول واقعی» است.\n\nبا خودکار کامل، انتخاب ارزها، اندازه‌ی هر معامله "
+                "و حد ضرر را خودش تصمیم می‌گیرد — در همان سقف سرمایه‌ای که تعیین کرده‌ای "
+                f"({self.settings.risk.capital_limit:,.0f}).\n\nادامه؟")
+            if ok != QMessageBox.Yes:
+                return
+        self.settings.autopilot = on
+        self.settings.save()
+        was_running = bool(self.engine and self.engine.running())
+        if was_running:
+            try:
+                self.engine.stop()
+            except Exception:
+                pass
+            self.engine = None
+            self.toggle_run()          # starts again on the settings now in force
+        self.refresh()
 
     def toggle_kill(self):
         from ..risk.manager import RiskManager
@@ -1600,6 +1650,17 @@ class MainWindow(QMainWindow):
         s = self.settings
         inner = QWidget(); v = QVBoxLayout(inner); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(14)
 
+        # Says WHY half this page is greyed out. A disabled field with no explanation reads as a
+        # broken window, and the owner would go looking for the bug.
+        self.card_auto_note = Card("خودکار کامل روشن است", "این تنظیم‌ها الان دست ربات است")
+        self.card_auto_note.add(hint(
+            "تا وقتی «خودکار کامل» روشن است، ربات نمادها، اندازه‌ی معامله، حد ضرر، حد سود و "
+            "بقیه‌ی این‌ها را خودش تعیین می‌کند و این فیلدها غیرفعالند.\n"
+            "چیزی که اینجا نوشته‌ای پاک نمی‌شود — همین که خاموشش کنی، همه برمی‌گردند.\n"
+            "«سقف سرمایه» و «کاغذی/واقعی» هیچ‌وقت دست ربات نمی‌افتد و همیشه فعال می‌مانند."))
+        self.card_auto_note.add_action(button("خاموش کردن خودکار", "ghost", self.toggle_autopilot))
+        v.addWidget(self.card_auto_note)
+
         cp = Card("حالت‌های آماده", "یک کلیک، همه‌ی تنظیمات با هم", accent=True)
         prow = QHBoxLayout(); prow.setSpacing(10)
         prow.addWidget(button("⚡ هوشمند چندارزی", "primary", lambda: self._preset("smart")))
@@ -1793,7 +1854,36 @@ class MainWindow(QMainWindow):
         v.addWidget(hint("اگر موتور در حال اجراست، برای اعمال تغییرات آن را متوقف و دوباره شروع کن."))
         self.s_exchange.currentTextChanged.connect(self._exchange_changed); self.s_mode.currentTextChanged.connect(lambda _: self._exchange_changed(self.s_exchange.currentText()))
         self._exchange_changed(self.s_exchange.currentText())
+        self._apply_autopilot_locks()
         return self._scroll(inner)
+
+    # Widget -> the settings field it writes. Everything autopilot owns is disabled while it is
+    # on; everything else stays the owner's. Kept as one table rather than fifteen setEnabled
+    # calls scattered through the page, so a field added to AUTO_TOP/AUTO_RISK and forgotten
+    # here shows up as a test failure rather than as an editable box that does nothing.
+    _AUTO_WIDGETS = {
+        "s_llm": "use_llm_for_decisions", "s_agg": "aggressiveness", "s_tf": "timeframe",
+        "s_pospct": "position_pct", "s_align": "align_with_leader",
+        "s_symbols": "auto_symbols", "s_auto_sym": "auto_symbols",
+        "s_auto_n": "auto_symbols_count", "s_auto_every": "auto_symbols_every_min",
+        "s_maxpos": "max_open_positions",
+        "s_rpt": "risk_per_trade", "s_dl": "max_daily_loss",
+        "s_posfrac": "max_position_frac", "s_openrisk": "max_open_risk",
+        "s_atr": "atr_stop_mult", "s_rr": "reward_risk", "s_trail": "trail_after_r",
+        "s_partial": "partial_take_r",
+    }
+
+    def _apply_autopilot_locks(self) -> None:
+        on = bool(self.settings.autopilot)
+        if hasattr(self, "card_auto_note"):
+            self.card_auto_note.setVisible(on)
+        for attr, fieldname in self._AUTO_WIDGETS.items():
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            managed = on and self.settings.autopilot_managed(fieldname)
+            w.setEnabled(not managed)
+            w.setToolTip("«خودکار کامل» روشن است و این را خودش تعیین می‌کند" if managed else "")
 
     def _preset(self, kind: str):
         """One click that fills every field for a coherent mode, saves, and asks for a restart."""
@@ -1961,7 +2051,31 @@ class MainWindow(QMainWindow):
         self._btn_label(self.btn_kill, "⛔ اضطراری: روشن" if kill else "⛔ اضطراری"); self.btn_kill.setObjectName("danger" if kill else "ghost")
         self.btn_kill.style().unpolish(self.btn_kill); self.btn_kill.style().polish(self.btn_kill)
 
-        ok_ai = s.has_llm(); ok_ex = bool(s.exchange.exchange_id and s.symbols); ok_risk = s.risk.capital_limit > 0 and s.risk.risk_per_trade > 0
+        if hasattr(self, "btn_auto"):
+            on = bool(s.autopilot)
+            self._btn_label(self.btn_auto, "خاموش کردن" if on else "روشن کردن")
+            self.btn_auto.setObjectName("ghost" if on else "primary")
+            self.btn_auto.style().unpolish(self.btn_auto); self.btn_auto.style().polish(self.btn_auto)
+            set_pill(self.pill_auto, "روشن" if on else "خاموش", "ok" if on else "muted")
+            if on:
+                self.lbl_auto.setText(
+                    f"کل بازار را خودش می‌گردد، تا {s.effective().risk.max_open_positions} معامله‌ی هم‌زمان باز "
+                    f"می‌کند، اندازه‌ی هر معامله و حد ضرر را از روی خودِ چارت تصمیم می‌گیرد، و "
+                    f"در هر معامله‌ی موفق نیمی را در سود ۱R برمی‌دارد.\n"
+                    f"تنها چیزی که از تو می‌خواهد: سقف سرمایه ({s.risk.capital_limit:,.0f}) و اینکه "
+                    f"کاغذی باشد یا واقعی. بقیه‌ی تنظیمات تا وقتی روشن است دست خودش است.")
+            else:
+                self.lbl_auto.setText(
+                    "روشنش کن تا نمادها، اندازه‌ی معامله، حد ضرر، حد سود و بقیه را خودش انتخاب کند — "
+                    "با همان عددهایی که در همین برنامه اندازه‌گیری شده‌اند. "
+                    "سقف سرمایه و کاغذی/واقعی همچنان مال توست.")
+        self._apply_autopilot_locks()
+        # Under autopilot the symbol list is not something the owner has to fill in - the bot
+        # picks from the whole market - so demanding one here would be asking for homework the
+        # switch exists to remove.
+        ok_ai = s.has_llm()
+        ok_ex = bool(s.exchange.exchange_id and (s.symbols or s.autopilot))
+        ok_risk = s.risk.capital_limit > 0 and s.risk.risk_per_trade > 0
         for key, ok in (("ai", ok_ai), ("exchange", ok_ex), ("risk", ok_risk)):
             set_pill(self.setup_rows[key], "انجام شد" if ok else "انجام نشده", "ok" if ok else "warn")
         self.card_setup.setVisible(not (ok_ai and ok_ex and ok_risk))

@@ -139,6 +139,26 @@ class ComputerSettings:
 
 @dataclass
 class Settings:
+    # --- one switch instead of twenty ---
+    # The owner's words, after a day of being handed settings to decide: "I said from the start
+    # it should be AI-based - put in one option where it chooses everything itself, watches all
+    # the coins, opens trades, with whatever capital it wants and whatever stop it wants."
+    #
+    # That is a fair complaint about this app. Every number below has a measured best value
+    # recorded next to it, and the app was still asking the owner to type them in - and then
+    # putting a banner across the dashboard when the answer disagreed with the measurement.
+    # A setting whose right value is known is not a setting, it is homework.
+    #
+    # With this on, the bot sets everything it has evidence about (see `effective()`), watches
+    # the whole market instead of a typed list, and decides each trade with the model. What it
+    # does NOT take is the two things that are not measurements: HOW MUCH MONEY it may use
+    # (`risk.capital_limit`) and whether it is paper or live (`mode`). Those are the owner's,
+    # and no amount of backtesting makes them the app's to choose.
+    #
+    # Nothing here is written over the saved settings. `effective()` returns a COPY, so turning
+    # this off puts the owner's own numbers straight back.
+    autopilot: bool = False
+
     # --- AI ---
     ai_provider: str = "claude"   # claude | openai
     anthropic_api_key: str = ""
@@ -237,6 +257,71 @@ class Settings:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # ---------------------------------------------------------------- autopilot
+    # What autopilot decides, and why each one. Every value here is the one this project
+    # MEASURED, with the evidence recorded beside the field above - so this table adds no new
+    # opinion, it just stops asking the owner to retype conclusions the app already reached.
+    AUTO_TOP = {
+        "use_llm_for_decisions": True,   # the whole point: the model decides, not a fixed rule
+        "aggressiveness": "normal",      # "high" and "scalp" both measured worse
+        "timeframe": "1d",               # daily won every sweep this project has run
+        "position_pct": 0.0,             # size from risk and the stop, not a flat percentage
+        "align_with_leader": False,      # measured: costs return AND drawdown, earns neither
+        "auto_symbols": True,            # watch everything rather than a list someone typed
+        "auto_symbols_count": 4,
+        "auto_symbols_pool": 40,
+        "auto_symbols_every_min": 60,
+    }
+    AUTO_RISK = {
+        "risk_per_trade": 0.01,
+        "max_daily_loss": 0.03,
+        "max_open_positions": 4,
+        "max_position_frac": 0.25,       # 4 x 25% - the two numbers have to agree or the bot
+        "max_open_risk": 0.06,           #   opens one trade and refuses every other
+        "atr_stop_mult": 2.0,
+        "reward_risk": 2.5,              # 2.0 is the only value that LOSES on a third of history
+        "trail_after_r": 1.0,
+        # Take half off at 1R. The default is OFF because, stated as a choice, it is a genuine
+        # trade-off and the app refuses to make the owner's mind up for them. Autopilot's whole
+        # job is to make it up: measured over four splits it raised the win rate in EVERY one
+        # (39.6% -> 46.2% at worst) and cut the worst drawdown from 18.1R to 14.0R, for about
+        # 12% of the return. The owner's stated goal is more winning trades than losing ones in
+        # a month, so that is the side of the trade-off autopilot buys.
+        "partial_take_r": 1.0,
+        "partial_take_frac": 0.5,
+    }
+    # Managed settings that the window has no field for at all, so there is nothing to grey
+    # out. Listed explicitly rather than left as a silent gap: the window's test compares
+    # AUTO_TOP + AUTO_RISK against the fields it locks, and without this a real omission and a
+    # setting that was never on screen look identical to it.
+    AUTO_NO_FIELD = ("partial_take_frac", "auto_symbols_pool")
+
+    # The two things autopilot must never take. Not because they are hard - because they are
+    # not measurements. No backtest can say how much of someone's money they are willing to
+    # lose, or whether today is the day to point this at a real exchange.
+    AUTO_NEVER = ("capital_limit", "mode")
+
+    def effective(self) -> "Settings":
+        """The settings actually in force. With autopilot off this is self.
+
+        A COPY, deliberately. The engine runs on what this returns and the settings page keeps
+        showing and saving what the owner typed, so turning autopilot off restores their own
+        numbers with nothing to undo.
+        """
+        if not self.autopilot:
+            return self
+        import copy
+        s = copy.deepcopy(self)
+        for k, v in self.AUTO_TOP.items():
+            setattr(s, k, v)
+        for k, v in self.AUTO_RISK.items():
+            setattr(s.risk, k, v)
+        return s
+
+    def autopilot_managed(self, field: str) -> bool:
+        """Is this field the bot's to set right now? Drives the greying-out in the window."""
+        return bool(self.autopilot) and (field in self.AUTO_TOP or field in self.AUTO_RISK)
+
     # ---------------------------------------------------------------- io
     @classmethod
     def path(cls) -> Path:
@@ -314,6 +399,12 @@ class Settings:
         nobody could read.
         """
         out: list[str] = []
+        if self.autopilot:
+            # Every advisory below is "this number you chose disagrees with what we measured".
+            # Under autopilot the bot chose the measured number itself, so there is nothing to
+            # tell anyone - and a banner nagging about a field the owner no longer controls is
+            # the exact complaint that produced autopilot in the first place.
+            return out
         r = self.risk
         L = LABELS
         # Kept SHORT on purpose. These are shown in a banner across the top of the dashboard,

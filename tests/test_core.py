@@ -1768,3 +1768,77 @@ def test_how_long_a_trade_was_held_is_measured_on_one_clock():
             f"held for 3 days on the trade's own clock, recorded as {held/86400:.1f} days"
     finally:
         db.close()
+
+
+def test_autopilot_decides_everything_it_has_evidence_for_and_nothing_else():
+    """One switch instead of twenty, and two things it must never take.
+
+    The owner's complaint after a day of being handed settings: "I said from the start it should
+    be AI-based - put in one option where it chooses everything itself." Every number autopilot
+    sets has a measured best value recorded beside it in config.py, so this takes no new
+    position; it stops asking the owner to retype conclusions the app already reached.
+
+    What it must NOT take is how much money it may use and whether this is real. Neither is a
+    measurement, and no backtest makes them the app's to choose.
+    """
+    s = Settings()
+    s.risk.capital_limit = 777.0
+    s.mode = "live"
+    # deliberately poor manual choices, to prove they are overridden AND kept
+    s.risk.reward_risk = 2.0
+    s.risk.partial_take_r = 0.0
+    s.timeframe = "5m"
+    s.aggressiveness = "scalp"
+    s.use_llm_for_decisions = False
+    s.auto_symbols = False
+
+    assert s.effective() is s, "with autopilot off the settings must be untouched, not copied"
+
+    s.autopilot = True
+    e = s.effective()
+    assert e is not s, "effective() must be a copy - the owner's own numbers have to survive"
+    assert e.risk.reward_risk == 2.5
+    assert e.risk.partial_take_r == 1.0        # the win-rate side of the trade-off
+    assert e.timeframe == "1d"
+    assert e.aggressiveness == "normal"
+    assert e.use_llm_for_decisions is True
+    assert e.auto_symbols is True
+
+    # the two it may never take
+    assert e.risk.capital_limit == 777.0, "autopilot decided how much money to use"
+    assert e.mode == "live", "autopilot decided paper vs real"
+
+    # and the owner's own file is untouched, so turning it off gives them back
+    assert s.risk.reward_risk == 2.0 and s.timeframe == "5m"
+    s.autopilot = False
+    assert s.effective().risk.reward_risk == 2.0
+
+
+def test_autopilot_says_nothing_about_settings_it_took_over():
+    """The banner nagging about a field the owner no longer controls is the exact complaint
+    that produced autopilot. Every advisory is "your number disagrees with our measurement";
+    under autopilot the bot used the measurement itself, so there is nothing to say."""
+    s = Settings()
+    s.risk.reward_risk = 2.0           # would normally raise one
+    s.risk.atr_stop_mult = 4.0         # and another
+    s.risk.capital_limit = 1000
+    assert len(s.advisories()) >= 2, "the advisories this test needs are not firing"
+    s.autopilot = True
+    assert s.advisories() == [], "autopilot is still nagging about fields it controls"
+
+
+def test_the_engine_runs_on_the_settings_actually_in_force():
+    """Resolved inside Engine.__init__ so no caller can forget to ask for it - the window, the
+    CLI, the session scripts and the tests all get the same answer."""
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.risk.capital_limit = 1000; s.paper_start_balance = 1000
+    s.autopilot = True
+    s.risk.reward_risk = 2.0
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_auto_engine.db")
+    try:
+        eng = Engine(s, db, broker=PaperBroker(1000, allow_short=False))
+        assert eng.settings.risk.reward_risk == 2.5, "the engine is running the typed-in number"
+        assert eng.risk.risk.reward_risk == 2.5, "the risk layer got the un-effective settings"
+        assert s.risk.reward_risk == 2.0, "the engine wrote over the owner's settings"
+    finally:
+        db.close()

@@ -51,6 +51,11 @@ LEADER_SYMBOLS = ("BTC/USDT", "BTC/USD", "BTC/USDT:USDT", "BTC/BUSD")
 class Engine:
     def __init__(self, settings: Settings, db: Database, broker: Broker | None = None,
                  brain: Any | None = None, on_event: Callable[[str], None] | None = None):
+        # What is actually IN FORCE, which is not the same thing as what the owner typed: with
+        # autopilot on, `effective()` hands back a copy carrying the values this project
+        # measured. Resolved here, once, so every caller - the window, the CLI, the session
+        # scripts, the tests - gets the same answer and nobody can forget to ask.
+        settings = settings.effective()
         self.settings = settings
         self.db = db
         self.mode = settings.mode

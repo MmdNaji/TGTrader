@@ -1760,3 +1760,56 @@ def test_a_position_nobody_is_watching_says_so_on_screen():
         w.engine = None
         db.close()
         w.close(); w.deleteLater()
+
+
+def test_every_field_autopilot_takes_over_is_locked_in_the_window():
+    """A field autopilot sets must not still look editable, and the window must say why.
+
+    This is the failure mode of a table kept by hand: someone adds a field to AUTO_TOP or
+    AUTO_RISK, autopilot starts overriding it, and the settings page goes on offering a box
+    whose value is quietly ignored. That is worse than the homework autopilot replaced - the
+    owner types a number, saves, and the bot does something else.
+    """
+    from trader.config import Settings
+    app = QApplication.instance() or QApplication([])
+    w = fresh_window()
+    try:
+        s = Settings()
+        s.autopilot = True
+        s.risk.capital_limit = 1000
+        w.settings = s
+        w.goto("settings")
+        for _ in range(3):
+            app.processEvents()
+
+        # every field in the table is disabled and explains itself
+        locked = 0
+        for attr, field in w._AUTO_WIDGETS.items():
+            widget = getattr(w, attr, None)
+            if widget is None:
+                continue
+            assert not widget.isEnabled(), f"{attr} ({field}) is still editable under autopilot"
+            assert widget.toolTip(), f"{attr} is greyed out with no explanation"
+            locked += 1
+        assert locked >= 10, f"only {locked} fields were checked - the table has gone stale"
+
+        # the two that are never the bot's stay usable
+        assert w.s_cap.isEnabled(), "autopilot locked the owner out of their own capital limit"
+        assert w.s_mode.isEnabled(), "autopilot locked the paper/live switch"
+        assert w.card_auto_note.isVisible(), "half the page is greyed out with nothing saying why"
+
+        # and every managed field in config is represented here, or the lock silently misses one
+        covered = set(w._AUTO_WIDGETS.values())
+        declared = set(Settings.AUTO_TOP) | set(Settings.AUTO_RISK)
+        missing = declared - covered - set(Settings.AUTO_NO_FIELD)
+        assert not missing, (
+            f"autopilot overrides {sorted(missing)} but the window still offers those as "
+            f"editable fields - add them to _AUTO_WIDGETS")
+
+        # turning it off gives every one of them back
+        s.autopilot = False
+        w._apply_autopilot_locks()
+        assert w.s_rr.isEnabled() and w.s_tf.isEnabled()
+        assert not w.card_auto_note.isVisible()
+    finally:
+        w.close(); w.deleteLater()
