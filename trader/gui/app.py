@@ -653,14 +653,25 @@ class MainWindow(QMainWindow):
                 return
         self.settings.autopilot = on
         self.settings.save()
-        was_running = bool(self.engine and self.engine.running())
-        if was_running:
+        # `self.engine` is set before the thread is up, so `running()` can still be False for a
+        # moment after Start. Restarting on the OBJECT rather than on running() means a switch
+        # thrown in that window still takes effect - the Windows session saw exactly that: the
+        # very first press wrote autopilot=True and logged no stop/start at all, and it never
+        # reproduced afterwards.
+        if self.engine is not None:
             try:
                 self.engine.stop()
             except Exception:
                 pass
             self.engine = None
-            self.toggle_run()          # starts again on the settings now in force
+            # start_engine, NOT toggle_engine: toggle would look at self.engine, find the None
+            # just set, and start - which happens to be right, but only by accident. Say what is
+            # meant. (This line read `self.toggle_run()` when it shipped - a method that does not
+            # exist on this window at all, so flipping the switch with the engine running raised
+            # AttributeError and left the bot stopped with autopilot already saved. Found on the
+            # real exe by the Windows session, not by any test here, which is the whole argument
+            # for building it and pressing the button.)
+            self.start_engine()
         self.refresh()
 
     def toggle_kill(self):

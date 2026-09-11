@@ -1842,3 +1842,23 @@ def test_the_engine_runs_on_the_settings_actually_in_force():
         assert s.risk.reward_risk == 2.0, "the engine wrote over the owner's settings"
     finally:
         db.close()
+
+
+def test_a_trade_side_the_close_path_cannot_read_is_refused_where_it_is_written():
+    """"buy" is not a side, and the damage of accepting it happens somewhere else entirely.
+
+    The close path is `"sell" if side == "long" else "buy"`, so any string that is not "long"
+    is treated as a short - and closing such a row sends a BUY into a position that is already
+    long. The Windows session hit this with seeded rows and read "paper: adding to a position
+    is not supported" once per loop, several layers from the typo. The error belongs at the
+    line that made it.
+    """
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_side.db")
+    try:
+        for good in ("long", "short"):
+            assert db.open_trade("paper", "X/Y", good, 1.0, 100.0, 90.0, 120.0, "t", "r") > 0
+        for bad in ("buy", "sell", "LONG", "", "l"):
+            with pytest.raises(ValueError):
+                db.open_trade("paper", "X/Y", bad, 1.0, 100.0, 90.0, 120.0, "t", "r")
+    finally:
+        db.close()

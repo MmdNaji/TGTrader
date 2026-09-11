@@ -235,6 +235,14 @@ class Database:
     def open_trade(self, mode: str, symbol: str, side: str, qty: float, entry: float,
                    stop: float | None, tp: float | None, strategy: str, reason: str,
                    entry_fee: float = 0.0) -> int:
+        # The engine writes "long"/"short" and the close path reads
+        # `"sell" if side == "long" else "buy"` - so ANY other string silently becomes a short,
+        # and closing it sends a BUY into an open long. The Windows session seeded test rows
+        # with side="buy" and spent a while reading "paper: adding to a position is not
+        # supported" once a loop, several layers away from the typo that caused it. Refusing it
+        # here costs nothing and puts the error at the line that made it.
+        if side not in ("long", "short"):
+            raise ValueError(f"side must be 'long' or 'short', not {side!r}")
         cur = self.execute(
             "INSERT INTO trades(mode, symbol, side, qty, entry_price, stop_price, init_stop, entry_fee,"
             " take_profit, strategy, reason, opened_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",

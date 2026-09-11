@@ -1813,3 +1813,60 @@ def test_every_field_autopilot_takes_over_is_locked_in_the_window():
         assert not w.card_auto_note.isVisible()
     finally:
         w.close(); w.deleteLater()
+
+
+def test_flipping_autopilot_restarts_a_running_engine_even_one_that_just_started():
+    """The switch has to actually take effect, and it shipped not doing that at all.
+
+    `toggle_autopilot` called `self.toggle_run()` - a method this window does not have. So
+    flipping the switch with the engine running raised AttributeError: autopilot was already
+    saved, the engine was already stopped, and it never came back. Every test here passed,
+    because none of them had an engine running when they pressed it. The Windows session found
+    it by building the exe and pressing the button.
+
+    The second half is the case they saw once and could not reproduce: pressed immediately
+    after Start, it wrote the setting and logged no stop/start at all. `self.engine` is set
+    before the thread is up, so `running()` can still be False for a moment - and a switch that
+    silently does nothing in that window is the same bug with better luck.
+    """
+    from trader.config import Settings
+    app = QApplication.instance() or QApplication([])
+    w = fresh_window()
+    try:
+        w.settings = Settings()
+        w.settings.autopilot = False
+        started: list[str] = []
+
+        class FakeEngine:
+            def __init__(self, alive): self._alive = alive; self.stopped = False
+            def running(self): return self._alive
+            def stop(self): self.stopped = True
+
+        w.start_engine = lambda: started.append("start")
+
+        # 1. an engine that is up
+        eng = FakeEngine(True)
+        w.engine = eng
+        w.toggle_autopilot()
+        assert w.settings.autopilot is True, "the switch did not take"
+        assert eng.stopped, "the old engine was left running on the old settings"
+        assert started == ["start"], "the engine never came back - the bot is just stopped now"
+
+        # 2. an engine that exists but whose thread has not reported yet
+        started.clear()
+        eng2 = FakeEngine(False)
+        w.engine = eng2
+        w.toggle_autopilot()
+        assert w.settings.autopilot is False
+        assert eng2.stopped and started == ["start"], (
+            "flipped just after Start and nothing restarted - the new setting is saved and the "
+            "engine is still running on the old one")
+
+        # 3. with no engine at all it must not start one uninvited
+        started.clear()
+        w.engine = None
+        w.toggle_autopilot()
+        assert started == [], "flipping the switch started a bot nobody asked to start"
+    finally:
+        w.engine = None
+        w.close(); w.deleteLater()

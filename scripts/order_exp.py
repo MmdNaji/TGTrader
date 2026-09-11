@@ -10,7 +10,7 @@ window, two halves and three thirds. Two randoms are in there as a CONTROL: with
 is no way to tell an ordering that is better from an ordering that got lucky.
 
     .venv/bin/python scripts/order_exp.py --fetch          # first time, to fill the cache
-    .venv/bin/python scripts/order_exp.py [--bars 1000] [--symbols 16] [--seeds 4]
+    .venv/bin/python scripts/order_exp.py [--bars 1000] [--symbols 16] [--seeds 20]
 
 The symbol universe is PINNED in this file, not read off the cache directory - see UNIVERSE.
 Everything else is offline and deterministic, so the same table must come out on any machine,
@@ -191,7 +191,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bars", type=int, default=1000)
     ap.add_argument("--symbols", type=int, default=16)
-    ap.add_argument("--seeds", type=int, default=4, help="how many random controls")
+    # TWENTY, not four. The Windows session re-ran this with a proper control band and most of
+    # what four seeds had "found" was the band being too narrow: `list` went from below the band
+    # in 4 of 6 windows to 2 of 6 (and one of those two by a single dollar), `rotate` from 4 of
+    # 6 to 1 of 6 - the whole "a deterministic rotation builds its own periodic pattern" theory
+    # rested on one window that four other windows did not repeat - and `wild` had a window it
+    # was below ALL twenty that four seeds had hidden. Four false signals manufactured and one
+    # concealed, from the control alone.
+    ap.add_argument("--seeds", type=int, default=20, help="how many random controls")
     ap.add_argument("--fetch", action="store_true",
                     help="pull the pinned symbols from the exchange first")
     args = ap.parse_args()
@@ -249,7 +256,8 @@ def main() -> int:
                                       for o, _ in orders))
     print("(win rate)                " + "".join(f"{o:>12}" for o, _ in orders))
 
-    # The control is the point: an ordering only beat chance if it is outside the random spread.
+    # The control is the point: an ordering only beat chance if it is outside the random spread -
+    # and with too few seeds that spread is narrow enough to put anything outside it.
     print()
     rands = [f"rand{i}" for i in range(1, args.seeds + 1)]
     for label in windows:

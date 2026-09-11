@@ -7,3 +7,4 @@ dist/
 *.spec
 builds/
 .bars/
+.bars2/
