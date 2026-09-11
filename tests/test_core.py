@@ -1137,3 +1137,51 @@ def test_advisories_are_short_enough_to_read_in_a_banner():
     for a in advice:
         assert len(a) <= 160, f"{len(a)} chars is too long for the banner:\n{a}"
         assert "«" in a, f"an advisory must name the field to change:\n{a}"
+
+
+def test_the_dashboard_shows_a_ceiling_the_bot_can_actually_reach():
+    """It said "of at most 20" while the simultaneous-risk budget allowed 11 - a number the bot
+    could never get to. The real ceiling is measured from what the open positions are actually
+    risking, not from a setting."""
+    r = RiskSettings(capital_limit=1000, risk_per_trade=0.05, max_open_risk=0.06,
+                     max_position_frac=0.05, max_open_positions=20)
+    rm = RiskManager(r, None, "paper")
+
+    # nothing open yet: there is nothing to measure, so the setting is the honest answer
+    assert rm.capacity([]) == (20, "تنظیمات")
+
+    # one position risking 5.45 of a 60 budget -> eleven of them fit
+    held = [{"entry_price": 76752.0, "init_stop": 68393.0, "qty": 0.000651365}]
+    cap, why = rm.capacity(held)
+    assert cap == 11 and why == "سقف ریسک همزمان", (cap, why)
+
+    # when the setting is the tighter of the two, it is reported as the setting
+    r.max_open_positions = 4
+    assert rm.capacity(held) == (4, "تنظیمات")
+
+    # and the ceiling is never below what is already open
+    r.max_open_positions = 20
+    r.max_open_risk = 0.001
+    cap, _ = rm.capacity(held)
+    assert cap >= len(held), "a ceiling under the current count would read as a bug"
+
+
+def test_open_risk_reads_a_sqlite_row_as_well_as_a_dict():
+    """db.open_trades() returns sqlite3.Row, which supports row["x"] and raises IndexError for
+    a missing key but has NO .get(). Rows reach the risk manager as Rows on some paths and as
+    dicts on others, and a .get() on the first crashed the dashboard refresh."""
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_rowrisk.db")
+    pb = PaperBroker(1000.0); pb.reset(1000.0)
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 95.0, 110.0, "t", "r",
+                  entry_fee=fill.fee)
+    rows = db.open_trades("paper")
+    assert not hasattr(rows[0], "get"), "this test is pointless if Row grows a .get()"
+
+    rm = RiskManager(RiskSettings(capital_limit=1000, max_open_risk=0.06), None, "paper")
+    from_rows = rm.open_risk(rows)
+    from_dicts = rm.open_risk([dict(r) for r in rows])
+    assert from_rows == from_dicts > 0, (from_rows, from_dicts)
+    assert rm.capacity(rows) == rm.capacity([dict(r) for r in rows])
+    # and junk in the list is skipped rather than raising
+    assert rm.open_risk([{"nothing": 1}, None, rows[0]]) == from_rows

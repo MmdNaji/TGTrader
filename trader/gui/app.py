@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject, QEvent
 from PySide6.QtGui import QFont
+from PySide6.QtCore import QTranslator
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QFileDialog, QMessageBox, QPlainTextEdit,
@@ -108,6 +109,55 @@ def ltr(s: str) -> str:
     table showed every single percentage backwards.
     """
     return "\u2066" + s + "\u2069" if s else s
+
+
+# Regimes and strategy names reach the screen straight from the code that produces them, which
+# means snake_case English in the middle of a Persian window. Translated at the edge, so the
+# engine keeps its own vocabulary.
+FA_REGIME = {"trend_up": "روند صعودی", "trend_down": "روند نزولی", "range": "رِنج",
+             "volatile": "پرنوسان", "unknown": "نامشخص", "": "—", "—": "—"}
+FA_SIDE = {"long": "خرید", "short": "فروش", "buy": "خرید", "sell": "فروش"}
+FA_STRATEGY = {"ema_trend": "روند EMA", "rsi_reversion": "بازگشت RSI",
+               "donchian_breakout": "شکست دانچیان", "scalp": "اسکالپ",
+               "llm": "هوش مصنوعی", "rules": "قوانین پایه"}
+
+
+def fa_regime(r: str) -> str:
+    return FA_REGIME.get((r or "").strip(), r or "—")
+
+
+def fa_signal(sig: str) -> str:
+    """"long · donchian_breakout" -> "خرید · شکست دانچیان"."""
+    if not sig:
+        return ""
+    parts = [p.strip() for p in sig.split("·")]
+    if len(parts) == 2:
+        return f"{FA_SIDE.get(parts[0], parts[0])} · {FA_STRATEGY.get(parts[1], parts[1])}"
+    return FA_STRATEGY.get(sig, sig)
+
+
+def money(x: float | None, decimals: int = 2) -> str:
+    """One shape for money, everywhere: the sign, then the amount, then the currency.
+
+    The positions table had "$50.02" in one column and "+0.01 $" in the next, and the price
+    columns had no currency at all - three conventions in one row.
+    """
+    if x is None:
+        return "—"
+    return ltr(f"{x:,.{decimals}f} $")
+
+
+def price(x: float | None) -> str:
+    """A price with a number of decimals that suits its size.
+
+    One column held 2627.56, 759.937, 8.17284 and 108.001 at the same time, which cannot be
+    read down. Big numbers get two decimals, small ones get enough digits to stay distinct.
+    """
+    if x is None:
+        return "—"
+    a = abs(x)
+    d = 2 if a >= 100 else (4 if a >= 1 else (6 if a >= 0.01 else 8))
+    return ltr(f"{x:,.{d}f}")
 
 
 def profit_factor(st: dict) -> str:
@@ -301,7 +351,11 @@ class MainWindow(QMainWindow):
         self.btn_reset = button("🧪 ریست تست", "ghost", self.reset_test)
         self.btn_reset.setToolTip("پاک‌کردن معامله‌ها، سود/زیان و نمودار سرمایه، و شروع دوباره با موجودی دلخواه")
         h.addWidget(self.btn_reset)
-        self.btn_update = button("🔄", "ghost", lambda: self._check_update(manual=True)); self.btn_update.setToolTip("بررسی و نصب خودکار نسخه‌ی جدید"); h.addWidget(self.btn_update)
+        # It was a bare icon: nothing on it said what it did, and a tooltip is only found by
+        # someone who already suspects there is something to find.
+        self.btn_update = button("🔄 به‌روزرسانی", "ghost", lambda: self._check_update(manual=True))
+        self.btn_update.setToolTip("بررسی نسخه‌ی جدید و نصب آن")
+        h.addWidget(self.btn_update)
         return bar
 
     def goto(self, key: str) -> None:
@@ -386,7 +440,11 @@ class MainWindow(QMainWindow):
         low = QHBoxLayout(); low.setSpacing(12)
         c3 = Card("پوزیشن‌های باز")
         self.tbl_positions = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
-        self.tbl_positions.setTextElideMode(Qt.ElideNone)
+        # ElideRight, not ElideNone. With ElideNone in a right-to-left layout the cell is
+        # clipped from the LEFT, so "ETH/USDT" arrives as ".../ETH" - the quote currency gone
+        # and the ellipsis at the front - while the decisions table, which already used
+        # ElideRight, showed the same symbols in full.
+        self.tbl_positions.setTextElideMode(Qt.ElideRight)
         self.tbl_positions.setMinimumHeight(160)
         self.empty_pos = Empty("پوزیشن بازی نیست. وقتی شرایط ورود جور شود، این‌جا ظاهر می‌شود.")
         self.tbl_positions.setToolTip("روی یک ردیف بزن تا جزئیات کامل باز شود")
@@ -721,7 +779,7 @@ class MainWindow(QMainWindow):
         self.desk_tf.currentTextChanged.connect(lambda _: self.refresh_desk_chart())
         cbot = Card("پوزیشن‌های باز", "روی هر ردیف بزن تا چارت بالا برود روی همان ارز")
         self.tbl_desk = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
-        self.tbl_desk.setTextElideMode(Qt.ElideNone)
+        self.tbl_desk.setTextElideMode(Qt.ElideRight)
         self.tbl_desk.cellClicked.connect(self._desk_row_to_chart)
         self.empty_desk = Empty("پوزیشن بازی نیست.")
         cbot.add(self.tbl_desk, 1); cbot.add(self.empty_desk)
@@ -812,7 +870,7 @@ class MainWindow(QMainWindow):
         v.addWidget(c)
 
         c2 = Card("بازار", "روی ردیف‌ها کلیک کن تا انتخاب شوند (Ctrl برای چندتایی)")
-        self.tbl_scan = table(["نماد", "قیمت", "گردش ۲۴س", "دامنه‌ی روز", "تغییر ۲۴س",
+        self.tbl_scan = table(["نماد", "قیمت", "گردش ۲۴س (دلار)", "دامنه‌ی روز", "تغییر ۲۴س",
                                "نوسان (ATR)", "روند ۳۰ روز", "رژیم", "سیگنال الان"])
         self.tbl_scan.setMinimumHeight(420)
         # Equal-width columns cut "long · donchian_breakout" down to "long · ...", which is the
@@ -868,22 +926,32 @@ class MainWindow(QMainWindow):
         if not rows:
             return
         self.btn_scan_deep.setEnabled(False)
+        self.btn_scan.setEnabled(False)
+        self.lbl_scan.setText(f"در حال محاسبه برای {len(rows)} نماد… (هر نماد یک درخواست، "
+                              f"حدود یک دقیقه طول می‌کشد)")
         md = self.market_data()
         tf = self.settings.timeframe
 
+        def say(m: str):
+            # Sixty seconds with no spinner, no disabled button and no changing text reads as a
+            # hung window, and the natural response is to press the button again. The scanner
+            # already reported its progress - it was only going to the event log, which is not
+            # where anyone is looking while they wait on this page.
+            self.bridge.event.emit("[scan] " + m)
+            self.lbl_scan.setText(m)
+
         def job():
-            return scanner.deepen(self.settings, md, rows, timeframe=tf,
-                                  on_progress=lambda m: self.bridge.event.emit("[scan] " + m))
+            return scanner.deepen(self.settings, md, rows, timeframe=tf, on_progress=say)
 
         def done(deep):
-            self.btn_scan_deep.setEnabled(True)
+            self.btn_scan_deep.setEnabled(True); self.btn_scan.setEnabled(True)
             self._scan_rows = deep
             self._fill_scan()
             bad = [r for r in deep if r.get("error")]
             self.lbl_scan.setText(f"محاسبه شد." + (f"  ({len(bad)} نماد داده نداشت)" if bad else ""))
 
         def fail(m):
-            self.btn_scan_deep.setEnabled(True)
+            self.btn_scan_deep.setEnabled(True); self.btn_scan.setEnabled(True)
             self.lbl_scan.setText("محاسبه انجام نشد: " + m.splitlines()[0])
 
         self._run_bg(job, done, fail)
@@ -892,16 +960,25 @@ class MainWindow(QMainWindow):
         rows = getattr(self, "_scan_rows", []) or []
         out = []
         for r in rows:
+            # "" and "—" meant different things and looked identical: an empty signal cell
+            # could be "not calculated yet" or "calculated, and there is nothing", while every
+            # other column showed "—" for the first of those.
+            if r.get("error"):
+                sig = "خطا: " + r["error"]
+            elif "signal" not in r:
+                sig = "—"                       # the deep pass has not run on this row
+            else:
+                sig = fa_signal(r["signal"]) or "بدون سیگنال"
             out.append([
                 r["symbol"],
-                ltr(f"{r['price']:g}"),
-                ltr(f"{r['volume_usd']/1e6:,.0f}M"),
+                price(r["price"]),
+                ltr(f"{r['volume_usd']/1e6:,.0f}M $"),
                 ltr(f"{r['range_pct']:.1f}%"),
                 ltr(f"{r['change_pct']:+.1f}%"),
                 ltr(f"{r['atr_pct']:.2f}%") if r.get("atr_pct") else "—",
                 ltr(f"{r['mom_pct']:+.1f}%") if r.get("mom_pct") else "—",
-                r.get("regime", "—"),
-                r.get("signal", "") or ("خطا: " + r["error"] if r.get("error") else ""),
+                fa_regime(r.get("regime", "")),
+                sig,
             ])
         fill(self.tbl_scan, out, tones={4: "pnl", 6: "pnl"})
         self.tbl_scan.setVisible(bool(out)); self.empty_scan.setVisible(not out)
@@ -1569,7 +1646,9 @@ class MainWindow(QMainWindow):
         daily = rm.daily_pnl()
         self.kpi_daily.set(f"{daily:+,.2f}", f"سقف زیان روزانه {s.risk.max_daily_loss*s.risk.capital_limit:,.2f}", "green" if daily > 0 else ("red" if daily < 0 else ""))
         opens = self.db.open_trades(mode)
-        self.kpi_open.set(str(len(opens)), f"از حداکثر {s.risk.max_open_positions}")
+        cap, why = rm.capacity(opens)
+        self.kpi_open.set(str(len(opens)),
+                          f"از حداکثر {cap}" + ("" if why == "تنظیمات" else f" ({why})"))
         st = self.db.trade_stats(mode)
         self.kpi_win.set(f"{st['win_rate']*100:.0f}%" if st["trades"] else "—", f"{st['trades']} معامله بسته‌شده")
         self.eq_curve.set_points(curve)
@@ -1587,9 +1666,9 @@ class MainWindow(QMainWindow):
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
             val = float(r["qty"]) * float(r["entry_price"])
             pct = (fl / val * 100) if (fl is not None and val) else None
-            rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
-                         f"{px:g}" if px else "—", f"${val:.2f}", f"{r['stop_price']:g}",
-                         f"{r['take_profit']:g}" if r["take_profit"] else "—",
+            rows.append([r["symbol"], FA_SIDE.get(r["side"], r["side"]), price(r["entry_price"]),
+                         price(px) if px else "—", money(val), price(r["stop_price"]),
+                         price(r["take_profit"]) if r["take_profit"] else "—",
                          money_pct(fl, pct)])
         self._pos_data = [dict(x) for x in opens]
         fill(self.tbl_positions, rows, tones={7: "pnl"}); self.tbl_positions.setVisible(bool(rows)); self.empty_pos.setVisible(not rows)
@@ -1781,9 +1860,9 @@ class MainWindow(QMainWindow):
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
             val = float(r["qty"]) * float(r["entry_price"])
             pct = (fl / val * 100) if (fl is not None and val) else None
-            rows.append([r["symbol"], "خرید" if r["side"] == "long" else "فروش", f"{r['entry_price']:g}",
-                         f"{px:g}" if px else "—", f"${val:.2f}", f"{r['stop_price']:g}",
-                         f"{r['take_profit']:g}" if r["take_profit"] else "—",
+            rows.append([r["symbol"], FA_SIDE.get(r["side"], r["side"]), price(r["entry_price"]),
+                         price(px) if px else "—", money(val), price(r["stop_price"]),
+                         price(r["take_profit"]) if r["take_profit"] else "—",
                          money_pct(fl, pct)])
         self._pos_data = [dict(x) for x in opens]
         fill(self.tbl_positions, rows, tones={7: "pnl"})
@@ -1853,8 +1932,34 @@ def _join_threads(threads: list, ms: int = 5000) -> list:
     return stuck
 
 
+def persian_dialog_buttons() -> None:
+    """Qt's standard buttons ship as Yes / No / OK / Cancel and are not translated by the app's
+    layout direction. In a window where every other word is Persian they are the only English
+    on screen, and they are on the one control that asks for a decision."""
+    from PySide6.QtWidgets import QDialogButtonBox
+    from PySide6.QtCore import QCoreApplication
+
+    class _Fa(QTranslator):
+        WORDS = {
+            "&Yes": "بله", "Yes": "بله", "&No": "خیر", "No": "خیر",
+            "OK": "باشه", "&OK": "باشه", "Cancel": "لغو", "&Cancel": "لغو",
+            "Close": "بستن", "&Close": "بستن", "Apply": "اعمال", "&Apply": "اعمال",
+            "Save": "ذخیره", "&Save": "ذخیره", "Open": "باز کردن", "&Open": "باز کردن",
+            "Reset": "بازنشانی", "Help": "راهنما", "Abort": "قطع", "Retry": "تلاش دوباره",
+            "Ignore": "نادیده بگیر", "Discard": "دور بریز", "&Discard": "دور بریز",
+        }
+
+        def translate(self, ctx, text, disambiguation=None, n=-1):
+            return self.WORDS.get(text, "")
+
+    tr = _Fa()
+    QCoreApplication.installTranslator(tr)
+    return tr
+
+
 def main() -> int:
     app = QApplication(sys.argv)
+    app._fa_buttons = persian_dialog_buttons()   # kept alive, or Qt drops the translator
     app._wheel_guard = WheelGuard()          # kept alive on the app, or Qt drops the filter
     app.installEventFilter(app._wheel_guard)
     app.setLayoutDirection(Qt.RightToLeft)

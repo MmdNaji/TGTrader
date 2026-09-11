@@ -16,6 +16,19 @@ from ..config import RiskSettings, data_dir
 MIN_NOTIONAL_FRAC = 0.02
 
 
+def _field(row, name: str):
+    """Read a column from a dict OR a sqlite3.Row.
+
+    sqlite3.Row supports row["x"] and raises IndexError for a missing key, but has no .get().
+    Rows arrive here straight from db.open_trades() in some call paths and as dicts in others,
+    and a .get() on the first crashed the dashboard refresh.
+    """
+    try:
+        return row[name]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 @dataclass
 class Sizing:
     qty: float
@@ -83,14 +96,36 @@ class RiskManager:
         total = 0.0
         for p in open_positions or []:
             try:
-                entry = float(p["entry_price"])
-                stop = float(p.get("init_stop") or p.get("stop_price") or 0.0)
-                qty = float(p["qty"])
-            except (KeyError, TypeError, ValueError):
+                entry = float(_field(p, "entry_price") or 0.0)
+                stop = float(_field(p, "init_stop") or _field(p, "stop_price") or 0.0)
+                qty = float(_field(p, "qty") or 0.0)
+            except (KeyError, TypeError, ValueError, IndexError):
                 continue
             if stop and qty:
                 total += abs(entry - stop) * qty
         return total
+
+    def capacity(self, open_positions: list) -> tuple[int, str]:
+        """How many positions can REALLY be open, and what decides it.
+
+        The dashboard was showing "of at most 20" while the simultaneous-risk budget allowed
+        11, so it advertised a number the bot could never reach. This measures the ceiling from
+        the risk each OPEN position is actually carrying, rather than from a setting or a guess
+        about a stop distance nobody has taken yet.
+        """
+        cap = int(self.risk.max_open_positions)
+        budget = abs(getattr(self.risk, "max_open_risk", 0.0) * self.risk.capital_limit)
+        held = list(open_positions or [])
+        if budget <= 0 or not held:
+            return cap, "تنظیمات"
+        used = self.open_risk(held)
+        if used <= 0:
+            return cap, "تنظیمات"
+        per = used / len(held)                      # what one position is costing, measured
+        by_risk = int(budget / per)
+        if by_risk < cap:
+            return max(by_risk, len(held)), "سقف ریسک همزمان"
+        return cap, "تنظیمات"
 
     def size(self, side: str, price: float, stop_distance: float, equity: float,
              min_qty: float = 0.0, qty_step: float = 0.0, cash: float | None = None,
