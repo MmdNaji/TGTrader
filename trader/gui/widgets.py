@@ -33,7 +33,12 @@ class Card(QFrame):
             tcol.addWidget(self.sub_lbl)
         else:
             self.sub_lbl.hide()
-        self.header.addLayout(tcol); self.header.addStretch()
+        # The TITLE COLUMN takes the slack, not a stretch after it. A word-wrapping QLabel
+        # reports a narrow size hint on purpose - it aims for a readable block - so with
+        # the stretch swallowing the leftover, the subtitle wrapped into a ~250px column
+        # inside a 1600px card, and a card three lines tall was breaking Persian words in
+        # half: "دلیلش ر" / "بخوان". That is the same class of damage as a clipped number.
+        self.header.addLayout(tcol, 1)
         if title:
             self.outer.addLayout(self.header)
         self.body = QVBoxLayout(); self.body.setSpacing(8)

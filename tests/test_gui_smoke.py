@@ -965,3 +965,31 @@ def test_a_scrollbar_that_cannot_scroll_is_not_shown(win):
         if sb.isVisible():
             useful += 1
     assert not useless, f"an inert scrollbar was shown at these widths: {useless}"
+
+
+def test_a_card_subtitle_uses_the_card_it_is_in(win):
+    """Wrapping the subtitles is what let the window get narrow, and it came with a regression:
+    a word-wrapping QLabel reports a deliberately NARROW size hint - it aims for a readable
+    block rather than a long line - so with a stretch after it swallowing the leftover, the
+    subtitle wrapped into a ~250px column inside a 1600px card. Three lines where there was
+    room for one, and Persian words broken in half: "دلیلش ر" / "بخوان".
+
+    A broken word is the same class of damage as a clipped number: it changes what the text
+    says, not just how it looks."""
+    from trader.gui.widgets import Card
+    app = QApplication.instance() or QApplication([])
+    win.show()
+    win.goto("dashboard")
+    win.resize(1366, 900)
+    for _ in range(6):
+        app.processEvents()
+    wrapped = {}
+    for c in win.pages["dashboard"].widget().findChildren(Card):
+        lbl = c.sub_lbl
+        if not (lbl.isVisible() and lbl.text()):
+            continue
+        need = lbl.fontMetrics().horizontalAdvance(lbl.text())
+        # only a card that HAS the room is at fault; a genuinely narrow card may wrap
+        if c.width() > need + 120 and lbl.width() < need:
+            wrapped[lbl.text()[:24]] = (c.width(), lbl.width(), need)
+    assert not wrapped, f"subtitles wrapped inside cards with room to spare: {wrapped}"
