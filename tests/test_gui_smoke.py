@@ -1414,3 +1414,43 @@ def test_price_pills_never_cover_one_another():
     # and pills that were already clear are left exactly where they were
     far = [(100.0, None, "a", "", 1), (300.0, None, "b", "", 0)]
     assert [p for p, *_ in _spread(far, plot)] == [300.0, 100.0]
+
+
+def test_the_columns_come_back_when_the_table_comes_back(win):
+    """Positions open and close and the window gets resized, so a table is refilled in one shape
+    and then another all day. fit_columns puts a column into Interactive mode to hold a width it
+    picked, and nothing put it back - so a later fill measured the width left over from an
+    earlier shape instead of the content. Measured through the real page: 661 -> 605 -> 549 ->
+    546 across four fills, until everything in the table was elided - "خرید" as "خ...",
+    "BNB/USDT" as ".../BNB", from a window that had just been left open.
+
+    The property is simple and it is the one that failed: return to a state you have been in
+    before, and the table has to look the way it did. Filling the SAME data repeatedly never
+    shows it, which is why the first version of this test passed with the bug in place.
+    """
+    from trader.gui.widgets import fill
+    app = QApplication.instance() or QApplication([])
+    win.show()
+    win.goto("dashboard")
+    t = win.tbl_positions
+    row = ["BNB/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
+           "⁦-0.14 $ (-0.28%)⁩"]
+
+    def settle(width, rows):
+        win.resize(width, 900)
+        t.show()
+        for _ in range(2):
+            fill(t, [list(row) for _ in range(rows)])
+            for _ in range(3):
+                app.processEvents()
+        return [t.columnWidth(c) for c in range(t.columnCount())]
+
+    home = (1100, 4)
+    before = settle(*home)
+    # a day's worth of shapes: narrow, wide, more rows, fewer rows
+    for width, rows in ((700, 6), (1381, 2), (840, 8), (2278, 5), (900, 3)):
+        settle(width, rows)
+    after = settle(*home)
+    assert after == before, (
+        f"the table did not come back: {sum(before)}px of columns became {sum(after)}px "
+        f"after visiting other widths and row counts\n  before {before}\n  after  {after}")

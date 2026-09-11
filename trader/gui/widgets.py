@@ -300,9 +300,20 @@ def fit_columns(t: QTableWidget) -> None:
     n = t.columnCount()
     if not n or not getattr(t, "_stretch_last", True):
         return
+    hh = t.horizontalHeader()
+    # START FROM THE CONTENT, every time. The shave below puts a column into Interactive mode to
+    # hold a hand-picked width, and nothing used to put it back - so the next refresh measured
+    # the shaved width, shaved it again, and the columns walked steadily downwards: 661 -> 605
+    # -> 549 -> 546 over four fills of identical data. The dashboard refreshes every 1.5
+    # seconds, so a table left open simply kept narrowing until everything in it was elided -
+    # "خرید" as "خ...", "BNB/USDT" as ".../BNB". One fill never shows it, which is why every
+    # test here passed while the live window drifted.
+    first = 1 if (t.columnCount() and (t.horizontalHeaderItem(0).text() if t.horizontalHeaderItem(0) else "") == "#") else 0
+    for c in range(first, n):
+        if hh.sectionResizeMode(c) != QHeaderView.ResizeToContents:
+            hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
     need = sum(t.sizeHintForColumn(c) for c in range(n))
     room = _room(t)
-    hh = t.horizontalHeader()
     # HEADROOM, not "need < room". Deciding on the exact boundary meant that at a width two
     # pixels above the content the stretch was applied anyway, and stretching then redistributes
     # and squeezes the last column under its own hint - the truncation comes back at precisely
