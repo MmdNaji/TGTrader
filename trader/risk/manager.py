@@ -67,18 +67,51 @@ class RiskManager:
         return now - (now % 86400.0)
 
     def daily_pnl(self) -> float:
+        """Realised only: what today's CLOSED trades came to."""
         return self.db.pnl_since(self.mode, self.day_start())
 
-    def daily_loss_hit(self) -> bool:
-        return self.daily_pnl() <= -abs(self.risk.max_daily_loss * self.risk.capital_limit)
+    def open_pnl(self, open_positions: list, prices: dict) -> float:
+        """What the open positions are up or down at these prices, right now."""
+        total = 0.0
+        for pos in open_positions or []:
+            sym = _field(pos, "symbol")
+            qty = _field(pos, "qty")
+            entry = _field(pos, "entry_price")
+            price = (prices or {}).get(sym)
+            if not sym or not qty or not entry or not price:
+                continue
+            short = str(_field(pos, "side") or "long").lower() in ("short", "sell")
+            move = (float(entry) - float(price)) if short else (float(price) - float(entry))
+            total += move * float(qty)
+        return total
+
+    def day_loss(self, open_positions: list | None = None, prices: dict | None = None) -> float:
+        """Today's loss as the CAP means it: closed trades plus what is open right now.
+
+        Realised-only was the whole measure until the Windows session watched a live run and
+        asked why equity fell 999.80 -> 999.40 while "today's P&L" sat at +0.00 next to a line
+        reading "daily loss cap 45.00". Technically correct - nothing had closed - and the wrong
+        number to put a cap on: four open positions could bleed straight past the limit and the
+        engine would keep taking new trades, because as far as the cap was concerned nothing had
+        happened yet. The protection was absent in exactly the case it exists for.
+
+        Tripping this blocks NEW entries and nothing else - it never closes a position - so a
+        cap that fires on a drawdown that later recovers costs a few missed entries, while a cap
+        that cannot see open losses costs the account.
+        """
+        return self.daily_pnl() + self.open_pnl(open_positions or [], prices or {})
+
+    def daily_loss_hit(self, open_positions: list | None = None, prices: dict | None = None) -> bool:
+        return self.day_loss(open_positions, prices) <= -abs(self.risk.max_daily_loss * self.risk.capital_limit)
 
     # ------------------------------------------------------------ gate
-    def check(self, symbol: str, open_positions: list, equity: float) -> str | None:
+    def check(self, symbol: str, open_positions: list, equity: float,
+              prices: dict | None = None) -> str | None:
         """Return a reason to refuse, or None if a new trade is allowed."""
         if self.kill_switch_on():
             return "kill switch is on"
-        if self.daily_loss_hit():
-            return f"daily loss limit reached ({self.daily_pnl():.2f})"
+        if self.daily_loss_hit(open_positions, prices):
+            return f"daily loss limit reached ({self.day_loss(open_positions, prices):.2f})"
         if len(open_positions) >= self.risk.max_open_positions:
             return f"max open positions ({self.risk.max_open_positions}) reached"
         if any(p["symbol"] == symbol for p in open_positions):

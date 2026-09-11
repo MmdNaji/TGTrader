@@ -1720,9 +1720,23 @@ class MainWindow(QMainWindow):
 
         curve = self.db.equity_curve(mode, limit=500)
         self.kpi_equity.set(f"{curve[-1][1]:,.2f}" if curve else "—")
-        daily = rm.daily_pnl()
-        self.kpi_daily.set(f"{daily:+,.2f}", f"سقف زیان روزانه {s.risk.max_daily_loss*s.risk.capital_limit:,.2f}", "green" if daily > 0 else ("red" if daily < 0 else ""))
         opens = self.db.open_trades(mode)
+        # The engine's last_prices is the live source while it runs; self._live is what the feed
+        # streams when it is not. The KPI below and the positions table must read the SAME dict,
+        # or the card and the row under it can disagree about the same position.
+        prices = {**(self.engine.last_prices if self.engine else {}), **self._live}
+        # The number beside "daily loss cap" has to BE the number the cap uses, or the card is
+        # telling the user they are safe while the engine thinks otherwise. Realised-only sat at
+        # +0.00 through a live run in which equity fell - nothing had closed yet - which reads as
+        # "nothing is happening today" next to four positions that were all down.
+        closed = rm.daily_pnl()
+        daily = rm.day_loss(opens, prices)
+        floating = daily - closed
+        cap = s.risk.max_daily_loss * s.risk.capital_limit
+        sub = f"سقف زیان روزانه {cap:,.2f}"
+        if abs(floating) >= 0.005:
+            sub = f"{ltr(f'{closed:+,.2f}')} بسته‌شده + {ltr(f'{floating:+,.2f}')} باز · سقف {ltr(f'{cap:,.2f}')}"
+        self.kpi_daily.set(f"{daily:+,.2f}", sub, "green" if daily > 0 else ("red" if daily < 0 else ""))
         cap, why = rm.capacity(opens)
         self.kpi_open.set(str(len(opens)),
                           f"از حداکثر {cap}" + ("" if why == "تنظیمات" else f" ({why})"))
@@ -1736,7 +1750,6 @@ class MainWindow(QMainWindow):
             + (f" · فقط {st['trades']} معامله — برای قضاوت کم است" if small else "")
             if st["trades"] else "")
 
-        prices = {**(self.engine.last_prices if self.engine else {}), **self._live}
         rows = []
         for r in opens:
             px = prices.get(r["symbol"])

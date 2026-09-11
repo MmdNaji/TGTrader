@@ -288,7 +288,7 @@ class Engine:
         snap = snapshot(eval_df)
         equity = self.broker.equity(self.last_prices)
 
-        refuse = self.risk.check(symbol, open_positions, equity)
+        refuse = self.risk.check(symbol, open_positions, equity, self.last_prices)
         if refuse:
             if signals:
                 self.db.add_decision(symbol, "hold", None, "risk", refuse, {"regime": regime})

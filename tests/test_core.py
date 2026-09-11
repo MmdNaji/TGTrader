@@ -1185,3 +1185,55 @@ def test_open_risk_reads_a_sqlite_row_as_well_as_a_dict():
     assert rm.capacity(rows) == rm.capacity([dict(r) for r in rows])
     # and junk in the list is skipped rather than raising
     assert rm.open_risk([{"nothing": 1}, None, rows[0]]) == from_rows
+
+
+def test_the_daily_loss_cap_sees_positions_that_are_still_open():
+    """It counted CLOSED trades only. The Windows session watched a live run where equity went
+    999.80 -> 999.40 while "today's P&L" read +0.00 beside a line saying "daily loss cap 45.00",
+    and asked whether that was deliberate. It was not: four open positions could bleed straight
+    past the limit and the engine would keep taking new trades, because as far as the cap was
+    concerned nothing had happened yet. The protection was missing in exactly the case it is
+    there for.
+
+    Tripping it blocks NEW entries and never closes anything, so a cap that fires on a drawdown
+    that later recovers costs a few missed entries. A cap that cannot see open losses costs the
+    account."""
+    import tempfile, pathlib
+    from trader.config import Settings
+    from trader.db import Database
+    from trader.risk.manager import RiskManager
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(pathlib.Path(tmp) / "t.db")
+        s = Settings()
+        s.risk.capital_limit = 1000.0
+        s.risk.max_daily_loss = 0.03            # cap = 30.00
+        rm = RiskManager(s.risk, db, "paper")
+        rm._kill_file = pathlib.Path(tmp) / "KILL"      # never touch the real switch from a test
+
+        open_positions = [{"symbol": "ETH/USDT", "side": "long", "qty": 1.0, "entry_price": 100.0},
+                          {"symbol": "BNB/USDT", "side": "long", "qty": 2.0, "entry_price": 50.0}]
+
+        # nothing closed, nothing moved -> no loss either way
+        flat = {"ETH/USDT": 100.0, "BNB/USDT": 50.0}
+        assert rm.daily_pnl() == 0.0
+        assert not rm.daily_loss_hit(open_positions, flat)
+
+        # now they are 40 down between them, and nothing has been closed
+        bad = {"ETH/USDT": 80.0, "BNB/USDT": 40.0}          # -20 and -20
+        assert rm.open_pnl(open_positions, bad) == pytest.approx(-40.0)
+        assert rm.daily_pnl() == 0.0, "realised is still zero - that is the point"
+        assert rm.day_loss(open_positions, bad) == pytest.approx(-40.0)
+        assert rm.daily_loss_hit(open_positions, bad), "the cap did not see an open loss past it"
+        assert rm.check("SOL/USDT", open_positions, 1000.0, bad), "a new trade was still allowed"
+
+        # a short is the other way round
+        short = [{"symbol": "ETH/USDT", "side": "short", "qty": 1.0, "entry_price": 100.0}]
+        assert rm.open_pnl(short, {"ETH/USDT": 60.0}) == pytest.approx(40.0)
+
+        # a symbol with no live price is skipped rather than counted as zero move
+        assert rm.open_pnl(open_positions, {"ETH/USDT": 80.0}) == pytest.approx(-20.0)
+
+        # and with the open positions left out, it is the old realised-only answer - so nothing
+        # that still calls it the old way silently changes meaning
+        assert not rm.daily_loss_hit()
