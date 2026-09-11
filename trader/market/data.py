@@ -136,20 +136,28 @@ class MarketData:
             # AND option markets - each a request of its own, so ONE candle call can block a
             # thread for minutes behind a proxy. This app only trades spot.
             #
-            # It has to be {"types": [...]}. A bare ["spot"] is what was here, and every one of
-            # these exchanges reads this option with safe_dict(), which returns None for a list
-            # and falls back to all four types - so the limit had never once applied. Proven by
-            # stubbing gate's four fetch_*_markets and calling fetch_markets: the list form ran
-            # all four, the dict form ran spot alone. This is what left a thread stuck in an SSL
-            # read inside gate.fetch_future_markets at the end of the Windows test run.
+            # It has to be {"types": [...]}. A bare ["spot"] was here, and an exchange that
+            # honours this option reads it with safe_dict(), which returns None for a LIST and
+            # falls back to its own defaults - so the limit never applied.
             #
-            # What it costs, measured against ccxt rather than guessed: load_markets() caches on
-            # the exchange OBJECT, so the four fetches are paid ONCE per object, not per call.
-            # That is still every time a new MarketData appears - the price feed builds one on
-            # every restart, and the engine and the scanner each build their own - and up to six
-            # times over when the fallback chain walks. Steady-state candle and price throughput
-            # is unchanged by this; the first call after each restart, and the risk of hanging
-            # in one of the three fetches nothing here ever wanted, are what it buys.
+            # WHICH exchanges it changes, measured by stubbing each one's fetch_*_markets and
+            # calling fetch_markets() - no network, no guessing:
+            #
+            #   gate     4 calls -> 1     (spot, swap, future, option -> spot)
+            #   kucoin   fetched contract markets -> fetches none of them
+            #   bybit    unchanged        mexc  unchanged        bitget  unchanged
+            #
+            # So this is a gate fix, and gate is where a thread sat in an SSL read inside
+            # fetch_future_markets at the end of the Windows test run. It is NOT a general
+            # speed-up, and the Windows session measured that correctly: with bybit configured,
+            # the self-test timings did not move. An earlier version of this comment claimed it
+            # spared bybit four market types; that was wrong about bybit.
+            #
+            # And load_markets() caches on the exchange OBJECT, so even on gate the saving is
+            # paid once per object, not per call - every new MarketData (the price feed builds
+            # one on each restart; the engine and the scanner build their own), up to six times
+            # over when the fallback chain walks. Steady-state candle and price throughput is
+            # unchanged. What it buys is that a source nothing here trades cannot hang a thread.
             params: dict = {"enableRateLimit": True, "timeout": 20000,
                             "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}}
             params.update(ccxt_proxy_params(self.settings))

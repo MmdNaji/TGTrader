@@ -918,6 +918,21 @@ def test_the_spot_only_option_is_in_the_shape_ccxt_actually_reads():
     loose.fetch_markets()
     assert len(seen) == 4, "the list form was supposed to be the bug; it no longer is"
 
+    # bybit is NOT affected either way, and that is worth pinning: the Windows session measured
+    # no change in the self-test timings after this fix, and this is why - bybit is the
+    # configured source there. Nobody should come back expecting a speed-up from this.
+    both = []
+    for opt in (["spot"], {"types": ["spot"]}):
+        ex2 = ccxt.bybit({"options": {"defaultType": "spot", "fetchMarkets": opt}})
+        got = []
+        for name in ("fetch_spot_markets", "fetch_swap_markets", "fetch_future_markets",
+                     "fetch_option_markets"):
+            if hasattr(ex2, name):
+                setattr(ex2, name, (lambda n: (lambda *a, **k: (got.append(n), [])[1]))(name))
+        ex2.fetch_markets()
+        both.append(got)
+    assert both[0] == both[1] == ["fetch_spot_markets"], f"bybit behaviour: {both}"
+
 
 def test_no_test_can_reach_the_network():
     """A GUI test builds a real window and its chart page starts a candle fetch. On Windows that
