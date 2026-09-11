@@ -1558,3 +1558,38 @@ def test_the_scale_out_is_off_unless_asked_for():
         assert eng._maybe_scale_out(pos, 200.0) is False, "it acted with the setting at zero"
     finally:
         db.close()
+
+
+def test_a_scale_out_that_would_bank_a_loss_does_not_happen():
+    """Driven on the real engine at a 0.02R threshold, the sale booked -0.045: the gross gain on
+    the half sold was 0.017 and the fees were 0.06. The accounting was right and the ACTION was
+    wrong - that is banking a loss and calling it taking profit.
+
+    So the gain on the part being sold must clear what selling it costs, the same guard the
+    entry already applies to a target that does not clear the round trip. At a sensible
+    threshold it never fires; at a silly one it is what stops the setting from bleeding."""
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.risk.capital_limit = 1000; s.paper_start_balance = 2000
+    s.risk.partial_take_frac = 0.5
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_scale_fee.db")
+    try:
+        pb = PaperBroker(2000); pb.reset(2000)
+        eng = Engine(s, db, broker=pb)
+        pb.market_order("X/Y", "buy", 10.0, 100.0)
+        tid = db.open_trade("paper", "X/Y", "long", 10.0, 100.0, 90.0, 125.0, "t", "r",
+                            entry_fee=1.0)
+        pos = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+
+        # a threshold so small the move cannot pay for the sale: 0.02R on a 10-point risk is
+        # 0.2 points on 5 units = 1.0 gross, against a round trip of 2 * 0.001 * 100.2 * 5 ≈ 1.0
+        s.risk.partial_take_r = 0.02
+        assert eng._maybe_scale_out(pos, 100.2) is False, "it banked a loss and called it profit"
+        assert db.one("SELECT part_qty FROM trades WHERE id=?", (tid,))["part_qty"] is None
+
+        # and at a real threshold the same trade scales out normally
+        s.risk.partial_take_r = 1.0
+        assert eng._maybe_scale_out(pos, 111.0) is True
+        row = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+        assert row["part_pnl"] > 0, "a scale-out at 1R should bank real money"
+    finally:
+        db.close()

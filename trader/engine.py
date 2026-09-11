@@ -606,6 +606,14 @@ class Engine:
             sell = (int(sell / step)) * step
         if sell <= 0 or (min_qty and sell < min_qty) or qty - sell <= 0:
             return False                      # not enough to split without leaving dust
+        # The gain on the part being sold has to clear what selling it COSTS, by a real margin.
+        # Without this, a small partial_take_r banks a loss every time and calls it taking
+        # profit: driven on the real engine at 0.02R, the sale booked -0.045 - the gross gain
+        # was 0.017 and the fees were 0.06. It is the same guard the entry already applies to a
+        # target that does not clear the round trip, and it is why that guard exists.
+        round_trip = 2.0 * self.fee_rate() * price * sell
+        if gain * sell <= 2.0 * round_trip:
+            return False
         with self._trade_lock:
             row = self.db.one("SELECT status, qty, part_qty FROM trades WHERE id=?", (pos["id"],))
             if not row or row["status"] != "open" or row["part_qty"] is not None:
