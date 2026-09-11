@@ -39,6 +39,8 @@ class BtTrade:
     reason: str = ""
     entry_fee: float = 0.0
     init_stop: float = 0.0     # the stop the trade was opened with; R is measured from this
+    part_pnl: float = 0.0      # booked by a scale-out, before the rest of the trade closed
+    scaled: bool = False
 
 
 @dataclass
@@ -93,7 +95,8 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                  strategies: list[Strategy] | None = None, fee_rate: float = 0.001, slippage: float = 0.0005,
                  warmup: int = 60, allow_short: bool = True,
                  leader_regimes: pd.Series | None = None, min_confidence: float = 0.0,
-                 position_pct: float = 0.0, cooldown_bars: float = 2.0) -> BtResult:
+                 position_pct: float = 0.0, cooldown_bars: float = 2.0,
+                 partial_at_r: float = 0.0, partial_frac: float = 0.5) -> BtResult:
     """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
     a long is refused while the leader is in ``trend_down`` and a short while it is in
     ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
@@ -102,6 +105,16 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
     ``min_confidence`` is the live engine's confidence gate (0.55 on "normal", 0.4 on "high",
     0 on "scalp"). Without it the backtest trades signals the engine refuses, which is how a
     backtest ends up describing a strategy nobody is running.
+
+    ``partial_at_r`` sells ``partial_frac`` of the position once it is that many R in profit
+    and moves the stop to break-even, letting the rest run. OFF by default. It is here to be
+    MEASURED, not because it is known to help: it should raise the win rate, because a trade
+    that reaches 1R books something either way, and it should cut the big winners short, which
+    is where a trend system makes its money. Which of those wins is a question for the numbers.
+
+    Within one bar the order of events is unknowable, so the stop is checked BEFORE the
+    scale-out: if a bar's range covers both, the trade is assumed to have lost. Assuming the
+    other way makes every ambiguous bar a win and is how a scale-out flatters itself.
 
     ``position_pct`` mirrors the setting of the same name. It matters more than it looks:
     sizing by notional ignores the stop distance, and measured over 8 coins it turned -4% into
@@ -157,6 +170,23 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 if (t.side == "long" and reg_now == "trend_down") or \
                    (t.side == "short" and reg_now == "trend_up"):
                     exit_px, why = c, "regime flipped"
+            if exit_px is None and partial_at_r > 0 and not t.scaled:
+                r_dist0 = abs(t.entry - (t.init_stop or t.stop))
+                mark = (t.entry + partial_at_r * r_dist0) if t.side == "long" \
+                    else (t.entry - partial_at_r * r_dist0)
+                hit = (h >= mark) if t.side == "long" else (l <= mark)
+                if r_dist0 and hit:
+                    px_out = mark * (1 - slippage) if t.side == "long" else mark * (1 + slippage)
+                    part_qty = t.qty * partial_frac
+                    gain = (px_out - t.entry) * part_qty if t.side == "long" \
+                        else (t.entry - px_out) * part_qty
+                    # the entry fee was charged on the whole position; this half pays its share
+                    t.part_pnl = gain - part_qty * px_out * fee_rate - t.entry_fee * partial_frac
+                    t.qty -= part_qty
+                    t.entry_fee *= (1 - partial_frac)
+                    t.stop = t.entry          # the rest cannot lose money from here
+                    t.scaled = True
+                    equity += t.part_pnl
             if exit_px is None:
                 # R from the ORIGINAL stop. Measuring it from the already-trailed stop shrinks it
                 # every bar, so the stop walks into the price and closes every winner for nothing.
@@ -168,9 +198,13 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 exit_px = exit_px * (1 - slippage) if t.side == "long" else exit_px * (1 + slippage)
                 pnl = (exit_px - t.entry) * t.qty if t.side == "long" else (t.entry - exit_px) * t.qty
                 pnl -= t.qty * exit_px * fee_rate + t.entry_fee   # both fees belong to the trade
+                pnl += t.part_pnl          # whatever a scale-out already banked
                 t.exit, t.exit_i, t.pnl = exit_px, i, pnl
+                # R against the risk the trade was OPENED with, not what is left of it after a
+                # scale-out - otherwise selling half doubles the reported R of the same move.
                 r_dist = abs(t.entry - (t.init_stop or t.stop))
-                t.r = pnl / (t.qty * r_dist) if r_dist else 0.0
+                full_qty = t.qty / (1 - partial_frac) if (t.scaled and partial_frac < 1) else t.qty
+                t.r = pnl / (full_qty * r_dist) if r_dist else 0.0
                 t.reason += f" -> {why}"
                 equity += pnl + t.entry_fee   # entry fee was already taken from equity when the trade opened
                 res.trades.append(t)

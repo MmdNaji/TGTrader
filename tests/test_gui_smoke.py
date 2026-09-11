@@ -1663,3 +1663,21 @@ def test_the_decisions_table_keeps_which_coin_and_why():
     # elided somewhere, so the fix is being able to read it rather than pretending it fits
     assert t.item(0, 5).toolTip() == row[5]
     win.close(); win.deleteLater()
+
+
+def test_the_scale_out_setting_reaches_the_file(win):
+    """The ATR stop multiple sat on this page deciding nothing for weeks, and a default moved on
+    evidence never reached the owner because the saved file wins. So a new money setting is
+    checked through the real save and a reload from disk, not by reading the widget back."""
+    from trader.config import Settings as _S
+    win.goto("settings")
+    QApplication.instance().processEvents()
+    win.s_partial.setValue(1.0)
+    win._save_settings()
+    QApplication.instance().processEvents()
+    assert win.settings.risk.partial_take_r == 1.0
+    assert _S.load().risk.partial_take_r == 1.0, "the scale-out setting did not survive a reload"
+    win.s_partial.setValue(0.0)
+    win._save_settings()
+    QApplication.instance().processEvents()
+    assert _S.load().risk.partial_take_r == 0.0, "and it must switch back off"

@@ -106,13 +106,23 @@ class PaperBroker(Broker):
                 self._cash -= margin + fee
                 self._positions[symbol] = {"side": "short", "qty": qty, "price": px}
         else:
-            # closing (the engine always closes the whole position)
+            # closing - possibly only PART of it. A scale-out sells half and leaves the rest
+            # running, so the position must be reduced rather than removed; deleting it here
+            # for a partial sell would hand the account the whole notional back and leave a
+            # trade the journal still thinks is open with nothing behind it.
+            held = float(pos["qty"])
+            qty = min(float(qty), held)          # never sell more than is held
             if pos["side"] == "long" and side == "sell":
                 self._cash += qty * px - fee
             elif pos["side"] == "short" and side == "buy":
-                self._cash += pos["qty"] * pos["price"] + (pos["price"] - px) * qty - fee
+                # release this share of the margin, then settle this share's move
+                self._cash += qty * pos["price"] + (pos["price"] - px) * qty - fee
             else:
                 raise RuntimeError("paper: adding to a position is not supported")
-            del self._positions[symbol]
+            left = held - qty
+            if left > 1e-12:
+                pos["qty"] = left
+            else:
+                del self._positions[symbol]
         self._save()
         return Fill(symbol, side, qty, px, fee, order_id=f"paper-{int(time.time()*1000)}")

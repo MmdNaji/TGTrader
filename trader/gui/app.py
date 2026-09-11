@@ -1702,6 +1702,8 @@ class MainWindow(QMainWindow):
         self.s_atr = QDoubleSpinBox(); self.s_atr.setRange(0.5, 6); self.s_atr.setValue(s.risk.atr_stop_mult)
         self.s_rr = QDoubleSpinBox(); self.s_rr.setRange(0.5, 10); self.s_rr.setValue(s.risk.reward_risk)
         self.s_trail = QDoubleSpinBox(); self.s_trail.setRange(0, 5); self.s_trail.setValue(s.risk.trail_after_r)
+        self.s_partial = QDoubleSpinBox(); self.s_partial.setRange(0, 5); self.s_partial.setSingleStep(0.5)
+        self.s_partial.setValue(getattr(s.risk, "partial_take_r", 0.0))
         c3.add(FormRow(LABELS["capital_limit"], self.s_cap, "ربات هرگز بیش از این مبلغ را درگیر نمی‌کند"))
         c3.add(FormRow(LABELS["risk_per_trade"], self.s_rpt, "حداکثر ضرر یک معامله، درصدی از سقف. ۱٪ = با سقف ۱۰۰ دلار، ۱ دلار"))
         c3.add(FormRow(LABELS["position_pct"], self.s_pospct,
@@ -1736,6 +1738,16 @@ class MainWindow(QMainWindow):
                        "ستاپ حساب می‌کنند، پس این عدد برای آن‌ها هیچ تأثیری ندارد. "
                        "در جاروی ۱.۵ تا ۳ روی ۲۱ ارز و ۱۰۰۰ کندل روزانه، هر چهار مقدار نتیجه‌ی "
                        "کاملاً یکسان دادند."))
+        c3.add(FormRow("برداشت نصف پوزیشن در (R)", self.s_partial,
+                       "وقتی معامله این‌قدر برابرِ ریسکش در سود رفت، نصفش فروخته می‌شود و حد ضرر "
+                       "روی نقطه‌ی سربه‌سر می‌رود. ۰ = خاموش.\n"
+                       "این یک معامله‌ی دوسویه است، نه بهبود. روی ۲۱ ارز و ~۱۰۰۰ کندل روزانه، "
+                       "چهار تقسیم مستقل:\n"
+                       "• خاموش: بدترین نرخ برد ۳۹.۶٪، بدترین بازده ‎+۳.۴R‎، بیشترین افت ۱۸.۱R\n"
+                       "• نصف در ۱R: نرخ برد ۴۶.۲٪، بازده ‎+۳.۰R‎، افت ۱۴.۰R — برد بیشتر و افت "
+                       "کم‌عمق‌تر، به قیمت حدود ۱۲٪ از سود\n"
+                       "• نصف در ۱.۵R: نرخ برد ۴۱.۵٪، بازده ‎+۶.۹R‎، افت ۱۶.۹R — بیشترین سود\n"
+                       "هیچ‌کدام غلط نیست؛ بستگی دارد از چه چیزی می‌خواهی فرار کنی."))
         c3.add(FormRow("نسبت سود به ضرر", self.s_rr,
                        "هدف = این عدد × فاصله‌ی حد ضرر.\n"
                        "روی ۲۱ ارز نقدشونده و ۱۰۰۰ کندل روزانه با کارمزد و لغزش واقعی: عدد ۲ در یک "
@@ -1850,6 +1862,7 @@ class MainWindow(QMainWindow):
         s.risk.capital_limit = self.s_cap.value(); s.risk.risk_per_trade = self.s_rpt.value() / 100; s.risk.max_daily_loss = self.s_dl.value() / 100
         s.position_pct = self.s_pospct.value()
         s.risk.max_open_positions = self.s_maxpos.value(); s.risk.atr_stop_mult = self.s_atr.value(); s.risk.reward_risk = self.s_rr.value()
+        s.risk.partial_take_r = self.s_partial.value()
         s.auto_symbols = self.s_auto_sym.isChecked()
         s.auto_symbols_count = self.s_auto_n.value()
         s.auto_symbols_every_min = self.s_auto_every.value()

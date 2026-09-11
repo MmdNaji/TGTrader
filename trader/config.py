@@ -81,6 +81,23 @@ class RiskSettings:
     # stop x3 lifted the first half's win rate to 50% and took the second half to +20 from
     # +218. That is a rule fitted to a date, and it is the shape to watch for here.
     reward_risk: float = 2.5
+    # Sell part of a position once it is this many R in profit and move the stop to break-even,
+    # letting the rest run. 0 = off, and off is the default because it is a TRADE-OFF, not an
+    # improvement. Measured on 21 liquid pairs and ~1,000 daily bars, four independent splits,
+    # portfolio of at most 4 open, scored in R:
+    #
+    #                  worst win%   worst net   worst drawdown   longest wait
+    #   off               39.6%       +3.4R         18.1R           352 days
+    #   half at 1.0R      46.2%       +3.0R         14.0R           369 days
+    #   half at 1.5R      41.5%       +6.9R         16.9R           369 days
+    #
+    # So 1.0R buys a better win rate in every split and a 23% shallower drawdown, and pays
+    # about 12% of the return for it. 1.5R doubles the worst split's return and leaves the win
+    # rate alone. Neither is free and neither is wrong - which one is right depends on what the
+    # owner is actually trying to avoid, so the app states the numbers and does not choose.
+    partial_take_r: float = 0.0
+    partial_take_frac: float = 0.5     # how much of the position to sell at that point
+
     # Trailing stop kicks in once the trade is this many R in profit (0 = off).
     trail_after_r: float = 1.0
     # Largest single position as a fraction of the capital limit. 25%, not 50%: at a half the
@@ -348,6 +365,10 @@ class Settings:
             problems.append("position_pct must be between 0 and 100")
         if self.risk.reward_risk <= 0:
             problems.append("reward_risk must be positive")
+        if self.risk.partial_take_r < 0:
+            problems.append("partial_take_r cannot be negative")
+        if not (0.05 <= self.risk.partial_take_frac <= 0.95):
+            problems.append("partial_take_frac must be between 0.05 and 0.95")
         if self.loop_seconds < 1:
             problems.append("loop_seconds must be at least 1")
         if self.auto_symbols:

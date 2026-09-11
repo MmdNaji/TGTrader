@@ -559,6 +559,8 @@ class Engine:
             regime = detect_regime(df.iloc[:-1] if len(df) > 80 else df)
             if (side == "long" and regime == "trend_down") or (side == "short" and regime == "trend_up"):
                 why = "regime flipped"
+        if why is None and self._maybe_scale_out(pos, price):
+            return False          # part banked, the rest keeps running with a break-even stop
         if why is None:
             init_stop = pos.get("init_stop")
             new_stop = self.risk.trail_stop(side, entry, stop, price,
@@ -571,6 +573,68 @@ class Engine:
         # bar made a two-bar cooldown last three outside scalp mode.
         closed_ts = float(df.index[-2].timestamp()) if len(df) > 1 else float(df.index[-1].timestamp())
         return self.close_position(pos, price, why, bar_ts=closed_ts, df=df)
+
+    def _maybe_scale_out(self, pos: dict, price: float) -> bool:
+        """Sell part of a winner at a set multiple of its risk and move the stop to break-even.
+
+        OFF unless partial_take_r is set. It is a trade-off rather than an improvement, and the
+        numbers are in config.py: taking half at 1R raised the win rate in every one of four
+        splits and cut the worst drawdown by 23%, and cost about 12% of the return.
+
+        Two things here are load-bearing. The sale goes through the SAME lock as every other
+        open and close, because it is a partial close and two of them racing would sell the
+        position twice. And the database write is what decides it happened - if the row does
+        not update, the fill is still real, so the trade is closed rather than left with the
+        journal and the broker disagreeing about how much is held.
+        """
+        want_r = float(getattr(self.settings.risk, "partial_take_r", 0.0) or 0.0)
+        if want_r <= 0 or pos.get("part_qty"):
+            return False                      # off, or this trade has already scaled out
+        side, entry = pos["side"], float(pos["entry_price"])
+        init_stop = pos.get("init_stop") or pos.get("stop_price")
+        r_dist = abs(entry - float(init_stop)) if init_stop else 0.0
+        if r_dist <= 0:
+            return False
+        gain = (price - entry) if side == "long" else (entry - price)
+        if gain < want_r * r_dist:
+            return False
+        frac = float(getattr(self.settings.risk, "partial_take_frac", 0.5) or 0.5)
+        qty = float(pos["qty"])
+        sell = qty * frac
+        min_qty, step = self.broker.limits(pos["symbol"])
+        if step:
+            sell = (int(sell / step)) * step
+        if sell <= 0 or (min_qty and sell < min_qty) or qty - sell <= 0:
+            return False                      # not enough to split without leaving dust
+        with self._trade_lock:
+            row = self.db.one("SELECT status, qty, part_qty FROM trades WHERE id=?", (pos["id"],))
+            if not row or row["status"] != "open" or row["part_qty"] is not None:
+                return False
+            try:
+                fill = self.broker.market_order(pos["symbol"], "sell" if side == "long" else "buy",
+                                                sell, price, close=True)
+            except Exception as exc:
+                self.log(f"scale-out failed on {pos['symbol']}: {exc}", "warn")
+                return False
+            gross = ((fill.price - entry) if side == "long" else (entry - fill.price)) * fill.qty
+            entry_fee = float(pos.get("entry_fee") or 0.0)
+            banked = gross - fill.fee - entry_fee * frac
+            if not self.db.scale_out(int(pos["id"]), fill.qty, banked, entry):
+                # The sale happened and the journal did not record it. Closing the rest is the
+                # only state both sides can agree on.
+                self.log(f"{pos['symbol']}: scale-out sold {fill.qty:g} but the journal did not "
+                         f"record it - closing the remainder", "error")
+                self.close_position(pos, price, "scale-out mismatch")
+                return True
+        pos["qty"] = qty - fill.qty
+        pos["part_qty"] = qty
+        pos["stop_price"] = entry
+        self.db.add_decision(pos["symbol"], "close", None, "risk",
+                             f"نصف پوزیشن در {want_r:g}R برداشته شد، حد ضرر روی نقطه‌ی سربه‌سر",
+                             {"banked": banked, "sold": fill.qty, "left": pos["qty"]})
+        self.log(f"SCALE-OUT {pos['symbol']} sold {fill.qty:g} of {qty:g} @ {fill.price:g} "
+                 f"banked={banked:+.4f} stop -> break-even {entry:g}")
+        return True
 
     def _manage_on_price_alone(self, pos: dict) -> bool:
         """Stop and target only, from the live price, when candles are unavailable.
@@ -640,12 +704,20 @@ class Engine:
             # BOTH fees. Charging only the exit made every trade look better than it was, and
             # the daily-loss limit was measured against those inflated numbers.
             entry_fee = float(pos.get("entry_fee") or 0.0)
-            pnl = gross - fill.fee - entry_fee
+            # Whatever a scale-out already banked is part of THIS trade's result. Without it a
+            # trade that took half off at 1R and then stopped at break-even reports a small loss
+            # while the account is up.
+            banked = float(pos.get("part_pnl") or 0.0)
+            pnl = gross - fill.fee - entry_fee + banked
             # R is measured from the ORIGINAL stop. From the trailed stop, a winner that trailed
             # to break-even reports an infinite R and the statistics become meaningless.
             init_stop = pos.get("init_stop") or pos.get("stop_price")
             r_dist = abs(entry - float(init_stop)) if init_stop else 0.0
-            r = pnl / (fill.qty * r_dist) if r_dist and fill.qty else None
+            # ...and against the size the trade was OPENED with. Dividing by what is LEFT after
+            # a scale-out doubles the reported R of the same move, and every statistic built on
+            # R - average R, the backtest comparison, the whole trades page - inflates with it.
+            risk_qty = float(pos.get("part_qty") or fill.qty)
+            r = pnl / (risk_qty * r_dist) if r_dist and risk_qty else None
             if not self.db.close_trade(pos["id"], fill.price, pnl, r):
                 return False
         if why == "stop":

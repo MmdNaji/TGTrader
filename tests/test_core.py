@@ -1490,3 +1490,71 @@ def test_old_analyses_keep_their_words_and_lose_their_picture():
         assert db.size_bytes() > 0
     finally:
         db.close()
+
+
+def test_taking_half_off_banks_it_and_does_not_inflate_R():
+    """A scale-out sells part of a winner and moves the stop to break-even. Two things have to
+    hold or the numbers lie in the owner's favour:
+
+    the money banked belongs to THIS trade - without it a position that took half off at 1R and
+    then stopped at break-even reports a small loss while the account is up - and R must be
+    measured against the size the trade was OPENED with, because dividing by what is left after
+    selling half doubles the reported R of the same move, and every statistic built on R
+    inflates with it.
+
+    Measured before it was built, four splits: half at 1R raised the win rate in every one and
+    cut the worst drawdown 18.1R -> 14.0R, and cost about 12% of the return. It is a trade-off,
+    which is why it ships off."""
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.risk.capital_limit = 1000; s.paper_start_balance = 2000
+    s.risk.partial_take_r = 1.0; s.risk.partial_take_frac = 0.5
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_scale.db")
+    try:
+        pb = PaperBroker(2000); pb.reset(2000)
+        eng = Engine(s, db, broker=pb)
+        logs = []
+        eng.log = lambda m, lvl="info": logs.append(m)
+
+        # a long at 100 with a stop at 90: 1R is 10 points
+        pb.market_order("X/Y", "buy", 10.0, 100.0)
+        tid = db.open_trade("paper", "X/Y", "long", 10.0, 100.0, 90.0, 125.0, "test", "r",
+                            entry_fee=1.0)
+        pos = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+
+        assert eng._maybe_scale_out(pos, 105.0) is False, "scaled out below 1R"
+        assert eng._maybe_scale_out(pos, 111.0) is True, "1R came and went with no scale-out"
+        row = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+        assert row["qty"] == pytest.approx(5.0), "half was not sold"
+        assert row["part_qty"] == pytest.approx(10.0), "the original size was not kept"
+        assert row["part_pnl"] > 0, "a profitable scale-out banked nothing"
+        assert row["stop_price"] == pytest.approx(100.0), "the stop did not go to break-even"
+        # and it cannot happen twice
+        assert eng._maybe_scale_out(dict(row), 130.0) is False
+
+        # now the rest stops at break-even: the trade must still be a WINNER overall
+        pos2 = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+        eng.close_position(pos2, 100.0, "stop")
+        done = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+        assert done["status"] == "closed"
+        assert done["pnl"] > 0, (f"banked {row['part_pnl']:.4f} at 1R and the trade reports "
+                                 f"{done['pnl']:.4f} - the scale-out was not counted")
+        # R against the ORIGINAL 10 units and a 10-point risk, so ~0.5R, not ~1.0R
+        assert 0.2 < done["r_multiple"] < 0.8, f"R came out {done['r_multiple']:.3f}"
+        assert any("SCALE-OUT" in m for m in logs)
+    finally:
+        db.close()
+
+
+def test_the_scale_out_is_off_unless_asked_for():
+    """It is a trade-off, not an improvement: it buys a better win rate and a shallower
+    drawdown and pays about 12% of the return. Nothing turns that on for the owner."""
+    s = Settings()
+    assert s.risk.partial_take_r == 0.0
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_scale_off.db")
+    try:
+        eng = Engine(s, db, broker=PaperBroker(1000))
+        pos = {"id": 1, "symbol": "X/Y", "side": "long", "qty": 10.0, "entry_price": 100.0,
+               "init_stop": 90.0, "stop_price": 90.0, "entry_fee": 0.0}
+        assert eng._maybe_scale_out(pos, 200.0) is False, "it acted with the setting at zero"
+    finally:
+        db.close()

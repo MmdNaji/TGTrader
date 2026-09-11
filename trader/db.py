@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS trades (
     stop_price REAL,
     init_stop REAL,                    -- the stop the trade OPENED with; R is measured from this
     entry_fee REAL,                    -- fee paid on entry, subtracted when the trade closes
+    part_pnl REAL,                     -- banked by a scale-out, before the rest was closed
+    part_qty REAL,                     -- how much the trade STARTED with, if some was sold early
     take_profit REAL,
     exit_price REAL,
     pnl REAL,
@@ -111,7 +113,7 @@ class Database:
         with self._lock:
             self._conn.executescript(SCHEMA)
             # migrate databases created before these columns existed
-            for col in ("init_stop", "entry_fee"):
+            for col in ("init_stop", "entry_fee", "part_pnl", "part_qty"):
                 try:
                     self._conn.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
                 except sqlite3.OperationalError:
@@ -240,6 +242,23 @@ class Database:
             " WHERE id=? AND status='open'",
             (exit_price, pnl, r_multiple, time.time(), trade_id),
         )
+        return cur.rowcount > 0
+
+    def scale_out(self, trade_id: int, sold_qty: float, banked: float, new_stop: float) -> bool:
+        """Book part of a position and leave the rest running, in one statement.
+
+        `part_qty` keeps the ORIGINAL size. Without it, R at the close would be measured
+        against whatever is left - selling half would double the reported R of the same move,
+        and every statistic built on R would quietly inflate from the day this is switched on.
+
+        Guarded on `qty > sold_qty` so a scale-out can never take a position to zero or below,
+        and on status='open' so it cannot touch a trade something else has already closed.
+        """
+        cur = self.execute(
+            "UPDATE trades SET qty = qty - ?, part_pnl = COALESCE(part_pnl,0) + ?,"
+            " part_qty = COALESCE(part_qty, qty), stop_price = ?"
+            " WHERE id = ? AND status = 'open' AND qty > ?",
+            (sold_qty, banked, new_stop, trade_id, sold_qty))
         return cur.rowcount > 0
 
     def update_stop(self, trade_id: int, stop: float) -> None:
