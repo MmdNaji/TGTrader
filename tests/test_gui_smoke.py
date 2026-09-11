@@ -1415,8 +1415,25 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
             if sum(t.columnWidth(c) for c in range(t.columnCount())) >= t.viewport().width() - 2:
                 tight += 1
             if why:
-                bad[(rows, w)] = "; ".join(why)
-    assert not bad, f"the positions table was unreadable here: {bad}"
+                card = t.parentWidget()
+                while card is not None and card.objectName() not in ("card", "cardAccent"):
+                    card = card.parentWidget()
+                # Everything needed to tell a layout problem from a measurement problem, in the
+                # failure itself. Twice today a number from here disagreed with three other
+                # measurements on the same machine and the argument took a round trip each time;
+                # a failure that cannot say what it saw costs more than the bug.
+                bad[(rows, w)] = (
+                    f"{'; '.join(why)} | asked {w} got {win.width()} min {win.minimumWidth()} "
+                    f"card {card.width() if card else -1} table {t.width()} "
+                    f"vp {t.viewport().width()}x{t.viewport().height()} "
+                    f"cols {[t.columnWidth(c) for c in range(t.columnCount())]} "
+                    f"sum {sum(t.columnWidth(c) for c in range(t.columnCount()))} "
+                    f"hbar {t.horizontalScrollBar().isVisible()}/{t.horizontalScrollBar().maximum()} "
+                    f"vbar {t.verticalScrollBar().isVisible()} shown {t.isVisible()}")
+    assert not bad, (
+        "the positions table was unreadable here:\n  "
+        + "\n  ".join(f"{k}: {v}" for k, v in bad.items())
+        + f"\nviewport widths seen across the sweep: {sorted(seen_vp)}")
     # This test passed for a while while proving nothing, because the suite was not applying
     # the application stylesheet: without it the columns fit at every width with room to spare
     # and the failing case was never reached. The fixture applies theme.QSS now, and this
