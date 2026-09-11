@@ -230,22 +230,23 @@ class Settings:
         out: list[str] = []
         r = self.risk
         L = LABELS
+        # Kept SHORT on purpose. These are shown in a banner across the top of the dashboard,
+        # and the first version of the risk one ran to 330 characters - a paragraph in a strip
+        # that is one or two lines tall. A warning that does not fit is a warning nobody reads.
+        # Every one of them names the field and says what to set; the arithmetic lives in the
+        # field's own help text on the settings page, where there is room for it.
         if r.max_open_risk > 0 and r.risk_per_trade > r.max_open_risk:
             out.append(
-                f"«{L['risk_per_trade']}» {r.risk_per_trade*100:.1f}٪ است ولی "
-                f"«{L['max_open_risk']}» {r.max_open_risk*100:.1f}٪ - یعنی بعد از اولین معامله "
-                f"بودجه‌ی ریسک تمام می‌شود و بقیه رد می‌شوند. "
-                f"«{L['risk_per_trade']}» را روی {r.max_open_risk*100/3:.0f}٪ یا کمتر بگذار."
-                f"   (تنظیمات ← ریسک)")
+                f"«{L['risk_per_trade']}» {r.risk_per_trade*100:.1f}٪ از «{L['max_open_risk']}» "
+                f"{r.max_open_risk*100:.1f}٪ بیشتر است — بعد از اولین معامله بودجه تمام می‌شود. "
+                f"روی {r.max_open_risk*100/3:.0f}٪ یا کمتر بگذار.")
         if r.max_position_frac > 0 and r.max_open_positions > 1:
             fits = int(1 / r.max_position_frac)
             if fits < r.max_open_positions:
                 out.append(
-                    f"«{L['max_open_positions']}» {r.max_open_positions} است ولی "
-                    f"«{L['max_position_frac']}» {r.max_position_frac*100:.0f}٪ - نقدینگی فقط به "
-                    f"حدود {fits} پوزیشن می‌رسد. برای {r.max_open_positions} پوزیشن، "
-                    f"«{L['max_position_frac']}» را حدود {100//max(r.max_open_positions,1)}٪ بگذار."
-                    f"   (تنظیمات ← ریسک)")
+                    f"«{L['max_open_positions']}» {r.max_open_positions} است ولی نقدینگی با "
+                    f"«{L['max_position_frac']}» {r.max_position_frac*100:.0f}٪ فقط به {fits} "
+                    f"پوزیشن می‌رسد. {100//max(r.max_open_positions,1)}٪ بگذار.")
         # A setting that looks like it controls risk and does not. Position size is the SMALLER
         # of "risk this fraction of capital" and "never exceed this fraction of capital as
         # notional". The second is a fraction of PRICE and the first a fraction of the STOP
@@ -257,17 +258,12 @@ class Settings:
             need = r.risk_per_trade / r.max_position_frac
             if need > 0.25:
                 out.append(
-                    f"«{L['risk_per_trade']}» {r.risk_per_trade*100:.1f}٪ عملاً اثری ندارد: "
-                    f"«{L['max_position_frac']}» {r.max_position_frac*100:.1f}٪ زودتر اندازه را "
-                    f"می‌بندد. برای اینکه آن عدد به کار بیفتد، حد ضرر باید "
-                    f"{need*100:.0f}٪ قیمت فاصله داشته باشد که واقعی نیست. "
-                    f"ریسک واقعی هر معامله ≈ «{L['max_position_frac']}» × فاصله‌ی حد ضرر است "
-                    f"— با حد ضرر ۱۰٪، حدود {r.max_position_frac*10:.2f}٪ سرمایه."
-                    f"   (تنظیمات ← ریسک)")
+                    f"«{L['risk_per_trade']}» {r.risk_per_trade*100:.1f}٪ اثری ندارد — "
+                    f"«{L['max_position_frac']}» {r.max_position_frac*100:.1f}٪ زودتر می‌بندد. "
+                    f"ریسک واقعی ≈ {r.max_position_frac*10:.2f}٪.")
         if len(self.symbols) > r.max_open_positions:
-            out.append(f"{len(self.symbols)} نماد در «{L['symbols']}» داری ولی "
-                       f"«{L['max_open_positions']}» {r.max_open_positions} است - بقیه فقط "
-                       f"بررسی می‌شوند و معامله‌ای رویشان باز نمی‌شود.   (تنظیمات ← ریسک)")
+            out.append(f"{len(self.symbols)} نماد داری ولی «{L['max_open_positions']}» "
+                       f"{r.max_open_positions} است — بقیه فقط بررسی می‌شوند.")
         return out
 
     def validate(self) -> list[str]:

@@ -3,6 +3,7 @@ the app reported a new one. These tests exist so it cannot come back by accident
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -74,3 +75,33 @@ def test_a_release_candidate_never_outranks_its_own_release():
     assert updater._vtuple("0.5.0-rc1") == updater._vtuple("0.5.0")
     assert updater._vtuple("0.5.1") > updater._vtuple("0.5.0-rc9")
     assert updater._vtuple("0.5.0+build7") == updater._vtuple("0.5.0")
+
+
+def test_windows_output_is_reconfigured_to_utf8(monkeypatch):
+    """On Windows, a stdout that is not a console falls back to the ANSI code page, and every
+    message this app prints is Persian. `TGTrader.exe selftest > log.txt` died with
+    UnicodeEncodeError and exit code 1 - only ever when the output was captured, which is
+    exactly when nobody is watching."""
+    class Stream:
+        def __init__(self): self.kw = None
+        def reconfigure(self, **kw): self.kw = kw
+
+    class Deaf:
+        """A --windowed build's stdout: no reconfigure at all."""
+
+    class Angry:
+        def reconfigure(self, **kw): raise ValueError("cannot reconfigure")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    a, b = Stream(), Stream()
+    run.use_utf8_output((a, b))
+    assert a.kw == {"encoding": "utf-8", "errors": "replace"}, a.kw
+    assert b.kw == a.kw
+    # neither of these may raise: a windowed build and a locked stream both have to survive
+    run.use_utf8_output((Deaf(), Angry()))
+
+    # and it does nothing off Windows, where UTF-8 is already the default
+    monkeypatch.setattr(sys, "platform", "linux")
+    c = Stream()
+    run.use_utf8_output((c,))
+    assert c.kw is None

@@ -13,6 +13,36 @@ import shutil
 import sys
 
 
+def use_utf8_output(streams=None) -> None:
+    """Make stdout and stderr speak UTF-8 on Windows.
+
+    When stdout is NOT a console - a pipe, a file, another process - Python on Windows falls
+    back to the ANSI code page (cp1252 here) instead of UTF-8. Every message this app prints is
+    Persian, so the first one raises UnicodeEncodeError and the process exits 1 with an error
+    that names an encoding nobody chose.
+
+    It only shows up when the output is captured, which is exactly when nobody is watching:
+        TGTrader.exe selftest > log.txt      -> a crash instead of a report
+        run.py paper > paper.log             -> same
+        any CI or wrapper that reads the output
+    Straight in a console it works, and on Linux UTF-8 is the default - so neither the machine
+    that wrote it nor the machine that ran it interactively could see it.
+
+    reconfigure() is a no-op on a stream that is already UTF-8, and errors="replace" means a
+    stream that cannot be reconfigured at all still prints something rather than dying.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    for stream in (streams if streams is not None else (sys.stdout, sys.stderr)):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue          # a --windowed build has no real stdout to reconfigure
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def _data_dir() -> str:
     override = os.environ.get("TGTRADER_HOME")
     if override:
@@ -32,6 +62,7 @@ def clear_stale_overlay() -> None:
 
 
 if __name__ == "__main__":
+    use_utf8_output()          # before anything can print
     clear_stale_overlay()
     if len(sys.argv) > 1:
         from trader.cli import main as cli_main

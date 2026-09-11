@@ -1118,3 +1118,22 @@ def test_it_says_when_the_risk_setting_can_never_actually_bind():
     assert not [a for a in ok.advisories() if "اثری ندارد" in a], ok.advisories()
     sz2 = RiskManager(ok.risk, None, "paper").size("long", 100.0, 8.0, 1000.0)
     assert abs(sz2.risk_amount - 10.0) < 1e-6, "here the 1% risk target really is what binds"
+
+
+def test_advisories_are_short_enough_to_read_in_a_banner():
+    """They are shown in a strip across the top of the dashboard. The first version of the
+    risk one ran to 330 characters - a paragraph in a space one or two lines tall - and a
+    warning that does not fit is a warning nobody reads. The arithmetic belongs in the field's
+    own help text, where there is room."""
+    worst = Settings()
+    worst.risk.capital_limit = 1000
+    worst.risk.risk_per_trade = 0.10        # above max_open_risk
+    worst.risk.max_open_risk = 0.06
+    worst.risk.max_position_frac = 0.05     # and makes risk_per_trade unreachable
+    worst.risk.max_open_positions = 20
+    worst.symbols = [f"C{i}/USDT" for i in range(30)]
+    advice = worst.advisories()
+    assert len(advice) >= 3, "this configuration is wrong in several ways at once"
+    for a in advice:
+        assert len(a) <= 160, f"{len(a)} chars is too long for the banner:\n{a}"
+        assert "«" in a, f"an advisory must name the field to change:\n{a}"
