@@ -1379,3 +1379,38 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
     # refuses to pass if the sweep never gets near the edge again.
     assert tight >= 4, (f"only {tight} of the swept combinations came close to filling the "
                         f"table - the sweep is not reaching the case this test is about")
+
+
+def test_price_pills_never_cover_one_another():
+    """A stop 6.7% under the price is a few pixels away on a chart's scale, and the live-price
+    pill then covered half of the stop - leaving the top of its digits showing, which still
+    LOOKS like a whole number. Same lie as a truncated price, by hiding instead of cutting, and
+    every scalp trade with a tight stop has that shape.
+
+    The live price must not move: it is the only one that has to line up with the axis."""
+    from PySide6.QtCore import QRectF
+    from trader.gui.chart import _spread
+    QApplication.instance() or QApplication([])
+    plot = QRectF(0, 20, 600, 400)
+
+    # target, stop and price within a few pixels of each other - the tight-stop case
+    items = [(210.0, None, "0.236875", "", 1), (214.0, None, "0.19687", "", 1),
+             (212.0, None, "0.2101", "17:54:13", 0)]
+    out = _spread(items, plot)
+    ys = sorted(p for p, *_ in out)
+    assert all(b - a >= 20.0 for a, b in zip(ys, ys[1:])), f"pills still overlap: {ys}"
+    live = [p for p, _c, _t, sub, rank in out if rank == 0]
+    assert live == [212.0], f"the live price was moved off the axis: {live}"
+
+    # a pill never crosses the live price: a stop BELOW it must stay below
+    stop = [p for p, _c, t, _s, _r in out if t == "0.19687"][0]
+    target = [p for p, _c, t, _s, _r in out if t == "0.236875"][0]
+    assert stop > 212.0 and target < 212.0, \
+        f"a pill crossed the price and now labels the wrong side (stop {stop}, target {target})"
+
+    # nothing escapes the plot
+    assert all(plot.top() <= p <= plot.bottom() for p, *_ in out)
+
+    # and pills that were already clear are left exactly where they were
+    far = [(100.0, None, "a", "", 1), (300.0, None, "b", "", 0)]
+    assert [p for p, *_ in _spread(far, plot)] == [300.0, 100.0]

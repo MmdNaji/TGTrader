@@ -19,6 +19,37 @@ UP = QColor("#2ecc71"); DOWN = QColor("#e74c3c"); GOLD = QColor("#E9C46A"); BLUE
 WHITE = QColor("#e6e6e6"); VOL = QColor(120, 130, 150, 90)
 
 
+def _spread(items: list, plot) -> list:
+    """Move overlapping right-axis pills apart, keeping rank 0 exactly where it is.
+
+    They collide in ordinary trades: a stop 6.7% under the price is a few pixels away on this
+    scale, and the live-price pill then covered half of the stop - leaving the top of its digits
+    showing, which still LOOKS like a whole number. That is the same lie as a truncated price,
+    by hiding instead of cutting, and every scalp trade with a tight stop has that shape.
+
+    Rank 0 is the live price: it is the only one that must line up with the axis, so everything
+    else gives way to it. The rest are pushed OUTWARD from it - a stop below the price moves
+    further down, a target above moves further up - so a pill never crosses the line it belongs
+    to and ends up labelling the wrong one.
+    """
+    if len(items) < 2:
+        return items
+    fixed = [it for it in items if it[4] == 0]
+    anchor_y = fixed[0][0] if fixed else items[0][0]
+    gap = 21.0            # pill height 18 plus a little air
+    out: list = []
+    for it in sorted(items, key=lambda i: (i[4], abs(i[0] - anchor_y))):
+        py = it[0]
+        for _ in range(40):
+            clash = next((o for o in out if abs(o[0] - py) < gap), None)
+            if clash is None:
+                break
+            py = clash[0] + gap if py >= anchor_y else clash[0] - gap
+        py = min(max(py, plot.top() + 9), plot.bottom() - 9)
+        out.append((py, it[1], it[2], it[3], it[4]))
+    return out
+
+
 class CandleChart(QWidget):
     hovered = Signal(str)
 
