@@ -959,31 +959,67 @@ def test_no_test_can_reach_the_network():
             raise AssertionError("a network client was built inside the test suite")
 
 
-def test_a_scrollbar_that_cannot_scroll_is_not_shown(win):
-    """At 1366px every column of the positions table was on screen and there was still a bar
-    under it, which dragged nowhere - ResizeToContents pads each section slightly past its hint,
-    so the total lands a few pixels over the viewport with nothing actually hidden. A bar that
-    says "there is more" when there is not is worse than no bar."""
-    from trader.gui.widgets import fill, DEAD_SCROLL
+def test_every_column_stays_reachable_at_any_width_and_any_row_count(win):
+    """Two directions, and the second one was a live bug I wrote.
+
+    A bar that says "there is more" when there is not is noise - ResizeToContents pads each
+    section slightly past its hint, so the total lands a few pixels over the viewport with
+    nothing actually hidden. That is the first half, and it was the whole of the first version.
+
+    The second half is what the Windows session found. With the table scrolling PER ITEM -
+    Qt's default - horizontalScrollBar().maximum() counts COLUMNS that are off-screen, not
+    pixels. The "under 8 pixels of travel" rule was therefore reading 3 and switching off a bar
+    with three whole COLUMNS behind it. In a right-to-left window the vertical scrollbar sits
+    on the LEFT, exactly where the last column is drawn, so the sixth ROW - the one that made
+    the vertical bar appear - is what took "+0.03 $" down to "03 $": sign gone, and only the
+    colour left to say which way the trade was going.
+
+    **The trigger was the row count, not the width**, and the old sweep only varied the width.
+    """
+    from PySide6.QtWidgets import QWidget as _W, QVBoxLayout as _V
+    from trader.gui.widgets import table, fill, DEAD_SCROLL
     app = QApplication.instance() or QApplication([])
-    rows = [["ETH/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
-             "⁦-0.10 $ (-0.20%)⁩"]]
-    win.show()
-    win.goto("dashboard")
-    t = win.tbl_positions
-    useless, useful = {}, 0
-    for width in range(820, 1700, 20):
-        win.resize(width, 900)
-        t.show()
-        fill(t, rows)
-        for _ in range(3):
-            app.processEvents()
-        sb = t.horizontalScrollBar()
-        if sb.isVisible() and sb.maximum() <= DEAD_SCROLL:
-            useless[width] = sb.maximum()
-        if sb.isVisible():
-            useful += 1
-    assert not useless, f"an inert scrollbar was shown at these widths: {useless}"
+
+    # The table is driven DIRECTLY rather than through the dashboard, and that is the point.
+    # Inside the window on this box the positions card is wide enough that the content never
+    # overflows, so a sweep there reaches the working case every time and proves nothing - the
+    # first version of this test said exactly that and refused to pass. The font metrics on
+    # Windows are wider, which is why it broke there and not here; sweeping the widget itself
+    # reaches the same band on any font.
+    t = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
+    host = _W(); _V(host).addWidget(t); host.resize(700, 320); host.show()
+    t.setFixedHeight(170)          # capped like the real one, so rows force the vertical bar
+
+    def row(i):
+        return ["ETH/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
+                f"⁦+0.0{i % 9} $ (+0.0{i % 9}%)⁩"]
+
+    useless, unreachable, saw_overflow = {}, {}, 0
+    for rows in (1, 2, 5, 6, 8, 20):
+        for width in range(300, 900, 20):
+            host.resize(width, 320)
+            fill(t, [row(i) for i in range(rows)])
+            for _ in range(3):
+                app.processEvents()
+            sb = t.horizontalScrollBar()
+            need = sum(t.columnWidth(c) for c in range(t.columnCount()))
+            over = need - t.viewport().width()
+            key = (rows, width)
+            if sb.isVisible() and over <= DEAD_SCROLL:
+                useless[key] = over
+            if over > DEAD_SCROLL:
+                saw_overflow += 1
+                # whatever is off screen has to be REACHABLE. Checking that a column is not
+                # narrower than its contents is the wrong question: these columns are the right
+                # width and simply sit outside the viewport with no way to get to them.
+                if not sb.isVisible() or sb.maximum() < over:
+                    unreachable[key] = (over, sb.isVisible(), sb.maximum())
+    assert not useless, f"an inert scrollbar was shown: {useless}"
+    assert not unreachable, f"columns were off screen with no way to scroll to them: {unreachable}"
+    # and the sweep has to have actually REACHED the overflowing case, or it proved nothing
+    assert saw_overflow > 20, \
+        f"only {saw_overflow} of the swept combinations overflowed - this test checked little"
+    host.close(); host.deleteLater()
 
 
 def test_a_card_subtitle_uses_the_card_it_is_in(win):

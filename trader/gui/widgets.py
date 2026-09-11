@@ -8,7 +8,7 @@ from typing import Any
 from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import QPainter, QPen, QColor, QPainterPath, QLinearGradient
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QTableWidget, QTableWidgetItem,
-                               QHeaderView, QSizePolicy, QPushButton)
+                               QHeaderView, QSizePolicy, QPushButton, QAbstractItemView)
 
 from . import theme
 
@@ -219,6 +219,15 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
     t._stretch_last = bool(stretch_last)
     if headers and headers[0] == "#":
         hh.setSectionResizeMode(0, QHeaderView.Fixed); t.setColumnWidth(0, 48)
+    # Scroll by PIXEL, not by item. Two reasons, and the first one was a live bug: with the
+    # default ScrollPerItem, horizontalScrollBar().maximum() counts COLUMNS that are off-screen,
+    # not pixels - so the "hide a scrollbar with under 8 pixels of travel" rule in fit_columns
+    # was reading 3 and hiding a bar that had three whole COLUMNS behind it. In a right-to-left
+    # window the vertical scrollbar sits on the LEFT, exactly where the last column is drawn, so
+    # the row that pushed the table over the edge was the one that made "سود شناور" unreachable:
+    # "+0.03 $" rendered as "03 $", with the sign gone and only the colour left to say which way
+    # the trade was going. Second reason: per-pixel scrolling is what a table is expected to do.
+    t.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
     t.verticalHeader().setVisible(False)
     t.setEditTriggers(QTableWidget.NoEditTriggers)
     t.setSelectionBehavior(QTableWidget.SelectRows)
@@ -269,8 +278,11 @@ def fit_columns(t: QTableWidget) -> None:
     # see. That is what it looked like on a 1366px window - all eight columns visible and an
     # inert bar under them. ResizeToContents pads each section a little beyond the hint above,
     # so the total can end up a few pixels over the viewport with no column actually cut.
-    sb = t.horizontalScrollBar()
-    t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff if sb.maximum() <= DEAD_SCROLL
+    # DEAD_SCROLL is in PIXELS and only means what it says because the table scrolls per pixel
+    # - see the note in table(). Read against the real overflow rather than the scrollbar's own
+    # maximum, which is 0 while the bar is switched off and would latch the decision on.
+    over = sum(t.columnWidth(c) for c in range(n)) - t.viewport().width()
+    t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff if over <= DEAD_SCROLL
                                    else Qt.ScrollBarAsNeeded)
 
 
