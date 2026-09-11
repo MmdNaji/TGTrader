@@ -37,7 +37,7 @@ from .widgets import (Card, Kpi, pill, set_pill, hint, section, FormRow, Empty, 
 # labelled buttons plus the page subtitle were 764 of the 984 pixels this window refused to go
 # below - and the Windows build refused at 1617 physical pixels, which does not fit a 1366px
 # laptop screen at all. The tooltip carries the full label, so nothing is lost but the room.
-TOPBAR_COMPACT_W = 1150
+COMPACT_W = 1150
 
 NAV = [
     ("dashboard", "🏠", "داشبورد", "وضعیت حساب، پوزیشن‌ها و تصمیم‌های ربات"),
@@ -377,7 +377,7 @@ class MainWindow(QMainWindow):
         """Set a topbar button's label, dropping the words when the window is narrow."""
         btn._full = text
         tip = getattr(btn, "_tip", "")
-        if self.width() < TOPBAR_COMPACT_W:
+        if self.width() < COMPACT_W:
             head = text.split()[0] if text.split() else text
             btn.setText(head)
             btn.setToolTip(text + (" — " + tip if tip else ""))
@@ -385,13 +385,25 @@ class MainWindow(QMainWindow):
             btn.setText(text)
             btn.setToolTip(tip)
 
+    def _lay_kpis(self, cols: int) -> None:
+        if cols == self._kpi_cols:
+            return
+        self._kpi_cols = cols
+        for w in self.kpis:
+            self.kpi_grid.removeWidget(w)
+        for i, w in enumerate(self.kpis):
+            self.kpi_grid.addWidget(w, i // cols, i % cols)
+
     def _apply_topbar_density(self) -> None:
-        compact = self.width() < TOPBAR_COMPACT_W
+        compact = self.width() < COMPACT_W
         if compact == self._topbar_compact:
             return
         self._topbar_compact = compact
         for b in (self.btn_run, self.btn_kill, self.btn_reset, self.btn_update):
             self._btn_label(b, getattr(b, "_full", b.text()))
+        # The dashboard is built after the topbar, so on the very first call there is no grid.
+        if hasattr(self, "kpi_grid"):
+            self._lay_kpis(2 if compact else 4)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -460,14 +472,19 @@ class MainWindow(QMainWindow):
         self.card_setup.add_action(button("رفتن به تنظیمات", "primary", lambda: self.goto("settings")))
         v.addWidget(self.card_setup)
 
-        k = QHBoxLayout(); k.setSpacing(12)
+        # A GRID, not a row. Four tiles across a narrow window are ~245px each and the note
+        # under the number is wider than that, so "0 معامله بسته‌شده" was drawn as
+        # "0 معامله بس" - clipped, with no ellipsis to say so. Two by two on a narrow window
+        # gives each tile twice the room and costs one row of height.
+        self.kpi_grid = QGridLayout(); self.kpi_grid.setSpacing(12)
         self.kpi_equity = Kpi("سرمایه", "—", "کل ارزش حساب", "gold")
         self.kpi_daily = Kpi("سود/زیان امروز", "—", "سقف زیان روزانه اعمال می‌شود")
         self.kpi_open = Kpi("پوزیشن باز", "0", "از حداکثر مجاز")
         self.kpi_win = Kpi("نرخ برد", "—", "روی معاملات بسته‌شده")
-        for x in (self.kpi_equity, self.kpi_daily, self.kpi_open, self.kpi_win):
-            k.addWidget(x)
-        v.addLayout(k)
+        self.kpis = (self.kpi_equity, self.kpi_daily, self.kpi_open, self.kpi_win)
+        self._kpi_cols = 0
+        self._lay_kpis(2 if self.width() < COMPACT_W else 4)
+        v.addLayout(self.kpi_grid)
 
         mid = QHBoxLayout(); mid.setSpacing(12)
         c1 = Card("بازار", "نماد اول تنظیمات، تایم‌فریم معامله")
@@ -830,7 +847,7 @@ class MainWindow(QMainWindow):
     def _page_desk(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(12)
         split = QSplitter(Qt.Vertical)
-        ctop = Card("چارت", "روی چارت اسکرول کنی فقط چارت زوم می‌شود، نه صفحه")
+        ctop = Card("چارت", "یک‌بار روی چارت کلیک کن تا چرخ ماوس زومش کند؛ تا آن موقع صفحه اسکرول می‌شود")
         h = QHBoxLayout(); h.setSpacing(10)
         self.desk_symbol = QComboBox(); self.desk_symbol.setEditable(True); self.desk_symbol.addItems(self.settings.symbols); self.desk_symbol.setMinimumWidth(160)
         self.desk_tf = QComboBox(); self.desk_tf.addItems(["1m", "5m", "15m", "1h", "4h", "1d"]); self.desk_tf.setCurrentText(self.settings.timeframe)
@@ -876,7 +893,7 @@ class MainWindow(QMainWindow):
         h.addWidget(button("⟳ تازه‌سازی", "", self.refresh_chart)); h.addWidget(self.ch_auto); h.addStretch()
         c.add_layout(h)
         self.chart = CandleChart(); c.add(self.chart, 1)
-        self.lbl_hover = hint("چرخ ماوس: زوم · کشیدن: جابه‌جایی · ▲▼ ورود/خروج معاملات · خط‌چین: قیمت آخر، ورود، حد ضرر، هدف")
+        self.lbl_hover = hint("یک‌بار روی چارت کلیک کن، بعد چرخ ماوس زوم می‌کند · کشیدن: جابه‌جایی · ▲▼ ورود/خروج معاملات · خط‌چین: قیمت آخر، ورود، حد ضرر، هدف")
         self.chart.hovered.connect(self.lbl_hover.setText); c.add(self.lbl_hover)
         self.ch_symbol.currentTextChanged.connect(lambda _: (self._sync_watch_symbols(), self.refresh_chart()))
         self.ch_tf.currentTextChanged.connect(lambda _: self.refresh_chart())

@@ -305,25 +305,44 @@ class EquityCurve(QWidget):
         g.setColorAt(0, c1); g.setColorAt(1, c2)
         p.fillPath(fillp, g)
         p.setPen(QPen(col, 2)); p.drawPath(path)
-        p.setPen(QColor(theme.MUTED))
         # Two 200px boxes at the top corners: on a narrow card they overlapped and the pair
-        # "999.90" / "1,000.12" was read off the screen as one number, "9990070.12". They also
-        # said nothing about WHICH numbers they were - first and last, or low and high?
+        # "999.90" / "1,000.12" was read off the screen as one number, "9990070.12".
+        #
+        # Clamping each to half the card fixed the overlap and introduced a worse bug, because
+        # a clamped drawText CLIPS: at 1050px "شروع 999.77" was drawn as "شروع 7", which does
+        # not read as a cut-off label, it reads as a balance of seven dollars. A number that is
+        # missing is honest; a number that is cut in half is a lie.
+        #
+        # So nothing is ever clipped here. Each label is drawn only if it fits WHOLE, and they
+        # are dropped in order of how little they are worth: the start value first - the curve
+        # itself shows where it began - then the current value. The percentage is what the card
+        # is for, so it is the last thing to go.
         first, last = ys[0], ys[-1]
-        left_txt, right_txt = f"شروع {first:,.2f}", f"اکنون {last:,.2f}"
+        left_txt = f"شروع {first:,.2f}"
+        right_txt = f"اکنون {last:,.2f}"
+        pct = (last / first - 1) * 100 if first else 0.0
+        mid_txt = f"{pct:+.2f}%" if first else ""
         fm = p.fontMetrics()
-        half = max(0.0, (r.width() - 12) / 2)
-        lw = min(fm.horizontalAdvance(left_txt) + 4, half)
-        rw = min(fm.horizontalAdvance(right_txt) + 4, half)
-        p.drawText(QRectF(r.left(), r.top(), lw, 16), Qt.AlignLeft, left_txt)
-        p.drawText(QRectF(r.right() - rw, r.top(), rw, 16), Qt.AlignRight, right_txt)
-        # the change, in the middle, where there is always room for it
-        if first:
-            pct = (last / first - 1) * 100
-            mid = f"{pct:+.2f}%"
+        gap = 10
+        lw = fm.horizontalAdvance(left_txt) + 4
+        rw = fm.horizontalAdvance(right_txt) + 4
+        mw = fm.horizontalAdvance(mid_txt) + 4 if mid_txt else 0
+        room = r.width()
+        show_left = show_right = True
+        if lw + mw + rw + gap * 2 > room:
+            show_left = False
+            if mw + rw + gap > room:
+                show_right = False
+        p.setPen(QColor(theme.MUTED))
+        if show_left:
+            p.drawText(QRectF(r.left(), r.top(), lw, 16), Qt.AlignLeft, left_txt)
+        if show_right:
+            p.drawText(QRectF(r.right() - rw, r.top(), rw, 16), Qt.AlignRight, right_txt)
+        if mid_txt and mw <= room:
+            x_from = r.left() + (lw if show_left else 0)
+            x_to = r.right() - (rw if show_right else 0)
             p.setPen(QColor(theme.SUCCESS if pct >= 0 else theme.DANGER))
-            p.drawText(QRectF(r.left() + lw, r.top(), max(0.0, r.width() - lw - rw), 16),
-                       Qt.AlignCenter, mid)
+            p.drawText(QRectF(x_from, r.top(), max(0.0, x_to - x_from), 16), Qt.AlignCenter, mid_txt)
 
 
 def button(text: str, kind: str = "", slot=None) -> QPushButton:

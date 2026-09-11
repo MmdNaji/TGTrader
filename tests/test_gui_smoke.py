@@ -632,28 +632,28 @@ def test_the_window_fits_a_small_laptop_screen(win):
 
 
 def test_the_topbar_gives_up_its_words_before_the_window_gives_up(win):
-    """Below TOPBAR_COMPACT_W the four action buttons keep their icon and drop their label, and
+    """Below COMPACT_W the four action buttons keep their icon and drop their label, and
     the full label moves into the tooltip - so nothing is lost but the room. Widening puts every
     word back, including the ones set at runtime (the run button says توقف while the engine is
     running, and the update button carries a version number)."""
-    from trader.gui.app import TOPBAR_COMPACT_W
+    from trader.gui.app import COMPACT_W
     app = QApplication.instance() or QApplication([])
     buttons = (win.btn_run, win.btn_kill, win.btn_reset, win.btn_update)
 
-    win.resize(TOPBAR_COMPACT_W + 200, 820)
+    win.resize(COMPACT_W + 200, 820)
     for _ in range(4):
         app.processEvents()
     wide = {b: b.text() for b in buttons}
     assert all(len(t.split()) > 1 for t in wide.values()), f"expected worded labels: {wide}"
 
-    win.resize(TOPBAR_COMPACT_W - 200, 820)
+    win.resize(COMPACT_W - 200, 820)
     for _ in range(4):
         app.processEvents()
     for b in buttons:
         assert b.text() == wide[b].split()[0], f"{wide[b]!r} did not compact to its icon"
         assert wide[b] in b.toolTip(), f"the words are gone and the tooltip does not carry them: {b.toolTip()!r}"
 
-    win.resize(TOPBAR_COMPACT_W + 200, 820)
+    win.resize(COMPACT_W + 200, 820)
     for _ in range(4):
         app.processEvents()
     assert {b: b.text() for b in buttons} == wide, "the words did not come back"
@@ -725,3 +725,155 @@ def test_the_positions_table_gets_the_whole_width_of_the_dashboard(win):
         assert card is not None
         assert card.width() > content * 0.85, (
             f"the {name} card is {card.width()}px of {content}px - it is sharing the row again")
+
+
+def _capture_text(fn):
+    """Run fn() and return every (rect, text, advance) that reached QPainter.drawText.
+
+    Reading what was actually painted is the only way to check this: the labels are drawn, not
+    laid out, so there is no widget to measure afterwards and a screenshot cannot tell a label
+    that was dropped from one that was clipped to nothing.
+    """
+    from PySide6.QtGui import QPainter
+    seen = []
+    orig = QPainter.drawText
+
+    def spy(self, *args):
+        if len(args) == 3 and hasattr(args[0], "width") and isinstance(args[2], str):
+            seen.append((args[0], args[2], self.fontMetrics().horizontalAdvance(args[2])))
+        return orig(self, *args)
+
+    QPainter.drawText = spy
+    try:
+        fn()
+    finally:
+        QPainter.drawText = orig
+    return seen
+
+
+def test_the_equity_curve_never_draws_half_a_number():
+    """Clamping each corner label to half the card stopped them overlapping and introduced a
+    worse bug: a clamped drawText CLIPS. At 1050px "شروع 999.77" was painted as "شروع 7", which
+    does not read as a cut-off label - it reads as a balance of seven dollars.
+
+    A missing number is honest. Half a number is a lie. So a label is drawn whole or not at all,
+    and the percentage - what the card is for - is the last thing to go.
+    """
+    from PySide6.QtGui import QImage
+    from trader.gui.widgets import EquityCurve
+
+    app = QApplication.instance() or QApplication([])
+    c = EquityCurve()
+    c.set_points([(0.0, 999.77), (1.0, 1000.12)])
+    cut, seen_pct = {}, 0
+    for width in range(100, 920, 20):
+        c.resize(width, 140)
+        img = QImage(width, 140, QImage.Format_ARGB32)
+        img.fill(0)
+        drawn = _capture_text(lambda: c.render(img))
+        app.processEvents()
+        for rect, text, adv in drawn:
+            if adv > rect.width() + 1:
+                cut.setdefault(width, []).append((text, round(rect.width()), adv))
+        if any("%" in t for _r, t, _a in drawn):
+            seen_pct += 1
+    assert not cut, f"text was painted into a box too small for it: {cut}"
+    # and the percentage is what survives: it is shown at very nearly every width there is
+    assert seen_pct >= 39, f"the percentage was dropped too eagerly - only {seen_pct} of 41 widths"
+
+
+def test_the_chart_time_axis_thins_out_instead_of_piling_up():
+    """Six labels whatever the width is, each in an 80px box. On a narrow window six dates ran
+    together into "5-2026802512026600292062722609-08". The count has to come from how much room
+    a label actually needs."""
+    from PySide6.QtGui import QImage
+    from trader.gui.chart import CandleChart
+    import pandas as pd
+
+    app = QApplication.instance() or QApplication([])
+    n = 120
+    idx = pd.date_range("2026-05-01", periods=n, freq="D")
+    df = pd.DataFrame({"open": [100.0] * n, "high": [101.0] * n,
+                       "low": [99.0] * n, "close": [100.5] * n, "volume": [10.0] * n}, index=idx)
+    ch = CandleChart()
+    ch.set_data(df, "ETH/USDT", "1d")
+    bad = {}
+    for width in range(260, 1400, 40):
+        ch.resize(width, 420)
+        img = QImage(width, 420, QImage.Format_ARGB32)
+        img.fill(0)
+        drawn = _capture_text(lambda: ch.render(img))
+        app.processEvents()
+        axis = sorted((r for r, _t, _a in drawn if abs(r.y() - (420 - 22)) < 2),
+                      key=lambda r: r.x())
+        for a, b in zip(axis, axis[1:]):
+            if a.x() + a.width() > b.x() + 1:
+                bad.setdefault(width, []).append((round(a.x()), round(a.width()), round(b.x())))
+        assert axis, f"no time axis was drawn at {width}px"
+    assert not bad, f"time labels overlapped at these widths: {bad}"
+
+
+def test_the_wheel_zooms_the_chart_only_after_it_is_clicked(win):
+    """The chart used to zoom whenever the wheel merely passed over it - the same mistake
+    WheelGuard exists to stop on the money fields, and worse on a narrow window where the chart
+    is most of a page that needs scrolling. Reported from a real session as "the page is stuck"
+    when it was quietly zooming instead."""
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    app = QApplication.instance() or QApplication([])
+    ch = win.dash_chart
+    ch.clearFocus()
+    before = ch.visible
+
+    def wheel():
+        ev = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120),
+                         Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+        ch.wheelEvent(ev)
+        return ev
+
+    ev = wheel()
+    assert ch.visible == before, "the wheel zoomed a chart nobody had clicked"
+    assert not ev.isAccepted(), "the chart swallowed a wheel event the page needed for scrolling"
+
+    ch.setFocus(Qt.MouseFocusReason)
+    app.processEvents()
+    if ch.hasFocus():                 # offscreen cannot always give focus; only assert if it did
+        wheel()
+        assert ch.visible != before, "a clicked chart still would not zoom"
+
+
+def test_the_kpi_tiles_go_two_by_two_on_a_narrow_window(win):
+    """Four tiles across a narrow window are about 245px each, and the note under the number is
+    wider than that: "0 معامله بسته‌شده" was painted as "0 معامله بس" - clipped, with no ellipsis
+    to say anything was missing. Two by two doubles the room and costs one row of height."""
+    from trader.gui.app import COMPACT_W
+    app = QApplication.instance() or QApplication([])
+    win.show()
+    win.goto("dashboard")
+
+    def cells():
+        # columnCount() only ever GROWS - it reports the highest index the layout has ever
+        # used, so it still says 4 after the tiles have moved into 2 columns. Ask where each
+        # widget actually is instead.
+        g = win.kpi_grid
+        out = {}
+        for i in range(g.count()):
+            row, col, _rs, _cs = g.getItemPosition(i)
+            out[g.itemAt(i).widget()] = (row, col)
+        return out
+
+    win.resize(COMPACT_W + 200, 900)
+    for _ in range(4):
+        app.processEvents()
+    wide = cells()
+    assert set(wide) == set(win.kpis), "a tile went missing from the grid"
+    assert {c for _r, c in wide.values()} == {0, 1, 2, 3}, f"expected one row of four: {wide}"
+
+    win.resize(COMPACT_W - 200, 900)
+    for _ in range(4):
+        app.processEvents()
+    narrow = cells()
+    assert set(narrow) == set(win.kpis), "a tile was lost moving the grid around"
+    assert {c for _r, c in narrow.values()} == {0, 1}, f"expected two columns: {narrow}"
+    assert {r for r, _c in narrow.values()} == {0, 1}, f"expected two rows: {narrow}"

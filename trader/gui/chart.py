@@ -35,6 +35,8 @@ class CandleChart(QWidget):
         self._mouse: QPointF | None = None
         self._drag_x: float | None = None
         self.setMouseTracking(True)
+        # Click to arm the wheel. Until then the wheel belongs to the page - see wheelEvent.
+        self.setFocusPolicy(Qt.ClickFocus)
         self.setMinimumHeight(320)
         self._font = QFont("Segoe UI", 8)
 
@@ -69,7 +71,14 @@ class CandleChart(QWidget):
 
     # ------------------------------------------------------------ interaction
     def wheelEvent(self, ev):
-        # consume the wheel so it zooms the chart instead of scrolling the page it sits on
+        # The wheel zooms ONLY after the chart has been clicked. It used to zoom whenever the
+        # cursor merely passed over, which is the same mistake WheelGuard exists to stop on the
+        # settings fields - and it got worse as the window got narrower, because the chart is
+        # then most of a page that needs a lot of scrolling. Reported from a real session: the
+        # page appeared to be stuck when it was quietly being zoomed instead.
+        if not self.hasFocus():
+            ev.ignore()          # let the scroll area have it
+            return
         ev.accept()
         if self.df is None:
             return
@@ -79,6 +88,7 @@ class CandleChart(QWidget):
         self.update()
 
     def mousePressEvent(self, ev):
+        self.setFocus(Qt.MouseFocusReason)
         self._drag_x = ev.position().x()
 
     def mouseReleaseEvent(self, ev):
@@ -149,13 +159,33 @@ class CandleChart(QWidget):
             p.drawLine(QPointF(plot.left(), yy), QPointF(plot.right(), yy))
             p.setPen(TEXT); p.drawText(QRectF(plot.right() + 4, yy - 8, 66, 16), Qt.AlignLeft | Qt.AlignVCenter, self._fmt(v)); p.setPen(QPen(GRID, 1))
         # time axis
+        #
+        # Six labels whatever the width is, in an 80px box each. On a narrow window the chart
+        # is a few hundred pixels wide and six dates became one run of digits:
+        # "5-2026802512026600292062722609-08". The count has to come from how much room a real
+        # label needs, not from a constant - so it is measured, with a gap, and the first and
+        # last are pulled inside the plot rather than drawn half off the edge.
         idx = win.index
-        every = max(1, n // 6)
-        for i in range(0, n, every):
-            ts = idx[i]
-            label = ts.strftime("%m-%d %H:%M") if self.timeframe and self.timeframe[-1] in "mh" else ts.strftime("%Y-%m-%d")
-            p.setPen(TEXT); p.drawText(QRectF(x(i) - 40, self.height() - 22, 80, 16), Qt.AlignCenter, label)
+        intraday = bool(self.timeframe) and self.timeframe[-1] in "mh"
+        fmt = "%m-%d %H:%M" if intraday else "%Y-%m-%d"
+        fm = p.fontMetrics()
+        lab_w = fm.horizontalAdvance("2026-09-08 00:00" if intraday else "2026-09-08") + 8
+        half = lab_w / 2
+        px_per_bar = max(1e-6, plot.width() / max(1, n))
+        # The SPACING is what has to be at least a label wide, so derive it from that directly
+        # rather than from a tick count. Capped at six as before, so a wide chart is not a ruler.
+        every = max(int(math.ceil((lab_w + 14) / px_per_bar)), int(math.ceil(n / 6)), 1)
+        # Start far enough in that the first box fits WHOLE. Clamping it to the edge instead was
+        # the first version, and a clamped label keeps its width: the label pushed inward then
+        # overlapped the next one by 17px, which is the same pile-up in a new place.
+        i = int(math.ceil(half / px_per_bar))
+        while i < n and x(i) + half <= plot.right():
+            label = idx[i].strftime(fmt)
+            w = fm.horizontalAdvance(label) + 6
+            p.setPen(TEXT)
+            p.drawText(QRectF(x(i) - w / 2, self.height() - 22, w, 16), Qt.AlignCenter, label)
             p.setPen(QPen(GRID, 1)); p.drawLine(QPointF(x(i), plot.top()), QPointF(x(i), vol.bottom()))
+            i += every
 
         # volume
         for i, (_, r) in enumerate(win.iterrows()):
