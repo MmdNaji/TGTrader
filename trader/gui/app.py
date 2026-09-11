@@ -32,7 +32,7 @@ from . import theme
 from .chart import CandleChart
 from .help_fa import HELP_HTML
 from .widgets import (Card, Kpi, pill, set_pill, hint, section, FormRow, Empty, table, fill, EquityCurve,
-                      button, ElidedLabel)
+                      button, ElidedLabel, bidi_safe)
 
 # Below this WINDOW width the topbar buttons keep their icon and drop their words, and the KPI
 # tiles go two by two. The four labelled buttons plus the page subtitle were 764 of the 984
@@ -1099,12 +1099,19 @@ class MainWindow(QMainWindow):
         for x in (self.kpi_t_n, self.kpi_t_win, self.kpi_t_pnl, self.kpi_t_pf, self.kpi_t_r):
             k.addWidget(x)
         v.addLayout(k)
-        c = Card("تاریخچه", "روی هر ردیف بزن تا چارت همان لحظه و تحلیل پشت آن معامله را ببینی · "
+        c = Card("تاریخچه", "دابل‌کلیک روی هر ردیف، چارت همان لحظه و تحلیل پشت آن معامله را باز می‌کند · "
                             "برای قضاوت درباره‌ی یک روش حداقل ۳۰ معامله لازم است")
         self.tbl_trades = table(["باز", "بسته", "نماد", "جهت", "مقدار", "ورود", "خروج", "سود/زیان", "R", "استراتژی", "دلیل"])
         self.tbl_trades.setMinimumHeight(420)
-        self.tbl_trades.setToolTip("روی یک ردیف بزن تا تحلیل کامل آن معامله باز شود")
-        self.tbl_trades.cellClicked.connect(lambda r, _c: self._show_trade_analysis(r))
+        self.tbl_trades.setToolTip("دابل‌کلیک روی یک ردیف، یا دکمه‌ی «تحلیل معامله‌ی انتخاب‌شده»")
+        # DOUBLE click. A single click is how a row gets SELECTED, and on the scan page the
+        # owner already selects rows with click and ctrl-click; making one click also open a
+        # modal means every selection opens a window. The button below is the discoverable way
+        # in - a double-click nobody is told about is not an affordance.
+        self.tbl_trades.cellDoubleClicked.connect(lambda r, _c: self._show_trade_analysis(r))
+        self.btn_analysis = button("🔍 تحلیل معامله‌ی انتخاب‌شده", "primary",
+                                   lambda: self._show_trade_analysis(self.tbl_trades.currentRow()))
+        c.add_action(self.btn_analysis)
         self.empty_trades = Empty("هنوز معامله‌ای بسته نشده.")
         c.add(self.tbl_trades, 1); c.add(self.empty_trades)
         v.addWidget(c, 1)
@@ -1141,7 +1148,12 @@ class MainWindow(QMainWindow):
         head = QLabel(self._analysis_headline(tr)); head.setObjectName("cardTitle"); head.setWordWrap(True)
         lay.addWidget(head)
 
-        chart = CandleChart(); chart.setMinimumHeight(280)
+        # A SPLITTER, not a fixed share. On a 640px-tall window the chart took half and the
+        # text showed five lines; on a tall one the text has room to spare and the chart is
+        # small. Rather than guess one ratio for every screen, the divide is draggable and
+        # starts at 45/55 in favour of the words - they are what the owner came to read.
+        split = QSplitter(Qt.Vertical)
+        chart = CandleChart(); chart.setMinimumHeight(180)
         by_kind = {r["kind"]: r for r in recs}
         src = by_kind.get("close") or by_kind.get("open")
         bars = json.loads(src["candles"]) if src and src["candles"] else []
@@ -1153,13 +1165,30 @@ class MainWindow(QMainWindow):
                            position={"entry_price": tr["entry_price"], "stop_price": tr["init_stop"],
                                      "take_profit": tr["take_profit"]},
                            trades=[dict(tr)])
-            lay.addWidget(chart, 1)
+            split.addWidget(chart)
         else:
-            lay.addWidget(Empty("کندل‌های آن لحظه ذخیره نشده‌اند."))
+            # Told apart on purpose: "we never had it" and "it was cleared to keep the file
+            # small" are different facts, and only the second one has an explanation.
+            old_enough = (time.time() - float(src["ts"] or 0)) > \
+                getattr(self.settings, "analysis_keep_days", 180) * 86400 * 0.9 if src else False
+            split.addWidget(Empty(
+                "کندل‌های این معامله به‌خاطر قدمت پاک شده‌اند تا حجم فایل بالا نرود — متن تحلیل سر جایش است."
+                if old_enough else "کندل‌های آن لحظه ذخیره نشده‌اند."))
 
         body = QTextBrowser(); body.setOpenExternalLinks(False)
         body.setHtml(self._analysis_html(recs))
-        lay.addWidget(body, 1)
+        body.setMinimumHeight(140)
+        split.addWidget(body)
+        split.setSizes([450, 550])
+        lay.addWidget(split, 1)
+
+        # The scan page says in as many words that it recommends nothing. This panel needs the
+        # same, and needs it more: a chart with "this is why I bought" written under it reads as
+        # a correct argument rather than as what one model and a handful of rules said at the
+        # time - and a model always sounds certain.
+        note = hint("این متن، چیزی است که ربات در همان لحظه دیده و بر اساسش تصمیم گرفته — "
+                    "نه دلیلی که آن تصمیم درست بوده. نتیجه‌ی معامله بالا نوشته شده.")
+        lay.addWidget(note)
 
         row_btn = QHBoxLayout()
         row_btn.addWidget(button("📈 چارت زنده‌ی این ارز", "ghost",
@@ -1201,8 +1230,15 @@ class MainWindow(QMainWindow):
             payload = json.loads(rec["payload"])
             parts.append(f"<h3>{titles.get(rec['kind'], rec['kind'])}</h3>")
             for headline, text in ana.explain(payload, rec["kind"]):
-                safe = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        .replace("\n", "<br>"))
+                # bidi_safe FIRST, then escape. These sentences are the densest mix of Persian
+                # prose and Latin numbers in the app - "حرکت -2.28 (-5.90٪)" - and in a
+                # right-to-left paragraph bidi moves a leading sign to the other end, so that
+                # reads out as "2.28- (5.90٪-)". Measured on the real output: three lines per
+                # trade carried a signed number with no isolate. The same rule that covers
+                # hints and card subtitles has to cover this, and it is a level further: here
+                # the numbers ARE the content.
+                safe = (bidi_safe(text).replace("&", "&amp;").replace("<", "&lt;")
+                        .replace(">", "&gt;").replace("\n", "<br>"))
                 parts.append(f"<p><span class='k'>{headline}:</span> <b>{safe}</b></p>"
                              if len(safe) < 60 else
                              f"<p><span class='k'>{headline}:</span><br>{safe}</p>")

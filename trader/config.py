@@ -153,6 +153,13 @@ class Settings:
     # second half's return roughly doubled. Real, and not available on spot.
     paper_allow_short: bool = False
 
+    # How long a trade's analysis keeps its CANDLES. The words - what it saw, why it entered,
+    # the arithmetic - are kept for ever and are a few hundred bytes; the bars are 98% of the
+    # size and only matter while a trade is recent enough to argue about. Measured: 25.8 KB per
+    # trade, 1.3 MB a month at 50 trades, ~15 MB a year, and the whole-market watch only
+    # raises the trade count. 0 = keep everything.
+    analysis_keep_days: int = 180
+
     # --- watch the whole market ---
     # OFF by default, and the numbers are the reason rather than caution. Measured on 21 liquid
     # pairs and ~1,000 daily bars, against 200 randomly drawn 8-coin lists, capped at 4 open
@@ -279,6 +286,23 @@ class Settings:
         # that is one or two lines tall. A warning that does not fit is a warning nobody reads.
         # Every one of them names the field and says what to set; the arithmetic lives in the
         # field's own help text on the settings page, where there is room for it.
+        # A default that moves on evidence reaches NEW installs only. Settings.load() lays the
+        # saved file over the defaults, so anyone who has ever opened the settings page keeps
+        # the old number - and the most important trading change of the day never arrives at the
+        # person it was measured for. Their settings are theirs and nothing here rewrites them;
+        # saying nothing is not the alternative when the number is on hand.
+        if r.reward_risk < 2.4:
+            out.append(
+                f"«نسبت سود به ضرر» شما {r.reward_risk:.1f} است. روی ۲۱ جفت و ~۱۰۰۰ کندل روزانه، "
+                f"۲.۰ تنها مقداری بود که در یک‌سوم تاریخ ضرر داد؛ ۲.۵ در همان بازه سود داد. "
+                f"(تنظیمات ← ریسک)")
+        # The same shape, the other way round: a setting someone has deliberately turned up,
+        # which does nothing at all for the built-in strategies.
+        if abs(r.atr_stop_mult - 2.0) > 0.01:
+            out.append(
+                f"«حد ضرر (ATR ×)» روی {r.atr_stop_mult:.1f} است ولی برای استراتژی‌های داخلی "
+                f"بی‌اثر است — هرکدام حد ضرر خودشان را می‌سازند. فقط مسیر هوش مصنوعی از آن "
+                f"استفاده می‌کند.")
         if r.max_open_risk > 0 and r.risk_per_trade > r.max_open_risk:
             out.append(
                 f"«{L['risk_per_trade']}» {r.risk_per_trade*100:.1f}٪ از «{L['max_open_risk']}» "

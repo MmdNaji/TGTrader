@@ -173,6 +173,39 @@ class Database:
         )
         return int(cur.lastrowid)
 
+    def prune_analysis_candles(self, days: int = 180) -> int:
+        """Drop the stored BARS from old analyses; keep the reasoning for ever.
+
+        Measured, not guessed: 160 bars is 12.5 KB of JSON and a trade stores two of them, so a
+        trade costs 25.8 KB - 1.3 MB a month at 50 trades, about 15 MB a year, in a file under
+        %APPDATA% that nobody ever looks at. The whole-market watch raises the trade count, so
+        this only goes one way.
+
+        The split is deliberate. The PAYLOAD - what it saw, why it entered, the arithmetic - is
+        a few hundred bytes and is the part worth keeping for ever; it is what the owner reads.
+        The bars are 98% of the size and are only interesting while a trade is recent enough to
+        argue about. So old analyses keep their words and lose their picture.
+
+        Returns how many rows were cleared. VACUUM is what actually gives the disk back -
+        setting a column to NULL only frees pages inside the file.
+        """
+        cutoff = time.time() - max(1, int(days)) * 86400.0
+        cur = self.execute(
+            "UPDATE trade_analysis SET candles=NULL WHERE candles IS NOT NULL AND ts < ?",
+            (cutoff,))
+        n = cur.rowcount or 0
+        if n:
+            with self._lock:
+                self._conn.execute("VACUUM")
+        return n
+
+    def size_bytes(self) -> int:
+        """How big this database actually is, for the self-test to report."""
+        try:
+            return int(Path(self.path).stat().st_size)
+        except Exception:
+            return 0
+
     def trade_analysis(self, trade_id: int) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM trade_analysis WHERE trade_id=? ORDER BY id", (trade_id,))
 

@@ -1457,3 +1457,36 @@ def test_paper_does_not_take_trades_the_live_account_could_not():
     s.paper_allow_short = False; s.market = "forex"
     eng3 = Engine(s, db)
     assert eng3.broker.supports_short() is True, "forex through MT5 really can short"
+
+
+def test_old_analyses_keep_their_words_and_lose_their_picture():
+    """A trade's analysis costs 25.8 KB measured, almost all of it candles - 1.3 MB a month at
+    50 trades, ~15 MB a year, in a file under %APPDATA% nobody looks at, and the whole-market
+    watch only raises the trade count. So there is a retention policy from the first day rather
+    than a 500 MB file for someone to discover in a year.
+
+    The split matters: the PAYLOAD is what the owner reads and is kept for ever; the bars are
+    98% of the size and only matter while a trade is recent enough to argue about."""
+    import json as _json
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_prune.db")
+    try:
+        bars = [[1000.0 + i, 1.0, 2.0, 0.5, 1.5, 10.0] for i in range(160)]
+        db.add_trade_analysis(1, "open", "A/B", "1d", {"entry": 1.0, "reason": "old"}, bars)
+        db.add_trade_analysis(2, "open", "A/B", "1d", {"entry": 2.0, "reason": "new"}, bars)
+        # age the first one past the window
+        db.execute("UPDATE trade_analysis SET ts=? WHERE trade_id=1", (time.time() - 400 * 86400,))
+
+        assert db.prune_analysis_candles(180) == 1
+        old = db.trade_analysis(1)[0]
+        new = db.trade_analysis(2)[0]
+        assert old["candles"] is None, "the old bars were not cleared"
+        assert new["candles"] is not None, "a recent analysis lost its bars"
+        # and the words survive - this is the half the owner actually reads
+        assert _json.loads(old["payload"])["reason"] == "old"
+        assert _json.loads(old["payload"])["entry"] == 1.0
+
+        # running it again clears nothing and must not churn the file
+        assert db.prune_analysis_candles(180) == 0
+        assert db.size_bytes() > 0
+    finally:
+        db.close()

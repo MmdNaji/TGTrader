@@ -1172,3 +1172,48 @@ def test_the_engine_asks_the_watch_only_when_it_is_switched_on(win):
             "an unfinished sweep must not leave the engine with nothing to trade"
     finally:
         db.close()
+
+
+def test_the_analysis_text_never_reverses_a_signed_number():
+    """These sentences are the densest mix of Persian prose and Latin numbers in the app -
+    "حرکت -2.28 (-5.90٪)" - and in a right-to-left paragraph bidi moves a leading sign to the
+    other end, so that reads out as "2.28- (5.90٪-)". It is not cosmetic: it is a different
+    number, and here the numbers ARE the content.
+
+    Measured on the real renderer before this was wired: three lines per trade carried a signed
+    number with no isolate."""
+    import re
+    from trader import analysis as ana
+    from trader.gui.widgets import bidi_safe
+    payloads = [
+        ("open", {"symbol": "ETH/USDT", "timeframe": "1d", "side": "long", "regime": "trend_up",
+                  "source": "rules", "confidence": 0.6, "reason": "x", "signals": [],
+                  "indicators": {"rsi14": 41.2, "atr14": 1.11, "ret_20": -0.031},
+                  "entry": 38.7, "stop": 36.4, "target": 44.4, "stop_distance": 2.2,
+                  "qty": 4.5, "notional": 173.0, "reward_risk": 2.5, "round_trip_fee": 0.08,
+                  "gross_target": 5.6, "target_over_fee": 72.0, "risk_amount": 10.0,
+                  "risk_pct_of_equity": 0.0096, "skills_used": []}),
+        ("close", {"symbol": "ETH/USDT", "timeframe": "1d", "side": "long", "why": "stop",
+                   "entry": 38.7, "exit": 36.4, "stop": 37.0, "init_stop": 36.4, "target": 44.4,
+                   "qty": 4.5, "move": -2.28, "move_pct": -5.9, "pnl": -10.5,
+                   "r_multiple": -1.02, "fees": 0.34, "held_seconds": 260000}),
+    ]
+    # the space belongs to the UNIT, not to the number: "-2.28 (" is a bare number followed by
+    # a space, and bidi_safe correctly isolates "-2.28" without it. An over-greedy pattern here
+    # made the test fail on output that was already right.
+    signed = re.compile(r"[+\-−][0-9۰-۹][0-9,.٫]*(?:\s?[%$٪])?")
+    unprotected = []
+    for kind, payload in payloads:
+        for head, text in ana.explain(payload, kind):
+            safe = bidi_safe(text)
+            for m in signed.finditer(text):
+                # every signed run must come out wrapped in an isolate
+                if f"⁦{m.group(0)}⁩" not in safe:
+                    unprotected.append((kind, head, m.group(0)))
+    assert not unprotected, f"signed numbers left for bidi to reverse: {unprotected}"
+
+    # and the view must actually call it - a helper nobody applies is the bug, not the helper
+    import inspect
+    from trader.gui.app import MainWindow
+    src = inspect.getsource(MainWindow._analysis_html)
+    assert "bidi_safe(" in src, "the analysis panel renders raw text straight into the browser"

@@ -80,6 +80,7 @@ class Engine:
         self._watch: Any | None = None           # the last completed sweep
         self._watch_thread: threading.Thread | None = None
         self._watch_at = 0.0
+        self._pruned_at = 0.0                    # when old analysis bars were last cleared
         self.status: dict[str, Any] = {"running": False, "last_loop": 0.0, "error": ""}
         load_seed_skills(db)
         self.strategies = ([Scalp()] + list(DEFAULT_STRATEGIES)
@@ -238,10 +239,33 @@ class Engine:
         self._watch_thread = threading.Thread(target=run, name="market-watch", daemon=True)
         self._watch_thread.start()
 
+    def _maybe_prune(self) -> None:
+        """Once a day, drop the stored bars from analyses older than the retention window.
+
+        A trade's analysis costs 25.8 KB, almost all of it candles - 1.3 MB a month at 50
+        trades. The words are kept for ever; the picture is only worth keeping while the trade
+        is recent enough to argue about."""
+        now = time.time()
+        if now - self._pruned_at < 86400.0:
+            return
+        self._pruned_at = now
+        try:
+            days = int(getattr(self.settings, "analysis_keep_days", 180))
+            if days <= 0:
+                return
+            n = self.db.prune_analysis_candles(days)
+            if n:
+                self.log(f"کندل‌های {n} تحلیل قدیمی‌تر از {days} روز پاک شد "
+                         f"(متن تحلیل‌ها سر جایشان است) · حجم دیتابیس "
+                         f"{self.db.size_bytes()/1024/1024:.1f} مگابایت")
+        except Exception as exc:
+            self.log(f"پاک‌سازی تحلیل‌های قدیمی انجام نشد: {exc}", "warn")
+
     def loop_once(self) -> None:
         if not self._reconciled:
             self._reconcile()
             self._reconciled = True
+        self._maybe_prune()
         open_positions = [dict(r) for r in self.db.open_trades(self.mode)]
         self._maybe_sweep([p["symbol"] for p in open_positions])
         # An open position is managed whatever the symbol list says now. Removing a symbol from

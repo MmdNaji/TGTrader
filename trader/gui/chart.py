@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
-from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QFont, QPainterPath
+from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QFont, QFontMetricsF, QPainterPath
 from PySide6.QtWidgets import QWidget
 
 BG = QColor("#0f131a"); GRID = QColor("#1f2633"); TEXT = QColor("#9aa3b2")
@@ -220,17 +220,36 @@ class CandleChart(QWidget):
 
         # right-axis price pill (TradingView style)
         def pill(price_y: float, color: QColor, text: str, sub: str = ""):
+            """The box is sized to the PRICE, never the price to the box.
+
+            It was a fixed 74px with the text drawn into 66 of it, so a long price - a
+            six-figure BTC, or a token quoted to eight decimals - was cut, and a cut price
+            reads as a whole one. Same rule as the equity-curve labels and the chart header:
+            a number missing digits off its end is not a smaller number, it is a wrong one.
+            Where even the full gutter cannot hold it, precision is DROPPED rather than
+            characters - a rounded price is a normal thing to show, a truncated one is a lie.
+            """
             h = 30 if sub else 18
-            box = QRectF(plot.right() + 2, price_y - h / 2, 74, h)
+            f = QFont(self._font); f.setBold(True)
+            fm_big, fm_small = QFontMetricsF(f), QFontMetricsF(self._font)
+            gutter = max(40.0, self.width() - plot.right() - 6)
+            shown = text
+            while fm_big.horizontalAdvance(shown) + 11 > gutter and "." in shown:
+                shown = shown[:shown.rindex(".")] if shown.endswith(".") else shown[:-1]
+                shown = shown.rstrip(".")
+            need = max(fm_big.horizontalAdvance(shown), fm_small.horizontalAdvance(sub) if sub else 0)
+            w = min(gutter, max(74.0, need + 11))
+            box = QRectF(plot.right() + 2, price_y - h / 2, w, h)
             path = QPainterPath(); path.addRoundedRect(box, 4, 4)
             p.fillPath(path, color)
-            p.setPen(QColor("#ffffff")); f = QFont(self._font); f.setBold(True); p.setFont(f)
+            p.setPen(QColor("#ffffff")); p.setFont(f)
+            inner = w - 9
             if sub:
-                p.drawText(QRectF(box.left() + 5, box.top() + 2, 66, 15), Qt.AlignLeft | Qt.AlignVCenter, text)
+                p.drawText(QRectF(box.left() + 5, box.top() + 2, inner, 15), Qt.AlignLeft | Qt.AlignVCenter, shown)
                 p.setFont(self._font)
-                p.drawText(QRectF(box.left() + 5, box.top() + 15, 66, 13), Qt.AlignLeft | Qt.AlignVCenter, sub)
+                p.drawText(QRectF(box.left() + 5, box.top() + 15, inner, 13), Qt.AlignLeft | Qt.AlignVCenter, sub)
             else:
-                p.drawText(box.adjusted(6, 0, -4, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
+                p.drawText(box.adjusted(6, 0, -4, 0), Qt.AlignLeft | Qt.AlignVCenter, shown)
             p.setFont(self._font)
 
         # take-profit / stop zones for the open position, drawn translucent over the candles
