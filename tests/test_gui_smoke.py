@@ -496,3 +496,48 @@ def test_numbers_are_isolated_so_rtl_cannot_reverse_them():
     from trader.gui.app import ltr
     assert ltr("+21.0%") == "⁦+21.0%⁩"
     assert ltr("") == "", "an empty cell needs no wrapping"
+
+
+def test_the_equity_curve_labels_cannot_run_into_each_other():
+    """On a narrow card the two 200px corner boxes overlapped and "999.90" next to "1,000.12"
+    was read off the screen as one number: 9990070.12. They also never said which numbers they
+    were - first and last, or lowest and highest?"""
+    from PySide6.QtGui import QImage, QPainter
+    from trader.gui.widgets import EquityCurve
+
+    QApplication.instance() or QApplication([])
+    c = EquityCurve()
+    c.set_points([(0.0, 999.90), (1.0, 1000.12)])
+    for width in (180, 320, 900):
+        c.resize(width, 140)
+        img = QImage(width, 140, QImage.Format_ARGB32)
+        img.fill(0)
+        c.render(img)          # must not raise at any width
+    # the labels say what they are, and the boxes are sized to their text rather than fixed
+    src = __import__("inspect").getsource(EquityCurve.paintEvent)
+    assert "شروع" in src and "اکنون" in src, "an unlabelled number is a number nobody can use"
+    assert "horizontalAdvance" in src, "fixed-width boxes are what made them collide"
+
+
+def test_paragraph_text_does_not_get_its_numbers_reversed():
+    """In a right-to-left line, bidi moves a leading sign to the other end: "-6.4%" is read as
+    "6.4%-". These are the sentences that quote measured results, so it changes what they say.
+
+    Fixed where text reaches a widget rather than by hand at each string - wrapping them one at
+    a time rots, because the next sentence someone writes brings the bug back."""
+    from trader.gui.widgets import bidi_safe, hint
+
+    QApplication.instance() or QApplication([])
+    out = bidi_safe("۳ ارز حدود +۰.۵٪ و ۸ ارز -۶.۴٪ درآمد")
+    assert out.count("⁦") == 2, out          # both signed figures, nothing else
+    assert "⁦+۰.۵٪⁩" in out and "⁦-۶.۴٪⁩" in out
+
+    # a bare number needs no help: digits are their own run and come out in order
+    assert bidi_safe("۸ نماد و ۴۰۰ کندل") == "۸ نماد و ۴۰۰ کندل"
+    # a unit alone is enough to need it
+    assert "⁦۵۰٪⁩" in bidi_safe("۵۰٪ یعنی فقط ۲ تا")
+    # and something already isolated is never nested
+    assert bidi_safe("⁦+1.23 $⁩") == "⁦+1.23 $⁩"
+
+    # the real path: a hint label gets it without the caller doing anything
+    assert hint("بازده -۲۹.۹٪ بود").text().count("⁦") == 1

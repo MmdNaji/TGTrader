@@ -1,6 +1,8 @@
 """Reusable UI pieces: cards, KPI tiles, pills, form rows with hints, empty states, equity curve."""
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from PySide6.QtCore import Qt, QPointF, QRectF
@@ -20,7 +22,7 @@ class Card(QFrame):
         self.outer = QVBoxLayout(self); self.outer.setContentsMargins(16, 14, 16, 14); self.outer.setSpacing(10)
         self.header = QHBoxLayout(); self.header.setSpacing(8)
         self.title_lbl = QLabel(title); self.title_lbl.setObjectName("cardTitle")
-        self.sub_lbl = QLabel(subtitle); self.sub_lbl.setObjectName("cardSub")
+        self.sub_lbl = QLabel(bidi_safe(subtitle)); self.sub_lbl.setObjectName("cardSub")
         tcol = QVBoxLayout(); tcol.setSpacing(0); tcol.addWidget(self.title_lbl)
         if subtitle:
             tcol.addWidget(self.sub_lbl)
@@ -80,8 +82,37 @@ def set_pill(lbl: QLabel, text: str, kind: str) -> None:
     lbl.style().unpolish(lbl); lbl.style().polish(lbl)
 
 
+# Only what bidi actually mangles: a SIGN in front of a number, or a unit behind one. A bare
+# number needs no help - digits are their own run and come out in the right order. Isolating
+# everything also swallowed the space after it ("۳ ارز" -> "⁦۳ ⁩ارز"), which is untidy for no gain.
+# Latin and Persian digits both, because these sentences mix them.
+_D = r"[0-9\u06F0-\u06F9]"
+_NUM_BODY = _D + r"[0-9\u06F0-\u06F9,.\u066B\u066C]*"
+_NUMBER = re.compile(
+    r"[+\-\u2212]" + _NUM_BODY + r"(?:\s?[%$\u066A])?"     # signed, unit optional
+    r"|" + _NUM_BODY + r"\s?[%$\u066A]"                      # unsigned, but carrying a unit
+)
+_ISOLATED = "\u2066\u2067\u2068"
+
+
+def bidi_safe(text: str) -> str:
+    """Stop a right-to-left paragraph reordering the numbers inside it.
+
+    In an RTL line, bidi moves a leading sign to the other end: "-6.4%" is read out as "6.4%-"
+    and "+0.5%" as "0.5%+". That is not cosmetic - it reads as a different number, and these
+    sentences are the ones quoting measured results.
+
+    Done HERE, where text reaches a widget, rather than by hand at every string. Wrapping them
+    one at a time was the alternative and it rots: the next person writes a new sentence and
+    the bug comes back with it. Table cells go through ltr() for the same reason.
+    """
+    if not text or any(c in text for c in _ISOLATED):
+        return text          # already isolated by the caller; do not nest
+    return _NUMBER.sub(lambda m: "\u2066" + m.group(0) + "\u2069", text)
+
+
 def hint(text: str) -> QLabel:
-    lbl = QLabel(text); lbl.setObjectName("hint"); lbl.setWordWrap(True)
+    lbl = QLabel(bidi_safe(text)); lbl.setObjectName("hint"); lbl.setWordWrap(True)
     return lbl
 
 
@@ -185,8 +216,24 @@ class EquityCurve(QWidget):
         p.fillPath(fillp, g)
         p.setPen(QPen(col, 2)); p.drawPath(path)
         p.setPen(QColor(theme.MUTED))
-        p.drawText(QRectF(r.left(), r.top(), 200, 16), Qt.AlignLeft, f"{ys[0]:,.2f}")
-        p.drawText(QRectF(r.right() - 200, r.top(), 200, 16), Qt.AlignRight, f"{ys[-1]:,.2f}")
+        # Two 200px boxes at the top corners: on a narrow card they overlapped and the pair
+        # "999.90" / "1,000.12" was read off the screen as one number, "9990070.12". They also
+        # said nothing about WHICH numbers they were - first and last, or low and high?
+        first, last = ys[0], ys[-1]
+        left_txt, right_txt = f"شروع {first:,.2f}", f"اکنون {last:,.2f}"
+        fm = p.fontMetrics()
+        half = max(0.0, (r.width() - 12) / 2)
+        lw = min(fm.horizontalAdvance(left_txt) + 4, half)
+        rw = min(fm.horizontalAdvance(right_txt) + 4, half)
+        p.drawText(QRectF(r.left(), r.top(), lw, 16), Qt.AlignLeft, left_txt)
+        p.drawText(QRectF(r.right() - rw, r.top(), rw, 16), Qt.AlignRight, right_txt)
+        # the change, in the middle, where there is always room for it
+        if first:
+            pct = (last / first - 1) * 100
+            mid = f"{pct:+.2f}%"
+            p.setPen(QColor(theme.SUCCESS if pct >= 0 else theme.DANGER))
+            p.drawText(QRectF(r.left() + lw, r.top(), max(0.0, r.width() - lw - rw), 16),
+                       Qt.AlignCenter, mid)
 
 
 def button(text: str, kind: str = "", slot=None) -> QPushButton:
