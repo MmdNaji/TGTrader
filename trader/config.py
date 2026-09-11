@@ -160,6 +160,24 @@ class Settings:
     # 1000 bars: on 1d it cost about 1.2% of return (mean +6.72% -> +5.57%) and on 4h it changed
     # nothing, because the strategies' own regime filter already correlates with Bitcoin's. It
     # stays available because it is a real correlation control in a crash, but it is not free.
+    #
+    # RE-MEASURED on DRAWDOWN rather than return, because that was the open question - the
+    # owner's real complaint is long red stretches, and a filter can be worth paying return for
+    # if it shortens them. It does not earn its place there either. Portfolio of 4, 21 pairs,
+    # four splits, in R:
+    #
+    #                          worst win%   worst net   worst drawdown   longest wait
+    #   plain                     39.6%       +3.4R         18.1R           352 days
+    #   leader filter             36.0%       +2.7R         16.7R           333 days
+    #   leader + half at 1R       44.7%       +0.1R         13.0R           340 days
+    #
+    # It buys 1.4R of drawdown and 19 days for a worse win rate and a worse worst-case return,
+    # and stacked with the scale-out it takes the worst split to break-even. The scale-out ALONE
+    # does better on every count that matters (44.6% / +3.0R / 14.0R).
+    #
+    # And the number none of them move: the longest wait for a new high is 333-369 days in every
+    # configuration tried. That is a property of this strategy on this market, not of a setting,
+    # and nothing measured here shortens it.
     align_with_leader: bool = False
 
     # Let the PAPER account short on crypto. Off, because the live crypto broker here is a spot
