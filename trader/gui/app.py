@@ -467,12 +467,6 @@ class MainWindow(QMainWindow):
         c3.add_action(button("🧪 ریست تست", "ghost", self.reset_test))
         c4 = Card("آخرین تصمیم‌ها", "نگه‌داشتن هم یک تصمیم است؛ دلیلش را بخوان")
         self.tbl_decisions = table(["زمان", "نماد", "اقدام", "اطمینان", "منبع", "دلیل"]); self.tbl_decisions.setMinimumHeight(160)
-        # "دلیل" is the column this table exists for, and it was being elided to "not enoug…".
-        # Let it take the slack and show the whole sentence on hover.
-        from PySide6.QtWidgets import QHeaderView as _HV
-        _h = self.tbl_decisions.horizontalHeader()
-        _h.setSectionResizeMode(5, _HV.Stretch)
-        self.tbl_decisions.setWordWrap(False)
         self.tbl_decisions.setTextElideMode(Qt.ElideRight)
         self.empty_dec = Empty("هنوز تصمیمی ثبت نشده. «شروع» را بزن تا ربات بازار را بررسی کند.")
         c4.add(self.tbl_decisions); c4.add(self.empty_dec)
@@ -523,9 +517,32 @@ class MainWindow(QMainWindow):
         rm.set_kill_switch(not rm.kill_switch_on()); self.refresh()
 
     def close_all(self):
+        """Close everything at market - after saying exactly what that costs.
+
+        A confirmation that looks like every other confirmation is answered from muscle memory.
+        Physical distance from the neighbouring button helps less than telling the person what
+        they are about to lose, so this one names the positions, what they are worth and what
+        the floating P&L is at this moment.
+        """
         if not self.engine:
-            QMessageBox.information(self, "", "موتور فعال نیست"); return
-        if QMessageBox.question(self, "", "همه پوزیشن‌ها با قیمت بازار بسته شوند؟") == QMessageBox.Yes:
+            QMessageBox.information(self, "بستن همه", "موتور فعال نیست."); return
+        opens = [dict(r) for r in self.db.open_trades(self.live_mode())]
+        if not opens:
+            QMessageBox.information(self, "بستن همه", "هیچ پوزیشن بازی نیست."); return
+        value = fl = 0.0
+        for r in opens:
+            px = self._live.get(r["symbol"]) or (self.engine.last_prices.get(r["symbol"])
+                                                if self.engine else None) or r["entry_price"]
+            value += float(r["qty"]) * float(r["entry_price"])
+            fl += ((px - r["entry_price"]) if r["side"] == "long"
+                   else (r["entry_price"] - px)) * float(r["qty"])
+        names = "، ".join(r["symbol"] for r in opens[:6]) + (" …" if len(opens) > 6 else "")
+        if QMessageBox.question(
+                self, "بستن همه",
+                f"{len(opens)} پوزیشن با قیمت بازار بسته می‌شود:\n{names}\n\n"
+                f"ارزش ورودی: {money(value)}\n"
+                f"سود/زیان شناور همین لحظه: {money(fl)}\n\n"
+                f"این کار برگشت‌پذیر نیست. ادامه؟") == QMessageBox.Yes:
             self._run_bg(lambda: self.engine.close_all("manual"), lambda _: self.refresh())
 
     def reset_test(self):
@@ -873,14 +890,6 @@ class MainWindow(QMainWindow):
         self.tbl_scan = table(["نماد", "قیمت", "گردش ۲۴س (دلار)", "دامنه‌ی روز", "تغییر ۲۴س",
                                "نوسان (ATR)", "روند ۳۰ روز", "رژیم", "سیگنال الان"])
         self.tbl_scan.setMinimumHeight(420)
-        # Equal-width columns cut "long · donchian_breakout" down to "long · ...", which is the
-        # only column that carries a word rather than a number. Let the numbers shrink to their
-        # contents and give the slack to the signal.
-        from PySide6.QtWidgets import QHeaderView as _HV
-        _hs = self.tbl_scan.horizontalHeader()
-        for _i in range(8):
-            _hs.setSectionResizeMode(_i, _HV.ResizeToContents)
-        _hs.setSectionResizeMode(8, _HV.Stretch)
         self.tbl_scan.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tbl_scan.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.empty_scan = Empty("هنوز اسکن نشده.")

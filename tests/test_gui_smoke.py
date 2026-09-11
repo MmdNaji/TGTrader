@@ -541,3 +541,59 @@ def test_paragraph_text_does_not_get_its_numbers_reversed():
 
     # the real path: a hint label gets it without the caller doing anything
     assert hint("بازده -۲۹.۹٪ بود").text().count("⁦") == 1
+
+
+def test_no_table_column_is_narrower_than_what_is_in_it():
+    """Every column used to be QHeaderView.Stretch - EQUAL width regardless of content - so in
+    an eight-column table each cell got an eighth of the card. "ETH/USDT" arrived as ".../ETH",
+    the reason column as "...scalp: mo", and once the P&L cell grew a percentage it became
+    "-0.14 $...". Three truncation bugs that looked separate, one cause."""
+    from trader.gui.widgets import table, fill
+    app = QApplication.instance() or QApplication([])
+
+    t = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
+    fill(t, [["ETH/USDT", "خرید", "2,452.06", "2,450.00", "50.02 $", "2,372.96", "2,627.56",
+              "⁦-0.14 $ (-0.28%)⁩"],
+             ["AVAX/USDT", "خرید", "7.4837", "7.4900", "50.00 $", "7.1392", "8.1728",
+              "⁦+0.03 $ (+0.06%)⁩"]], tones={7: "pnl"})
+    t.show()
+    for width in (520, 900, 1400):
+        t.resize(width, 200)
+        app.processEvents()
+        cut = [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())
+               if t.columnWidth(c) < t.sizeHintForColumn(c)]
+        assert not cut, f"at {width}px these columns cut their contents: {cut}"
+
+
+def test_closing_everything_says_what_it_costs(win, monkeypatch):
+    """A confirmation that looks like every other confirmation gets answered from muscle
+    memory. The dialog has to name what is about to be lost."""
+    from PySide6.QtWidgets import QMessageBox
+    from trader.engine import Engine
+    from trader.execution.paper import PaperBroker
+
+    asked = {}
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda parent, title, text, *a, **k: (
+                            asked.__setitem__("text", text), QMessageBox.No)[1]))
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda parent, title, text, *a, **k: (
+                            asked.__setitem__("info", text), QMessageBox.Ok)[1]))
+    win.settings.mode = "paper"
+    pb = PaperBroker(1000.0); pb.reset(1000.0)
+    win.engine = Engine(win.settings, win.db, broker=pb)
+
+    win.db.reset_mode("paper")
+    win.close_all()
+    assert "هیچ پوزیشن بازی نیست" in asked.get("info", ""), "an empty account must say so"
+
+    f = pb.market_order("ETH/USDT", "buy", 0.02, 2450.0)
+    win.db.open_trade("paper", "ETH/USDT", "long", f.qty, f.price, 2372.0, 2627.0, "t", "r",
+                      entry_fee=f.fee)
+    win.close_all()
+    text = asked.get("text", "")
+    assert "ETH/USDT" in text, "it must name the positions"
+    assert "ارزش ورودی" in text and "شناور" in text, "and what they are worth"
+    assert "برگشت‌پذیر نیست" in text
+    assert win.db.open_trades("paper"), "answering No must close nothing"
+    win.engine = None

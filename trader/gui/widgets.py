@@ -142,11 +142,27 @@ class Empty(QLabel):
 
 
 def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
+    """Columns sized to their contents, with the last one absorbing whatever is left over.
+
+    Every column used to be QHeaderView.Stretch, which means EQUAL width regardless of what is
+    in it: in an eight-column table each cell got one eighth of the card, so "ETH/USDT" came out
+    as ".../ETH", the reason column as "...scalp: mo", and - once the P&L cell grew a percentage
+    - "-0.14 $ (-0.28%)" as "-0.14 $...". Three separate-looking truncation bugs, one cause.
+
+    This is also why the elide fix appeared to work on the scan table and not on the positions
+    table: the scan table already set ResizeToContents by hand. Elide direction decides WHICH
+    end is cut; the width decides whether anything is cut at all.
+    """
     t = QTableWidget(0, len(headers))
     t.setHorizontalHeaderLabels(headers)
-    t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    hh = t.horizontalHeader()
+    for i in range(len(headers)):
+        hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+    if headers and stretch_last:
+        # the last column takes the slack, so short tables still fill the card
+        hh.setSectionResizeMode(len(headers) - 1, QHeaderView.Stretch)
     if headers and headers[0] == "#":
-        t.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed); t.setColumnWidth(0, 48)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed); t.setColumnWidth(0, 48)
     t.verticalHeader().setVisible(False)
     t.setEditTriggers(QTableWidget.NoEditTriggers)
     t.setSelectionBehavior(QTableWidget.SelectRows)
