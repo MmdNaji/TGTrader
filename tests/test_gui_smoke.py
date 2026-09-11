@@ -48,6 +48,39 @@ def win():
     app.processEvents()
 
 
+def fresh_window():
+    """A window of this test's own, with the refresh timer off.
+
+    ASK FOR IT INSTEAD OF `win`, AND DO NOT ASK FOR BOTH. A test that takes `win` in its
+    signature makes pytest build the module-scoped window even if the body never touches it -
+    and that window carries a live 1.5-second timer that keeps running through every
+    processEvents() in the measurement. Three releases in a row reported identical geometry
+    numbers to the digit while everything else changed, and an unused parameter was the only
+    variable none of those releases had touched.
+
+    The `win` fixture is module-scoped and has a live 1.5-second QTimer on it. Two tests today
+    have already been broken by what earlier tests left on that window, and the geometry ones
+    are worse: the dashboard's refresh hides the positions table when the database has no open
+    trades, and Qt does not lay out a hidden widget - so a test that resizes the window and then
+    measures reads the size the table was BORN with. The Windows session spotted the signature:
+    the reported overflow moved exactly 100px for every 100px of window, which means the window
+    was growing around a table that never moved.
+    """
+    from PySide6.QtCore import Qt as _Qt
+    from trader.gui import theme
+    from trader.gui.app import MainWindow
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.QSS)
+    app.setLayoutDirection(_Qt.RightToLeft)
+    w = MainWindow()
+    w.timer.stop()                 # nothing may re-hide the table under the measurement
+    w.show()
+    w.goto("dashboard")
+    for _ in range(4):
+        app.processEvents()
+    return w
+
+
 def test_every_page_builds_and_renders(win):
     app = QApplication.instance()
     assert win.stack.count() >= 8
@@ -716,7 +749,7 @@ def test_a_table_never_sticks_out_of_the_card_it_is_in(win):
     assert not over, f"the table stuck out of its card at these window widths: {over}"
 
 
-def test_the_positions_table_gets_the_whole_width_of_the_dashboard(win):
+def test_the_positions_table_gets_the_whole_width_of_the_dashboard():
     """Positions and decisions used to share the row, half the window each. The positions table
     has eight columns; half of a MAXIMISED 2278px window was 916px and the table needed about
     950, so it did not fit even on a full screen - the symbol and the floating P&L could not be
@@ -727,8 +760,7 @@ def test_the_positions_table_gets_the_whole_width_of_the_dashboard(win):
     row brings the bug straight back and this is what catches it.
     """
     app = QApplication.instance() or QApplication([])
-    win.show()
-    win.goto("dashboard")
+    win = fresh_window()
     win.resize(1366, 900)
     for t in (win.tbl_positions, win.tbl_decisions):
         t.show()
@@ -1327,33 +1359,7 @@ def test_the_analysis_chart_falls_back_to_the_entry_when_the_exit_kept_no_bars(w
         db.close()
 
 
-def fresh_window():
-    """A window of this test's own, with the refresh timer off.
-
-    The `win` fixture is module-scoped and has a live 1.5-second QTimer on it. Two tests today
-    have already been broken by what earlier tests left on that window, and the geometry ones
-    are worse: the dashboard's refresh hides the positions table when the database has no open
-    trades, and Qt does not lay out a hidden widget - so a test that resizes the window and then
-    measures reads the size the table was BORN with. The Windows session spotted the signature:
-    the reported overflow moved exactly 100px for every 100px of window, which means the window
-    was growing around a table that never moved.
-    """
-    from PySide6.QtCore import Qt as _Qt
-    from trader.gui import theme
-    from trader.gui.app import MainWindow
-    app = QApplication.instance() or QApplication([])
-    app.setStyleSheet(theme.QSS)
-    app.setLayoutDirection(_Qt.RightToLeft)
-    w = MainWindow()
-    w.timer.stop()                 # nothing may re-hide the table under the measurement
-    w.show()
-    w.goto("dashboard")
-    for _ in range(4):
-        app.processEvents()
-    return w
-
-
-def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
+def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page():
     """The bug this exists for does not reproduce in a table built on its own.
 
     Standalone, the last column is handed three to eleven times the width it needs and
@@ -1486,7 +1492,7 @@ def test_price_pills_never_cover_one_another():
     assert [p for p, *_ in _spread(far, plot)] == [300.0, 100.0]
 
 
-def test_the_columns_come_back_when_the_table_comes_back(win):
+def test_the_columns_come_back_when_the_table_comes_back():
     """Positions open and close and the window gets resized, so a table is refilled in one shape
     and then another all day. fit_columns puts a column into Interactive mode to hold a width it
     picked, and nothing put it back - so a later fill measured the width left over from an
@@ -1568,3 +1574,29 @@ def test_the_reset_button_is_not_a_neighbour_of_the_start_button(win):
         app.processEvents()
     assert len(win.btn_reset.text().split()) > 1
     assert win.btn_reset.objectName() == "dangerGhost"
+
+
+def test_no_geometry_test_drags_the_shared_window_in_with_it():
+    """A test that builds its own window must not ALSO take `win`.
+
+    pytest constructs a fixture named in the signature whether the body uses it or not, and the
+    module-scoped window carries a live 1.5-second timer that keeps firing through every
+    processEvents() in a measurement. Three releases running reported byte-identical geometry
+    numbers while everything else changed - and the unused parameter was the only variable none
+    of them had touched. A rule nobody can see is a rule the next person breaks, so it is
+    checked: parsed, not grepped."""
+    import ast
+    import pathlib as _pl
+    src = _pl.Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+            continue
+        takes_win = any(a.arg == "win" for a in node.args.args)
+        builds_own = any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == "fresh_window"
+                         for n in ast.walk(node))
+        if takes_win and builds_own:
+            bad.append(f"{node.name} (line {node.lineno})")
+    assert not bad, ("these ask for the shared window AND build their own - drop the parameter: "
+                     + ", ".join(bad))
