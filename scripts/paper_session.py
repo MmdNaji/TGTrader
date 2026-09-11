@@ -27,8 +27,52 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-BARS_DIR = pathlib.Path(os.environ.get(
-    "TGTRADER_BARS", "/tmp/claude-0/-var-www-smm/bd7beafa-eede-4d10-8c71-b9eb6b6333f4/scratchpad/bars4h"))
+REPO = pathlib.Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BARS_DIR = pathlib.Path(os.environ.get("TGTRADER_BARS", REPO / ".bars"))
+
+
+def fetch_bars(want: int, bars: int, timeframe: str = "1d") -> None:
+    """Fill the cache from the exchange. Runs BEFORE the session goes offline.
+
+    The first version defaulted BARS_DIR to the scratchpad of the machine it was written on, so
+    it worked there and nowhere else: the Windows session got "no symbol has 750 bars" and no
+    way to fix it, because the session sets TGTRADER_OFFLINE and cannot fetch. A script that
+    only runs where it was written is not a tool, it is a note to self.
+    """
+    import ccxt
+    BARS_DIR.mkdir(parents=True, exist_ok=True)
+    have = [f for f in BARS_DIR.glob("*.json")
+            if len(json.loads(f.read_text())) >= bars]
+    if len(have) >= want:
+        return
+    print(f"cache has {len(have)} symbols with {bars}+ bars, fetching more...")
+    ex = ccxt.bybit({"enableRateLimit": True, "timeout": 20000,
+                     "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}})
+    ex.load_markets()
+    tk = ex.fetch_tickers()
+    stable = {"USDC", "FDUSD", "TUSD", "DAI", "USDE", "BUSD", "USD1", "RLUSD", "USDP", "PYUSD"}
+    pairs = sorted(((tk[sy].get("quoteVolume") or 0.0), sy) for sy in tk
+                   if sy.endswith("/USDT") and (ex.markets.get(sy) or {}).get("spot")
+                   and (ex.markets.get(sy) or {}).get("active")
+                   and sy.split("/")[0] not in stable)[::-1]
+    got = len(have)
+    for _vol, sym in pairs:
+        if got >= want:
+            break
+        f = BARS_DIR / (sym.replace("/", "_") + ".json")
+        if f.exists() and len(json.loads(f.read_text())) >= bars:
+            continue
+        try:
+            rows = ex.fetch_ohlcv(sym, timeframe, limit=max(bars, 1000))
+        except Exception as exc:
+            print(f"  skip {sym}: {type(exc).__name__}")
+            continue
+        if len(rows) >= bars:
+            f.write_text(json.dumps(rows))
+            got += 1
+            print(f"  {sym}: {len(rows)} bars")
+        time.sleep(0.05)
+    print(f"cache ready: {got} symbols in {BARS_DIR}")
 
 
 class Replay:
@@ -95,6 +139,14 @@ def main() -> int:
                     help="bar at which one symbol goes completely dark while holding a position")
     args = ap.parse_args()
 
+    # Fetch BEFORE going offline: the session must not reach the network, but building its
+    # data must be possible on a fresh clone.
+    try:
+        fetch_bars(args.symbols, args.bars)
+    except Exception as exc:
+        print(f"could not fill the bar cache ({type(exc).__name__}: {exc}); "
+              f"using whatever is in {BARS_DIR}")
+
     home = tempfile.mkdtemp(prefix="tgtrader-session-")
     os.environ["TGTRADER_HOME"] = home
     os.environ["TGTRADER_OFFLINE"] = "1"        # the replay is the only data source
@@ -155,7 +207,11 @@ def main() -> int:
     blacked = None
     for i in range(250, n):
         market.i = i
-        if args.blackout and i == args.blackout and market.blackout is None:
+        # At or AFTER the requested bar, the first moment a position is actually open. The
+        # first version wanted that exact bar and the loop starts at 250, so --blackout 200
+        # silently did nothing: the Windows session ran it and got numbers identical to the run
+        # without it, which is the signature of a switch that is not in the path.
+        if args.blackout and i >= max(args.blackout, 250) and market.blackout is None:
             live = db.open_trades("paper")
             if live:
                 blacked = live[0]["symbol"]
@@ -277,6 +333,10 @@ def main() -> int:
             kinds[body.split(":")[0][:58] if ":" in body else body[:58]] += 1
         for k, c in kinds.most_common(5):
             print(f"    {c:>5}x  {k}")
+    if args.blackout and not blacked:
+        problems.append(f"--blackout {args.blackout} never fired - no position was open at or "
+                        f"after bar {max(args.blackout, 250)}, so this run tested nothing "
+                        f"a plain run does not")
     if blacked:
         # Read the engine's STATE, not the log. The UNMANAGED warning is gated on five minutes
         # of WALL-CLOCK time, which is right for a live bot and unreachable in a replay that
