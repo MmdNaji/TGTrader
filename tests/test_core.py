@@ -1734,3 +1734,37 @@ def test_the_unmanaged_warning_backs_off_instead_of_repeating_itself():
         assert "X/Y" not in eng._unmanaged, "the symbol is priced again and still marked dark"
     finally:
         db.close()
+
+
+def test_how_long_a_trade_was_held_is_measured_on_one_clock():
+    """Both ends of the subtraction must be the same clock, or the answer is fiction.
+
+    `opened_at` is stamped through `db.clock`. Subtracting it from a wall-clock "now" was
+    correct only while the two were the same object - the moment a replay set its own clock,
+    every trade in the analysis panel read about 748 days long (measured), because it was
+    subtracting a 2024 stamp from today.
+    """
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.paper_start_balance = 1000; s.risk.capital_limit = 1000
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_held.db")
+    try:
+        pb = PaperBroker(1000); pb.reset(1000)
+        eng = Engine(s, db, broker=pb)
+        eng.log = lambda m, lvl="info": None
+        t0 = 1_700_000_000.0
+        clock = {"t": t0}
+        db.clock = lambda: clock["t"]
+
+        pb.market_order("X/Y", "buy", 1.0, 100.0)
+        tid = db.open_trade("paper", "X/Y", "long", 1.0, 100.0, 90.0, 120.0, "t", "r")
+        clock["t"] = t0 + 3 * 86400.0                      # three days later on THIS clock
+        pos = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+        eng.close_position(pos, 110.0, "target")
+
+        row = db.trade_analysis(tid)
+        close = next(r for r in row if r["kind"] == "close")
+        held = json.loads(close["payload"])["held_seconds"]
+        assert held == pytest.approx(3 * 86400.0, rel=0.01), \
+            f"held for 3 days on the trade's own clock, recorded as {held/86400:.1f} days"
+    finally:
+        db.close()

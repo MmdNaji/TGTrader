@@ -827,7 +827,11 @@ class Engine:
                     entry=entry, exit_price=fill.price, stop=pos.get("stop_price"),
                     init_stop=init_stop, target=pos.get("take_profit"), qty=fill.qty,
                     pnl=pnl, r_multiple=r, fees=fill.fee + entry_fee,
-                    held_seconds=(time.time() - float(opened)) if opened else None,
+                    # `opened_at` was stamped through db.clock, so the other end of this
+                    # subtraction has to be the same clock or the two drift apart - in a replay
+                    # it would read a wall-clock "now" minus a 2024 stamp and call every trade
+                    # four hundred days long. Live, db.clock IS time.time.
+                    held_seconds=(self.db.clock() - float(opened)) if opened else None,
                     regime=detect_regime(df) if df is not None and len(df) > 50 else None,
                     snap=snapshot(df) if df is not None and len(df) else None),
                 analysis.bars(df) if df is not None else None)
