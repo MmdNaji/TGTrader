@@ -1638,8 +1638,18 @@ class MainWindow(QMainWindow):
                        "اگر هر دو را ۵٪ بگذاری، حد ضرر باید ۱۰۰٪ قیمت فاصله بگیرد تا آن تنظیم "
                        "اثری کند — یعنی هیچ‌وقت. ریسک واقعی‌ات آن‌وقت «بزرگ‌ترین پوزیشن» × فاصله‌ی "
                        "حد ضرر است؛ با حد ضرر ۱۰٪ حدود نیم درصد سرمایه، نه ۵٪."))
-        c3.add(FormRow("حد ضرر (ATR ×)", self.s_atr, "۲ = دو برابر نوسان معمول یک کندل"))
-        c3.add(FormRow("نسبت سود به ضرر", self.s_rr, "هدف = این عدد × فاصله‌ی حد ضرر"))
+        c3.add(FormRow("حد ضرر (ATR ×)", self.s_atr,
+                       "۲ = دو برابر نوسان معمول یک کندل.\n"
+                       "⚠ این عدد فقط وقتی به کار می‌رود که استراتژی خودش حد ضرر تعیین نکرده باشد — "
+                       "یعنی مسیر هوش مصنوعی. همه‌ی استراتژی‌های داخلی حد ضرر خودشان را از روی همان "
+                       "ستاپ حساب می‌کنند، پس این عدد برای آن‌ها هیچ تأثیری ندارد. "
+                       "در جاروی ۱.۵ تا ۳ روی ۲۱ ارز و ۱۰۰۰ کندل روزانه، هر چهار مقدار نتیجه‌ی "
+                       "کاملاً یکسان دادند."))
+        c3.add(FormRow("نسبت سود به ضرر", self.s_rr,
+                       "هدف = این عدد × فاصله‌ی حد ضرر.\n"
+                       "روی ۲۱ ارز نقدشونده و ۱۰۰۰ کندل روزانه با کارمزد و لغزش واقعی: عدد ۲ در یک "
+                       "سومِ تاریخ ضرر داد، ۲.۵ و ۳ در هر سه سوم سود دادند. ۲.۵ پیش‌فرض است چون "
+                       "نرخ بردش در همه‌ی تقسیم‌ها بالاتر بود."))
         c3.add(FormRow("تریل بعد از (R)", self.s_trail, "۱ = بعد از یک برابر ریسک سود، حد ضرر به نقطه‌ی ورود می‌آید. ۰ = خاموش"))
         grid.addWidget(c3, 1, 0)
 
@@ -1686,7 +1696,7 @@ class MainWindow(QMainWindow):
             # worst drawdown went 20% -> 30%. Sizing by notional ignores the stop distance, so
             # a wide-stop trade risks several times what a tight-stop one does.
             self.s_pospct.setValue(0)
-            self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
+            self.s_rr.setValue(2.5); self.s_trail.setValue(1.0)
             msg = ("حالت هوشمند چندارزی اعمال شد: ۸ ارز، تایم‌فریم روزانه، دقت max، تا ۸ پوزیشن.\n\n"
                    "صادقانه بگویم: در شبیه‌سازی خودِ موتور روی یک حساب ۱۰۰۰ دلاری و ۶۰۰ کندل روزانه، "
                    "پخش‌کردن همان پول روی ۸ ارز بدتر از ۳ ارز درآمد (‎-۶.۴٪‎ در برابر ‎+۰.۵٪‎)، "
@@ -1695,7 +1705,7 @@ class MainWindow(QMainWindow):
             self.s_agg.setCurrentText("normal"); self.s_effort.setCurrentText("max"); self.s_llm.setChecked(True)
             self.s_symbols.setText("BTC/USDT, ETH/USDT, SOL/USDT")
             self.s_maxpos.setValue(3); self.s_tf.setCurrentText("1d"); self.s_loop.setValue(60); self.s_pospct.setValue(0)
-            self.s_rr.setValue(2.0); self.s_trail.setValue(1.0)
+            self.s_rr.setValue(2.5); self.s_trail.setValue(1.0)
             msg = ("حالت جدی و صبور اعمال شد: روزانه، normal، ۳ ارز، اندازه‌ی خودکار.\n\n"
                    "بهترین ترکیبی بود که اندازه‌گیری شد، ولی بزرگش نمی‌کنم: ‎+۰.۵٪‎ روی حساب مشترک "
                    "۱۰۰۰ دلاری با بیشترین افت ۹.۳٪ — یعنی عملاً سربه‌سر. همان قوانین با ۸ ارز "

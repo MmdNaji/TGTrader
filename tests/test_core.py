@@ -64,9 +64,14 @@ def test_strategies_emit_signals_somewhere():
 
 def test_risk_sizing_and_limits():
     db = Database(Path(os.environ["TGTRADER_HOME"]) / "t1.db")
-    rm = RiskManager(RiskSettings(capital_limit=100, risk_per_trade=0.01, max_position_frac=0.5), db, "paper")
+    risk = RiskSettings(capital_limit=100, risk_per_trade=0.01, max_position_frac=0.5)
+    rm = RiskManager(risk, db, "paper")
     s = rm.size("long", price=50.0, stop_distance=1.0, equity=1000)
-    assert s and abs(s.risk_amount - 1.0) < 1e-9 and s.stop_price == 49.0 and s.take_profit == 52.0
+    # derived from the setting, not written out: this asserts the RULE (target is
+    # reward_risk x the stop distance above entry), so moving the default on evidence does not
+    # look like a broken test.
+    assert s and abs(s.risk_amount - 1.0) < 1e-9 and s.stop_price == 49.0
+    assert abs(s.take_profit - (50.0 + risk.reward_risk * 1.0)) < 1e-9
     # notional cap: qty*price <= 50
     s2 = rm.size("long", price=50.0, stop_distance=0.01, equity=1000)
     assert s2 and s2.notional <= 50.0 + 1e-9
