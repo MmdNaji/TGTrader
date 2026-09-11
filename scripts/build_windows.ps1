@@ -34,6 +34,22 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+# Run an external program without letting its stderr become a terminating error.
+#
+# $ErrorActionPreference = "Stop" plus a native command is a trap in Windows PowerShell 5.1:
+# if anything merges stderr (2>&1, *>&1, or a logging wrapper around this script), every line
+# the program writes to stderr is wrapped as a NativeCommandError - and with "Stop" that is
+# TERMINATING. PyInstaller writes its ordinary INFO progress to stderr, so the build would die
+# on its first normal line of output, blaming a message that is not an error at all.
+#
+# Exit codes are what actually matter here, and every caller already checks $LASTEXITCODE.
+function Invoke-Native {
+    param([Parameter(Mandatory)][scriptblock]$Cmd)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Cmd } finally { $ErrorActionPreference = $prev }
+}
+
 function Say  ([string]$m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok   ([string]$m) { Write-Host "    $m" -ForegroundColor Green }
 function Warn ([string]$m) { Write-Host "    $m" -ForegroundColor Yellow }
@@ -82,8 +98,8 @@ if (-not (Test-Path ".venv")) {
 $vpy = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $vpy)) { Die "‏.venv خراب است. پوشه‌ی .venv را پاک کن و دوباره اجرا کن." }
 
-& $vpy -m pip install --upgrade pip --quiet
-& $vpy -m pip install -r requirements.txt pyinstaller pytest --quiet
+Invoke-Native { & $vpy -m pip install --upgrade pip --quiet }
+Invoke-Native { & $vpy -m pip install -r requirements.txt pyinstaller pytest --quiet }
 if ($LASTEXITCODE -ne 0) { Die "نصب کتابخانه‌ها شکست خورد. اینترنت/پروکسی را چک کن." }
 Ok "همه نصب شدند"
 
@@ -104,7 +120,7 @@ Ok "در حال ساخت نسخه‌ی $ver"
 # ---------------------------------------------------------------- 4. تست‌ها
 if (-not $SkipTests) {
     Say "تست‌ها"
-    & $vpy -m pytest -q tests
+    Invoke-Native { & $vpy -m pytest -q tests }
     if ($LASTEXITCODE -ne 0) {
         Die "تست‌ها رد شدند. با -SkipTests می‌توانی رد شوی، ولی یعنی نسخه‌ای می‌سازی که خودش می‌گوید خراب است."
     }
@@ -116,11 +132,14 @@ if (-not $SkipTests) {
 # ---------------------------------------------------------------- 5. ساخت exe
 Say "ساخت exe  (چند دقیقه طول می‌کشد)"
 Remove-Item -Recurse -Force "dist\TGTrader" -ErrorAction SilentlyContinue
-& $vpy -m PyInstaller --noconfirm --clean --windowed --name TGTrader `
-    --add-data "trader\knowledge\seed;trader\knowledge\seed" `
-    --collect-all ccxt --collect-submodules trader `
-    --hidden-import PySide6.QtSvg --hidden-import pyautogui --hidden-import mss --hidden-import PIL `
-    run.py
+# PyInstaller prints its ordinary progress to stderr - see Invoke-Native above.
+Invoke-Native {
+    & $vpy -m PyInstaller --noconfirm --clean --windowed --name TGTrader `
+        --add-data "trader\knowledge\seed;trader\knowledge\seed" `
+        --collect-all ccxt --collect-submodules trader `
+        --hidden-import PySide6.QtSvg --hidden-import pyautogui --hidden-import mss --hidden-import PIL `
+        run.py
+}
 if ($LASTEXITCODE -ne 0) { Die "PyInstaller شکست خورد." }
 
 $exe = "dist\TGTrader\TGTrader.exe"
@@ -164,7 +183,7 @@ if (-not $NoInstaller) {
     if ($onPath) { $candidates += $onPath.Source }
     $iscc = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     if ($iscc) {
-        & $iscc "/DAppVersion=$ver" "scripts\installer.iss"
+        Invoke-Native { & $iscc "/DAppVersion=$ver" "scripts\installer.iss" }
         if ($LASTEXITCODE -ne 0) { Die "‏Inno Setup شکست خورد." }
         Ok "ساخته شد: dist\TGTrader-Setup.exe"
         # dist\TGTrader-Setup.exe is overwritten by every build, so keep a stamped copy.
