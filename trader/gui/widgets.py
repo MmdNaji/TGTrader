@@ -23,6 +23,11 @@ class Card(QFrame):
         self.header = QHBoxLayout(); self.header.setSpacing(8)
         self.title_lbl = QLabel(title); self.title_lbl.setObjectName("cardTitle")
         self.sub_lbl = QLabel(bidi_safe(subtitle)); self.sub_lbl.setObjectName("cardSub")
+        # A one-line Persian subtitle is a 350px minimum width that the card can never go
+        # below, and a card that cannot shrink pushes the whole WINDOW wider. Measured: the
+        # subtitles alone were most of a 984px minimum on a page with two of them side by
+        # side. Wrapping costs a second line on a narrow window and nothing on a wide one.
+        self.sub_lbl.setWordWrap(True)
         tcol = QVBoxLayout(); tcol.setSpacing(0); tcol.addWidget(self.title_lbl)
         if subtitle:
             tcol.addWidget(self.sub_lbl)
@@ -114,6 +119,47 @@ def bidi_safe(text: str) -> str:
 def hint(text: str) -> QLabel:
     lbl = QLabel(bidi_safe(text)); lbl.setObjectName("hint"); lbl.setWordWrap(True)
     return lbl
+
+
+class ElidedLabel(QLabel):
+    """A label that gives up its words instead of forcing the window wider.
+
+    QLabel's minimum width is the width of its text, so one long Persian sentence sitting in a
+    row that cannot wrap becomes a floor under the WHOLE WINDOW. Measured here: the topbar
+    subtitle alone accounted for 224 of the 984 pixels the window refused to go below, and the
+    same row on Windows is wider again - the Windows build could not be made narrower than
+    1617 physical pixels, which does not fit a 1366-pixel laptop screen at all.
+
+    So this one reports a minimum width of zero, keeps the full sentence for the tooltip, and
+    draws as much of it as fits with an ellipsis.
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self._full = text
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def setText(self, text: str) -> None:           # type: ignore[override]
+        self._full = text
+        self._redraw()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def minimumSizeHint(self):                       # type: ignore[override]
+        s = super().minimumSizeHint()
+        s.setWidth(0)
+        return s
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._redraw()
+
+    def _redraw(self) -> None:
+        fm = self.fontMetrics()
+        fits = fm.horizontalAdvance(self._full) <= self.width()
+        super().setText(self._full if fits else fm.elidedText(self._full, Qt.ElideRight, max(0, self.width())))
+        self.setToolTip("" if fits else self._full)
 
 
 def section(text: str) -> QLabel:

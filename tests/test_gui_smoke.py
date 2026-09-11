@@ -605,3 +605,95 @@ def test_closing_everything_says_what_it_costs(win, monkeypatch):
     assert "برگشت‌پذیر نیست" in text
     assert win.db.open_trades("paper"), "answering No must close nothing"
     win.engine = None
+
+
+def test_the_window_fits_a_small_laptop_screen(win):
+    """It could not be made narrower than 1617 physical pixels on the Windows build, which does
+    not fit a 1366-pixel laptop screen at all - the user could not see the right-hand edge of
+    their own window. Nothing asked for that floor; it was the sum of things that merely could
+    not shrink: one-line card subtitles, the topbar's four labelled buttons and its page
+    subtitle, and four pages that were not inside a scroll area and so imposed their widest
+    control row on the whole window.
+
+    Fonts differ between this box and Windows, so the number here is not the number there. What
+    this pins is that no page and no card is allowed to be the floor - only the topbar is, and
+    the topbar gives its words up on the way down.
+    """
+    app = QApplication.instance() or QApplication([])
+    win.resize(900, 820)
+    for _ in range(4):
+        app.processEvents()
+    assert win.minimumWidth() <= 820, f"window minimum is {win.minimumWidth()}px"
+    # No PAGE may be the binding constraint. A page that cannot shrink is the bug that put the
+    # floor at 1617 in the first place, and it comes back the moment someone adds a wide row.
+    wide = {k: p.minimumSizeHint().width() for k, p in win.pages.items()
+            if p.minimumSizeHint().width() > 250}
+    assert not wide, f"these pages impose a width of their own: {wide}"
+
+
+def test_the_topbar_gives_up_its_words_before_the_window_gives_up(win):
+    """Below TOPBAR_COMPACT_W the four action buttons keep their icon and drop their label, and
+    the full label moves into the tooltip - so nothing is lost but the room. Widening puts every
+    word back, including the ones set at runtime (the run button says توقف while the engine is
+    running, and the update button carries a version number)."""
+    from trader.gui.app import TOPBAR_COMPACT_W
+    app = QApplication.instance() or QApplication([])
+    buttons = (win.btn_run, win.btn_kill, win.btn_reset, win.btn_update)
+
+    win.resize(TOPBAR_COMPACT_W + 200, 820)
+    for _ in range(4):
+        app.processEvents()
+    wide = {b: b.text() for b in buttons}
+    assert all(len(t.split()) > 1 for t in wide.values()), f"expected worded labels: {wide}"
+
+    win.resize(TOPBAR_COMPACT_W - 200, 820)
+    for _ in range(4):
+        app.processEvents()
+    for b in buttons:
+        assert b.text() == wide[b].split()[0], f"{wide[b]!r} did not compact to its icon"
+        assert wide[b] in b.toolTip(), f"the words are gone and the tooltip does not carry them: {b.toolTip()!r}"
+
+    win.resize(TOPBAR_COMPACT_W + 200, 820)
+    for _ in range(4):
+        app.processEvents()
+    assert {b: b.text() for b in buttons} == wide, "the words did not come back"
+
+
+def test_a_table_never_sticks_out_of_the_card_it_is_in(win):
+    """The narrow window turned one bug into another: columns stopped being squeezed below their
+    contents, and instead the table drew wider than the card and was CLIPPED by it - the last two
+    columns were not reachable at all, and there was no horizontal scrollbar, because as far as
+    the table was concerned everything fitted.
+
+    A table may scroll. It may not be wider than what contains it.
+    """
+    from trader.gui.widgets import fill
+    app = QApplication.instance() or QApplication([])
+    rows = [["ETH/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
+             "⁦-0.10 $ (-0.20%)⁩"],
+            ["AVAX/USDT", "خرید", "7.4837", "7.4780", "50.02 $", "7.1392", "8.1728",
+             "⁦-0.04 $ (-0.08%)⁩"]]
+    t = win.tbl_positions
+    # Qt does not lay out a widget on a page that is not showing, so on any other page this
+    # table keeps the size it was born with and every width reads the same frozen number - a
+    # test that measures that is measuring nothing. The `win` fixture is module-scoped and the
+    # page it is left on depends on which tests ran first.
+    win.show()
+    win.goto("dashboard")
+    over, seen = {}, set()
+    for width in range(820, 1700, 20):
+        win.resize(width, 820)
+        t.show()
+        fill(t, rows)
+        for _ in range(3):
+            app.processEvents()
+        card = t.parentWidget()
+        while card is not None and card.objectName() not in ("card", "cardAccent"):
+            card = card.parentWidget()
+        assert card is not None
+        seen.add(card.width())
+        if t.width() > card.width():
+            over[width] = (t.width(), card.width())
+    # The card has to have actually moved, or the loop proved nothing at all.
+    assert len(seen) > 5, f"the layout never ran - the card was {seen} at every window width"
+    assert not over, f"the table stuck out of its card at these window widths: {over}"

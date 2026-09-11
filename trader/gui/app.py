@@ -30,7 +30,14 @@ from ..knowledge.skills import load_seed_skills, add_extracted, active_skills
 from . import theme
 from .chart import CandleChart
 from .help_fa import HELP_HTML
-from .widgets import Card, Kpi, pill, set_pill, hint, section, FormRow, Empty, table, fill, EquityCurve, button
+from .widgets import (Card, Kpi, pill, set_pill, hint, section, FormRow, Empty, table, fill, EquityCurve,
+                      button, ElidedLabel)
+
+# Below this WINDOW width the topbar buttons keep their icon and drop their words. The four
+# labelled buttons plus the page subtitle were 764 of the 984 pixels this window refused to go
+# below - and the Windows build refused at 1617 physical pixels, which does not fit a 1366px
+# laptop screen at all. The tooltip carries the full label, so nothing is lost but the room.
+TOPBAR_COMPACT_W = 1150
 
 NAV = [
     ("dashboard", "🏠", "داشبورد", "وضعیت حساب، پوزیشن‌ها و تصمیم‌های ربات"),
@@ -341,22 +348,57 @@ class MainWindow(QMainWindow):
         h = QHBoxLayout(bar); h.setContentsMargins(22, 0, 22, 0); h.setSpacing(14)
         tcol = QVBoxLayout(); tcol.setSpacing(0)
         self.page_title = QLabel("داشبورد"); self.page_title.setObjectName("pageTitle")
-        self.page_sub = QLabel(""); self.page_sub.setObjectName("pageSub")
+        self.page_sub = ElidedLabel(""); self.page_sub.setObjectName("pageSub")
         tcol.addWidget(self.page_title); tcol.addWidget(self.page_sub)
-        h.addLayout(tcol); h.addStretch()
+        # The title column takes the slack, not a stretch after it. An ElidedLabel reports a
+        # size hint of zero, so with the stretch swallowing the leftover the subtitle was cut
+        # short on a 1400px window that had room for it three times over.
+        h.addLayout(tcol, 1)
         self.pill_mode = pill("کاغذی", "gold"); h.addWidget(self.pill_mode)
         self.pill_state = pill("متوقف", "muted"); h.addWidget(self.pill_state)
         self.btn_run = button("▶  شروع", "primary", self.toggle_engine); h.addWidget(self.btn_run)
-        self.btn_kill = button("⛔ اضطراری", "ghost", self.toggle_kill); self.btn_kill.setToolTip("هیچ معامله‌ی جدیدی باز نمی‌شود تا خاموشش کنی"); h.addWidget(self.btn_kill)
+        self.btn_kill = button("⛔ اضطراری", "ghost", self.toggle_kill)
+        self.btn_kill._tip = "هیچ معامله‌ی جدیدی باز نمی‌شود تا خاموشش کنی"
+        h.addWidget(self.btn_kill)
         self.btn_reset = button("🧪 ریست تست", "ghost", self.reset_test)
-        self.btn_reset.setToolTip("پاک‌کردن معامله‌ها، سود/زیان و نمودار سرمایه، و شروع دوباره با موجودی دلخواه")
+        self.btn_reset._tip = "پاک‌کردن معامله‌ها، سود/زیان و نمودار سرمایه، و شروع دوباره با موجودی دلخواه"
         h.addWidget(self.btn_reset)
         # It was a bare icon: nothing on it said what it did, and a tooltip is only found by
         # someone who already suspects there is something to find.
         self.btn_update = button("🔄 به‌روزرسانی", "ghost", lambda: self._check_update(manual=True))
-        self.btn_update.setToolTip("بررسی نسخه‌ی جدید و نصب آن")
+        self.btn_update._tip = "بررسی نسخه‌ی جدید و نصب آن"
         h.addWidget(self.btn_update)
+        self._topbar_compact: bool | None = None
+        self._apply_topbar_density()
         return bar
+
+    # ------------------------------------------------------------ topbar density
+    def _btn_label(self, btn, text: str) -> None:
+        """Set a topbar button's label, dropping the words when the window is narrow."""
+        btn._full = text
+        tip = getattr(btn, "_tip", "")
+        if self.width() < TOPBAR_COMPACT_W:
+            head = text.split()[0] if text.split() else text
+            btn.setText(head)
+            btn.setToolTip(text + (" — " + tip if tip else ""))
+        else:
+            btn.setText(text)
+            btn.setToolTip(tip)
+
+    def _apply_topbar_density(self) -> None:
+        compact = self.width() < TOPBAR_COMPACT_W
+        if compact == self._topbar_compact:
+            return
+        self._topbar_compact = compact
+        for b in (self.btn_run, self.btn_kill, self.btn_reset, self.btn_update):
+            self._btn_label(b, getattr(b, "_full", b.text()))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # The buttons exist only after _topbar() has run, and the first resize arrives during
+        # __init__, before it.
+        if getattr(self, "_topbar_compact", None) is not None:
+            self._apply_topbar_density()
 
     def goto(self, key: str) -> None:
         self.stack.setCurrentWidget(self.pages[key])
@@ -650,7 +692,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "به‌روزرسانی", f"نسخه‌ی فعلی ({__version__}) آخرین نسخه است.")
             return
         self._pending_update = rel
-        self.btn_update.setText(f"🔄 نصب {rel.version}"); self.btn_update.setObjectName("primary")
+        self._btn_label(self.btn_update, f"🔄 نصب {rel.version}"); self.btn_update.setObjectName("primary")
         self.btn_update.style().unpolish(self.btn_update); self.btn_update.style().polish(self.btn_update)
         self._on_event(f"[update] version {rel.version} is available")
         if not manual and updater.attempted_recently(rel.version):
@@ -805,7 +847,7 @@ class MainWindow(QMainWindow):
         v.addWidget(split, 1)
         self._desk_chart_last = 0.0
         QTimer.singleShot(700, self, self.refresh_desk_chart)
-        return w
+        return self._scroll(w)
 
     def refresh_desk_chart(self):
         sym = self.desk_symbol.currentText().strip().upper(); tf = self.desk_tf.currentText()
@@ -835,7 +877,7 @@ class MainWindow(QMainWindow):
         self.ch_symbol.currentTextChanged.connect(lambda _: (self._sync_watch_symbols(), self.refresh_chart()))
         self.ch_tf.currentTextChanged.connect(lambda _: self.refresh_chart())
         v.addWidget(c, 1)
-        return w
+        return self._scroll(w)
 
     def market_data(self):
         from ..market.data import MarketData
@@ -1065,7 +1107,7 @@ class MainWindow(QMainWindow):
         c2.add(hint("چند ردیف را با Ctrl انتخاب کن تا یک‌جا تغییر وضعیت بدهی."))
         split.addWidget(c1); split.addWidget(c2); split.setSizes([700, 420])
         v.addWidget(split, 1)
-        return w
+        return self._scroll(w)
 
     def _selected_skill_ids(self) -> list[int]:
         return [int(self.tbl_skills.item(i.row(), 0).text()) for i in self.tbl_skills.selectionModel().selectedRows()]
@@ -1127,7 +1169,7 @@ class MainWindow(QMainWindow):
         c2.add_layout(hc)
         split.addWidget(c1); split.addWidget(c2); split.setSizes([640, 520])
         v.addWidget(split, 1)
-        return w
+        return self._scroll(w)
 
     def _selected_doc_id(self) -> int | None:
         rows = self.tbl_docs.selectionModel().selectedRows()
@@ -1640,9 +1682,9 @@ class MainWindow(QMainWindow):
         else:
             set_pill(self.pill_state, "در حال اجرا" if running else "متوقف", "ok" if running else "muted")
         set_pill(self.side_status, ("⛔ اضطراری" if kill else ("● در حال اجرا" if running else "○ متوقف")), "danger" if kill else ("ok" if running else "muted"))
-        self.btn_run.setText("■  توقف" if running else "▶  شروع"); self.btn_run.setObjectName("danger" if running else "primary")
+        self._btn_label(self.btn_run, "■  توقف" if running else "▶  شروع"); self.btn_run.setObjectName("danger" if running else "primary")
         self.btn_run.style().unpolish(self.btn_run); self.btn_run.style().polish(self.btn_run)
-        self.btn_kill.setText("⛔ اضطراری: روشن" if kill else "⛔ اضطراری"); self.btn_kill.setObjectName("danger" if kill else "ghost")
+        self._btn_label(self.btn_kill, "⛔ اضطراری: روشن" if kill else "⛔ اضطراری"); self.btn_kill.setObjectName("danger" if kill else "ghost")
         self.btn_kill.style().unpolish(self.btn_kill); self.btn_kill.style().polish(self.btn_kill)
 
         ok_ai = s.has_llm(); ok_ex = bool(s.exchange.exchange_id and s.symbols); ok_risk = s.risk.capital_limit > 0 and s.risk.risk_per_trade > 0
