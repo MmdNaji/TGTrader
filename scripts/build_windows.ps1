@@ -77,8 +77,11 @@ Ok "همه نصب شدند"
 if ($Version) {
     Say "نسخه"
     $init = "trader\__init__.py"
-    (Get-Content $init -Raw) -replace '(?m)^__version__ = .*', "__version__ = `"$Version`"" |
-        Set-Content $init -NoNewline -Encoding utf8
+    # NOT Set-Content -Encoding utf8: in Windows PowerShell 5.1 - which is what the .bat
+    # launches - "utf8" means utf8 WITH a BOM, and this writes a Python source file. Writing
+    # the file through .NET with an explicit BOM-less encoding behaves the same on 5.1 and 7.
+    $text = (Get-Content $init -Raw) -replace '(?m)^__version__ = .*', "__version__ = `"$Version`""
+    [System.IO.File]::WriteAllText($init, $text, (New-Object System.Text.UTF8Encoding $false))
     Ok "نسخه روی $Version تنظیم شد"
 }
 $ver = (& $vpy -c "import trader;print(trader.__version__)").Trim()
@@ -126,14 +129,39 @@ Ok "باز شد و سرِ پا ماند"
 # ---------------------------------------------------------------- 7. نصب‌کننده
 if (-not $NoInstaller) {
     Say "نصب‌کننده"
-    $iscc = @(
+    # Two hard-coded paths were not enough: winget installs Inno Setup per-user by default,
+    # which is neither of them. Ask the registry and PATH as well before giving up.
+    $candidates = @(
         "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+    )
+    foreach ($hive in @("HKLM:", "HKCU:")) {
+        foreach ($wow in @("\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                           "\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
+            $key = "$hive$wow\Inno Setup 6_is1"
+            try {
+                $loc = (Get-ItemProperty -Path $key -ErrorAction Stop).InstallLocation
+                if ($loc) { $candidates += (Join-Path $loc "ISCC.exe") }
+            } catch { }
+        }
+    }
+    $onPath = (Get-Command iscc -ErrorAction SilentlyContinue)
+    if ($onPath) { $candidates += $onPath.Source }
+    $iscc = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     if ($iscc) {
         & $iscc "/DAppVersion=$ver" "scripts\installer.iss"
         if ($LASTEXITCODE -ne 0) { Die "‏Inno Setup شکست خورد." }
         Ok "ساخته شد: dist\TGTrader-Setup.exe"
+        # dist\TGTrader-Setup.exe is overwritten by every build, so keep a stamped copy.
+        # A flat file rather than a folder per build: they sort by name and sit next to
+        # each other. Only the installer - the portable folder is ~240 MB a time.
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $buildsDir = Join-Path $root "builds"
+        New-Item -ItemType Directory -Path $buildsDir -Force | Out-Null
+        $archiveFile = Join-Path $buildsDir "TGTrader-$ver-$stamp-Setup.exe"
+        Copy-Item "dist\TGTrader-Setup.exe" $archiveFile -Force
+        Ok "آرشیو شد: builds\TGTrader-$ver-$stamp-Setup.exe"
     } else {
         Warn "‏Inno Setup نصب نیست، پس نصب‌کننده ساخته نشد."
         Warn "اگر می‌خواهی: https://jrsoftware.org/isdl.php  (بعد دوباره این اسکریپت را بزن)"
