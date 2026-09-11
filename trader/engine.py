@@ -74,6 +74,12 @@ class Engine:
         self._leader_regime: str | None = None   # trend of BTC on this pass
         self._unmanaged: dict[str, float] = {}   # symbol -> when its price last went missing
         self._last_beat = 0.0                    # when the engine last said it was alive
+        # Whole-market watch. The sweep costs ~13 seconds of requests, so it runs on its own
+        # thread and the trading loop only ever READS the result. Doing it inline would leave
+        # every open position's stop unchecked for those seconds, once an hour, forever.
+        self._watch: Any | None = None           # the last completed sweep
+        self._watch_thread: threading.Thread | None = None
+        self._watch_at = 0.0
         self.status: dict[str, Any] = {"running": False, "last_loop": 0.0, "error": ""}
         load_seed_skills(db)
         self.strategies = ([Scalp()] + list(DEFAULT_STRATEGIES)
@@ -83,7 +89,11 @@ class Engine:
     def _make_broker(self) -> Broker:
         s = self.settings
         if s.mode == "paper":
-            return PaperBroker(s.paper_start_balance)
+            # Mirror the broker this is standing in for: forex through MT5 can short, crypto
+            # through a spot ccxt account cannot. Paper that shorts on crypto reports a result
+            # the live account could never have produced.
+            return PaperBroker(s.paper_start_balance,
+                               allow_short=(s.market == "forex" or s.paper_allow_short))
         if s.market == "forex":
             from .execution.mt5_broker import Mt5Broker
             return Mt5Broker(s)
@@ -122,7 +132,18 @@ class Engine:
         th = self._thread
         if wait > 0 and th is not None and th.is_alive():
             th.join(timeout=wait)
-        return not (th is not None and th.is_alive())
+        # The market sweep is a SECOND thread and it sits in network requests for about
+        # thirteen seconds at a time. Leaving it running is precisely the shape that made the
+        # Windows test run exit 0xC0000005: a live thread inside OpenSSL when the process was
+        # torn down. It is asked to stop through the same event - watchlist.choose() takes
+        # `abort` and the fallback chain checks it between sources - so this join is short.
+        wt = self._watch_thread
+        if wait > 0 and wt is not None and wt.is_alive():
+            wt.join(timeout=wait)
+            if wt.is_alive():
+                self.log("دیده‌بان بازار هنوز در حال درخواست شبکه است و جا نماند", "warn")
+        alive = [t for t in (th, wt) if t is not None and t.is_alive()]
+        return not alive
 
     def running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
@@ -170,14 +191,62 @@ class Engine:
                      f"trade #{row['id']} marked closed at entry", "warn")
 
     # ------------------------------------------------------------ one pass
+    # ------------------------------------------------------------ whole-market watch
+    def watch_symbols(self) -> list[str]:
+        """What the last market sweep picked, or the typed list when the watch is off."""
+        w = self._watch
+        if self.settings.auto_symbols and w and w.symbols:
+            return list(w.symbols)
+        return list(self.settings.symbols)
+
+    def _maybe_sweep(self, held: list[str]) -> None:
+        """Kick off a market sweep if one is due and none is running."""
+        if not self.settings.auto_symbols or self._stop.is_set():
+            return
+        if self._watch_thread and self._watch_thread.is_alive():
+            return
+        every = max(5, int(self.settings.auto_symbols_every_min)) * 60.0
+        if self._watch_at and time.time() - self._watch_at < every:
+            return
+        self._watch_at = time.time()      # stamped BEFORE the work, so a sweep that throws
+                                          # cannot re-fire on every single loop
+
+        def run() -> None:
+            from .market import watchlist
+            try:
+                w = watchlist.choose(
+                    self.settings, self.market,
+                    want=int(self.settings.auto_symbols_count),
+                    pool=int(self.settings.auto_symbols_pool),
+                    timeframe=self.settings.timeframe, keep=held,
+                    allow_short=self.broker.supports_short(),
+                    abort=self._stop.is_set)
+                if self._stop.is_set():
+                    return
+                before = set(self.watch_symbols())
+                self._watch = w
+                self.log(f"دیده‌بان بازار: {w.note}")
+                added = [x for x in w.symbols if x not in before]
+                dropped = [x for x in before if x not in w.symbols and x not in held]
+                if added or dropped:
+                    self.log("فهرست کاری عوض شد"
+                             + (f" · اضافه: {'، '.join(added)}" if added else "")
+                             + (f" · حذف: {'، '.join(dropped)}" if dropped else ""))
+            except Exception as exc:
+                self.log(f"دیده‌بان بازار انجام نشد: {exc}", "warn")
+
+        self._watch_thread = threading.Thread(target=run, name="market-watch", daemon=True)
+        self._watch_thread.start()
+
     def loop_once(self) -> None:
         if not self._reconciled:
             self._reconcile()
             self._reconciled = True
         open_positions = [dict(r) for r in self.db.open_trades(self.mode)]
+        self._maybe_sweep([p["symbol"] for p in open_positions])
         # An open position is managed whatever the symbol list says now. Removing a symbol from
         # settings must not abandon a live trade with a stop nobody is watching.
-        symbols = list(self.settings.symbols)
+        symbols = self.watch_symbols()
         for p in open_positions:
             if p["symbol"] not in symbols:
                 symbols.append(p["symbol"])

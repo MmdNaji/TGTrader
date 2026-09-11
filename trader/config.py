@@ -145,6 +145,30 @@ class Settings:
     # stays available because it is a real correlation control in a crash, but it is not free.
     align_with_leader: bool = False
 
+    # Let the PAPER account short on crypto. Off, because the live crypto broker here is a spot
+    # account and cannot: a paper run that shorts is reporting trades going live would refuse.
+    # Turn it on only to see what a margin account would have done - and then do not read the
+    # result as what this account will do. Measured worth of shorts on 21 pairs, ~1,000 daily
+    # bars: win rate 45.7% -> 46.6% on the first half and 42.7% -> 48.1% on the second, and the
+    # second half's return roughly doubled. Real, and not available on spot.
+    paper_allow_short: bool = False
+
+    # --- watch the whole market ---
+    # OFF by default, and the numbers are the reason rather than caution. Measured on 21 liquid
+    # pairs and ~1,000 daily bars, against 200 randomly drawn 8-coin lists, capped at 4 open
+    # either way and scored in R: watching everything beat 96% of the random lists on the first
+    # half of the history and 38% of them on the second. It was positive on both halves and
+    # nowhere near the worst list either time.
+    #
+    # So it is worth having and it is not free money. What it reliably buys is that nobody has
+    # to guess which coins to type in - a fixed list can do better than this and can do -11.3R,
+    # and there is no way to know in advance which one you picked. See market/watchlist.py.
+    auto_symbols: bool = False
+    auto_symbols_count: int = 4        # how many to hand the engine at a time
+    auto_symbols_pool: int = 40        # how many of the most liquid pairs to look at each sweep
+    auto_symbols_every_min: int = 60   # a sweep costs ~13s of requests; hourly on a daily chart
+                                       # is already far more often than a daily bar changes
+
     # --- trading ---
     mode: str = "paper"           # paper | live
     market: str = "crypto"        # crypto | forex
@@ -302,6 +326,13 @@ class Settings:
             problems.append("reward_risk must be positive")
         if self.loop_seconds < 1:
             problems.append("loop_seconds must be at least 1")
+        if self.auto_symbols:
+            if not (1 <= self.auto_symbols_count <= 12):
+                problems.append("auto_symbols_count must be between 1 and 12")
+            if not (5 <= self.auto_symbols_pool <= 120):
+                problems.append("auto_symbols_pool must be between 5 and 120")
+            if self.auto_symbols_every_min < 5:
+                problems.append("auto_symbols_every_min must be at least 5")
         if self.mode == "live" and self.market == "crypto" and not self.computer.enabled:
             if self.exchange.exchange_id.lower() in NO_API_EXCHANGES:
                 problems.append(f"{self.exchange.exchange_id} has no trading API - enable screen control (Settings -> Screen control) for live orders")

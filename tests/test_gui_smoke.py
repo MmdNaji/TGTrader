@@ -1093,8 +1093,12 @@ def test_the_trade_analysis_view_draws_the_chart_as_it_was(win):
         closed = db.closed_trades("paper")
         assert closed, "the harness closed no trade, so the view has nothing to show"
 
-        win.db = db
-        win.settings = s
+        # The `win` fixture is MODULE-scoped: whatever this test points it at, the next test
+        # inherits. An earlier version left win.db pointing at the database closed in the
+        # finally below, and the settings test after it died on "Cannot operate on a closed
+        # database" - a failure with nothing to do with the code it was testing.
+        keep_db, keep_settings = win.db, win.settings
+        win.db, win.settings = db, s
         win._closed_rows = [dict(r) for r in closed]
         dlg = win._show_trade_analysis(0, show=False)
         assert dlg is not None, "the dialog was not built"
@@ -1110,5 +1114,61 @@ def test_the_trade_analysis_view_draws_the_chart_as_it_was(win):
         last_bar = float(dlg._chart.df.index[-1].timestamp())
         assert last_bar <= float(closed[0]["closed_at"]) + 1
         dlg.deleteLater()
+    finally:
+        win.db, win.settings = keep_db, keep_settings
+        win._closed_rows = []
+        db.close()
+
+
+def test_the_market_watch_switch_actually_saves(win):
+    """A settings control that does not reach the file is the shape this project keeps finding:
+    the ATR stop multiple sat on this page for weeks deciding nothing, and the ccxt spot-only
+    option was in the wrong shape for as long. So the switch is checked through the real save
+    path and through a reload from disk, not by reading the widget back."""
+    from trader.config import Settings as _S
+    win.goto("settings")
+    QApplication.instance().processEvents()
+    win.s_auto_sym.setChecked(True)
+    win.s_auto_n.setValue(6)
+    win.s_auto_every.setValue(30)
+    win._save_settings()
+    QApplication.instance().processEvents()
+    assert win.settings.auto_symbols is True
+    assert win.settings.auto_symbols_count == 6
+    assert win.settings.auto_symbols_every_min == 30
+    back = _S.load()
+    assert back.auto_symbols is True and back.auto_symbols_count == 6 \
+        and back.auto_symbols_every_min == 30, "the watch settings did not survive a reload"
+
+    win.s_auto_sym.setChecked(False)
+    win._save_settings()
+    QApplication.instance().processEvents()
+    assert _S.load().auto_symbols is False, "and it must switch back off again"
+
+
+def test_the_engine_asks_the_watch_only_when_it_is_switched_on(win):
+    """With the watch off, the typed list is what trades - a sweep must not quietly replace it.
+    With it on, the sweep's picks are what the loop reads."""
+    from trader.config import Settings
+    from trader.engine import Engine
+    from trader.execution.paper import PaperBroker
+    from trader.market.watchlist import Watch
+    from trader.db import Database
+    import pathlib
+
+    s = Settings(); s.mode = "paper"; s.symbols = ["AAA/USDT", "BBB/USDT"]
+    s.use_llm_for_decisions = False
+    db = Database(pathlib.Path(tempfile.mkdtemp(prefix="tg-watch-")) / "w.db")
+    try:
+        eng = Engine(s, db, broker=PaperBroker(1000))
+        eng._watch = Watch(symbols=["ZZZ/USDT"], rows=[], at=1.0, note="")
+        s.auto_symbols = False
+        assert eng.watch_symbols() == ["AAA/USDT", "BBB/USDT"], "the watch overrode a typed list"
+        s.auto_symbols = True
+        assert eng.watch_symbols() == ["ZZZ/USDT"]
+        # and with the watch on but no sweep finished yet, the typed list still runs the engine
+        eng._watch = None
+        assert eng.watch_symbols() == ["AAA/USDT", "BBB/USDT"], \
+            "an unfinished sweep must not leave the engine with nothing to trade"
     finally:
         db.close()

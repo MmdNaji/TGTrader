@@ -1592,6 +1592,26 @@ class MainWindow(QMainWindow):
         c2.add(FormRow("API key صرافی", self.s_ex_key, "فقط برای حالت واقعی. مجوز فقط Trade، بدون Withdrawal."))
         c2.add(FormRow("Secret", self.s_ex_secret)); c2.add(FormRow("Passphrase", self.s_ex_pass, "فقط okx و kucoin"))
         c2.add(FormRow("نمادها", self.s_symbols, "با کاما: BTC/USDT, ETH/USDT"))
+        self.s_auto_sym = QCheckBox("کل بازار را زیر نظر بگیر و خودش انتخاب کند")
+        self.s_auto_sym.setChecked(bool(getattr(s, "auto_symbols", False)))
+        self.s_auto_n = QSpinBox(); self.s_auto_n.setRange(1, 12)
+        self.s_auto_n.setValue(int(getattr(s, "auto_symbols_count", 4)))
+        self.s_auto_every = QSpinBox(); self.s_auto_every.setRange(5, 720); self.s_auto_every.setSuffix(" دقیقه")
+        self.s_auto_every.setValue(int(getattr(s, "auto_symbols_every_min", 60)))
+        c2.add(FormRow("دیده‌بان بازار", self.s_auto_sym,
+                       "به‌جای فهرست بالا، هر بار کل جفت‌های نقدشونده‌ی صرافی را می‌بیند، چارت "
+                       "هرکدام را بررسی می‌کند و آن‌هایی را که همین حالا ستاپ دارند به موتور می‌دهد.\n"
+                       "در یک روز واقعی روی bybit، از ۳۴ ارزی که کف نقدشوندگی را رد می‌کنند فقط "
+                       "۲ تا ستاپ داشتند — یعنی یک فهرست دستیِ ۸ تایی معمولاً به ۸ ارزی نگاه می‌کند "
+                       "که چیزی ندارند.\n"
+                       "⚠ صادقانه: این «پیش‌بینی» نیست. روی ۲۱ ارز و ۱۰۰۰ کندل روزانه، در برابر ۲۰۰ "
+                       "فهرست ۸ تاییِ تصادفی، در نیمه‌ی اول از ۹۶٪ آن‌ها بهتر بود و در نیمه‌ی دوم از "
+                       "۳۸٪. در هر دو نیمه مثبت بود و هیچ‌وقت نزدیک بدترین فهرست نشد. چیزی که "
+                       "مطمئناً می‌دهد این است که لازم نیست کسی حدس بزند کدام ارزها را تایپ کند."))
+        c2.add(FormRow("چند ارز هم‌زمان", self.s_auto_n, "دیده‌بان این تعداد را به موتور می‌دهد"))
+        c2.add(FormRow("هر چند وقت یک‌بار", self.s_auto_every,
+                       "هر جارو حدود ۱۳ ثانیه درخواست شبکه است. روی چارت روزانه، ساعتی خیلی بیشتر "
+                       "از چیزی است که لازم باشد."))
         c2.add(FormRow("تایم‌فریم", self.s_tf, "1d پیش‌فرض؛ کوتاه‌تر = معامله و نویز بیشتر"))
         c2.add(FormRow("موجودی کاغذی", self.s_paper_bal, "پول مجازی حساب تمرینی. عوضش کنی و ذخیره بزنی، حساب همان لحظه با همین مبلغ ریست می‌شود."))
         grid.addWidget(c2, 0, 1)
@@ -1759,6 +1779,9 @@ class MainWindow(QMainWindow):
         s.risk.capital_limit = self.s_cap.value(); s.risk.risk_per_trade = self.s_rpt.value() / 100; s.risk.max_daily_loss = self.s_dl.value() / 100
         s.position_pct = self.s_pospct.value()
         s.risk.max_open_positions = self.s_maxpos.value(); s.risk.atr_stop_mult = self.s_atr.value(); s.risk.reward_risk = self.s_rr.value()
+        s.auto_symbols = self.s_auto_sym.isChecked()
+        s.auto_symbols_count = self.s_auto_n.value()
+        s.auto_symbols_every_min = self.s_auto_every.value()
         s.risk.max_open_risk = self.s_openrisk.value() / 100
         s.risk.max_position_frac = self.s_posfrac.value() / 100
         s.risk.trail_after_r = self.s_trail.value()

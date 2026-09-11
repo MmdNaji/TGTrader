@@ -1338,3 +1338,122 @@ def test_every_trade_carries_the_analysis_behind_it():
             assert head and text, f"empty line in the {kind} explanation: {head!r} {text!r}"
             assert "None" not in text, f"an unfilled value reached the reader: {head}: {text}"
     db.close()
+
+
+def test_the_market_watch_picks_where_the_setups_are_and_never_drops_a_live_position():
+    """Watching the whole market replaces a hand-typed list. Two things must hold whatever it
+    finds: a symbol the bot is CURRENTLY IN can never leave the list - dropping it would leave a
+    real position with a stop nobody is checking - and a sweep that finds nothing must leave the
+    engine waiting rather than inventing a trade.
+
+    Measured before it was built, on 21 pairs and ~1,000 daily bars against 200 random 8-coin
+    lists: watching everything beat 96% of them on the first half and 38% on the second, and was
+    positive on both. It removes the guess; it is not free money."""
+    from trader.market import watchlist
+
+    class FakeScanner:
+        rows = [{"symbol": "AAA/USDT", "volume_usd": 9e6},
+                {"symbol": "BBB/USDT", "volume_usd": 5e6},
+                {"symbol": "CCC/USDT", "volume_usd": 4e6},
+                {"symbol": "DDD/USDT", "volume_usd": 3e6}]
+        deep = [{"symbol": "AAA/USDT", "volume_usd": 9e6, "signal_strength": 0.0, "signal": ""},
+                {"symbol": "BBB/USDT", "volume_usd": 5e6, "signal_strength": 0.80, "signal": "long · x"},
+                {"symbol": "CCC/USDT", "volume_usd": 4e6, "signal_strength": 0.55, "signal": "long · y"},
+                {"symbol": "DDD/USDT", "volume_usd": 3e6, "signal_strength": 0.80, "signal": "short · z"}]
+
+    s = Settings(); s.timeframe = "1d"
+    import trader.market.scanner as sc
+    old_scan, old_deep = sc.scan, sc.deepen
+    watchlist.scanner.scan = lambda *a, **k: FakeScanner.rows
+    watchlist.scanner.deepen = lambda *a, **k: FakeScanner.deep
+    try:
+        w = watchlist.choose(s, None, want=2)
+        # strongest first; between two equal strengths the more liquid one, because between
+        # identical setups the one you can get out of is the better trade
+        assert w.symbols == ["BBB/USDT", "DDD/USDT"], w.symbols
+        assert "AAA/USDT" not in w.symbols, "a symbol with no setup was picked"
+        assert len(w.with_signal) == 3
+
+        # an open position is kept even though its setup is gone
+        w2 = watchlist.choose(s, None, want=2, keep=["AAA/USDT"])
+        assert "AAA/USDT" in w2.symbols, "a live position was dropped from the watchlist"
+        assert "BBB/USDT" in w2.symbols
+
+        # nothing to trade is a legitimate answer and must say so, not fall back to anything
+        watchlist.scanner.deepen = lambda *a, **k: [
+            dict(r, signal_strength=0.0, signal="") for r in FakeScanner.deep]
+        w3 = watchlist.choose(s, None, want=3)
+        assert w3.symbols == []
+        assert "هیچ‌کدام" in w3.note
+        w4 = watchlist.choose(s, None, want=3, keep=["ZZZ/USDT"])
+        assert w4.symbols == ["ZZZ/USDT"], "the held position must survive an empty sweep"
+    finally:
+        watchlist.scanner.scan, watchlist.scanner.deepen = old_scan, old_deep
+
+
+def test_the_engine_leaves_no_market_sweep_running_when_it_stops():
+    """The sweep is a second thread and it sits in network requests for about thirteen seconds.
+    A live thread inside OpenSSL when the process is torn down is exactly what made the Windows
+    test run exit 0xC0000005, so stop() has to wait for this one too."""
+    import threading
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.auto_symbols = True
+    s.use_llm_for_decisions = False
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_sweep.db")
+    eng = Engine(s, db, broker=PaperBroker(1000))
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(*a, **k):
+        started.set()
+        release.wait(5)
+        raise RuntimeError("aborted")
+
+    import trader.market.watchlist as wl
+    old = wl.choose
+    wl.choose = slow
+    try:
+        eng._maybe_sweep([])
+        assert started.wait(2), "the sweep never started"
+        assert eng._watch_thread.is_alive()
+        # a second call must not start a second sweep on top of the first
+        eng._maybe_sweep([])
+        assert threading.active_count() < 50
+        assert eng.stop(wait=0.2) is False, "stop() claimed success with a sweep still running"
+        release.set()
+        eng._watch_thread.join(timeout=5)
+        assert not eng._watch_thread.is_alive()
+        assert eng.stop(wait=1.0) is True
+    finally:
+        wl.choose = old
+        release.set()
+        db.close()
+
+
+def test_paper_does_not_take_trades_the_live_account_could_not():
+    """PaperBroker said supports_short() -> True whatever it was standing in for, while the live
+    crypto broker is a spot account that returns False. So every paper run on crypto has been
+    taking short setups that going live would refuse, and reporting the result as a preview.
+
+    Not a rounding error: measured on 21 pairs and ~1,000 daily bars, allowing shorts took the
+    trade count from 173 to 236 on the first half and 143 to 187 on the second. Shorts are also
+    genuinely good here - they lifted the win rate in both halves - which is an argument for a
+    margin account, not for a spot one pretending."""
+    from trader.execution.ccxt_broker import CcxtBroker
+    from trader.execution.base import Broker
+
+    # what the live one says, read off the class so this cannot drift
+    assert Broker.supports_short(object.__new__(CcxtBroker)) is False
+
+    s = Settings(); s.mode = "paper"; s.market = "crypto"; s.use_llm_for_decisions = False
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_short.db")
+    eng = Engine(s, db)
+    assert eng.broker.supports_short() is False, "paper shorted where the live account cannot"
+
+    s.paper_allow_short = True
+    eng2 = Engine(s, db)
+    assert eng2.broker.supports_short() is True, "the escape hatch must still work"
+
+    s.paper_allow_short = False; s.market = "forex"
+    eng3 = Engine(s, db)
+    assert eng3.broker.supports_short() is True, "forex through MT5 really can short"

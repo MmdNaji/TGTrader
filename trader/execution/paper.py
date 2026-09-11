@@ -11,9 +11,20 @@ from ..config import data_dir
 class PaperBroker(Broker):
     name = "paper"
 
-    def __init__(self, start_balance: float, fee_rate: float = 0.001, slippage: float = 0.0005):
+    def __init__(self, start_balance: float, fee_rate: float = 0.001, slippage: float = 0.0005,
+                 allow_short: bool = True):
         self.fee_rate = fee_rate
         self.slippage = slippage
+        # A paper account that takes trades the LIVE account cannot is not a test, it is a
+        # nicer-looking story. CcxtBroker is spot and long-only; paper said True regardless, so
+        # on crypto the paper run has been taking short setups that going live would refuse.
+        #
+        # It is not a small share: measured on 21 pairs and ~1,000 daily bars, allowing shorts
+        # took the trade count from 173 to 236 on the first half and 143 to 187 on the second.
+        # It is also genuinely GOOD - shorts lifted the win rate in both halves (45.7 -> 46.6
+        # and 42.7 -> 48.1) and nearly doubled the second half's return. That is an argument for
+        # a margin account, not for pretending a spot one has become one.
+        self._allow_short = bool(allow_short)
         self._state_file = data_dir() / "paper_state.json"
         self.load_error = False
         self._positions: dict[str, dict] = {}
@@ -67,7 +78,7 @@ class PaperBroker(Broker):
         return eq
 
     def supports_short(self) -> bool:
-        return True
+        return self._allow_short
 
     def market_order(self, symbol: str, side: str, qty: float, price_hint: float,
                      close: bool = False) -> Fill:
