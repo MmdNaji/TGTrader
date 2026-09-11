@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QFileDialog, QMessageBox, QPlainTextEdit,
     QSplitter, QProgressDialog, QTextBrowser, QStackedWidget, QScrollArea, QButtonGroup, QFrame,
-    QAbstractSpinBox, QSlider, QInputDialog,
+    QAbstractSpinBox, QSlider, QInputDialog, QAbstractItemView,
 )
 
 from .. import __version__, updater
@@ -35,6 +35,7 @@ NAV = [
     ("dashboard", "🏠", "داشبورد", "وضعیت حساب، پوزیشن‌ها و تصمیم‌های ربات"),
     ("desk", "🖥", "میز معامله", "چارت بالا، پوزیشن‌های باز پایین - همه‌جا محلی"),
     ("chart", "📈", "چارت", "همان کندل‌هایی که ربات با آن‌ها تصمیم می‌گیرد"),
+    ("scan", "🔎", "اسکن بازار", "همه‌ی ارزهای نقدشونده با عددهایشان - برای انتخاب نماد"),
     ("trades", "🧾", "معاملات", "تاریخچه و آمار معاملات بسته‌شده"),
     ("skills", "🧠", "مهارت‌ها", "قوانینی که ربات با آن‌ها معامله می‌کند"),
     ("learn", "📚", "یادگیری", "کتاب، مقاله یا چت: به ربات قانون یاد بده"),
@@ -98,6 +99,17 @@ class Worker(_Tracked):
 # U+2066 LEFT-TO-RIGHT ISOLATE ... U+2069 POP DIRECTIONAL ISOLATE. The whole app runs RTL, and
 # bidi reordering turns "+1.23$ (+0.45%)" into something that reads as a different number - the
 # sign ends up on the wrong end and the two figures swap. Isolating the run fixes it for good.
+def ltr(s: str) -> str:
+    """Wrap a number so the RTL layout cannot reorder it.
+
+    Everything in this window is right-to-left, and bidi moves a leading sign to the other end:
+    "+21.0%" renders as "21.0%+" and "-1.9%" as "1.9%-", which reads as a different number at a
+    glance. U+2066..U+2069 isolate the run. Same fix as money_pct, generalised - the market scan
+    table showed every single percentage backwards.
+    """
+    return "\u2066" + s + "\u2069" if s else s
+
+
 def profit_factor(st: dict) -> str:
     """Profit factor for display, or "—" when the number would only mislead.
 
@@ -114,8 +126,7 @@ def profit_factor(st: dict) -> str:
 def money_pct(amount: float | None, pct: float | None) -> str:
     if amount is None:
         return "—"
-    body = f"{amount:+,.2f} $" + (f" ({pct:+.2f}%)" if pct is not None else "")
-    return "\u2066" + body + "\u2069"
+    return ltr(f"{amount:+,.2f} $" + (f" ({pct:+.2f}%)" if pct is not None else ""))
 
 
 class WheelGuard(QObject):
@@ -233,6 +244,7 @@ class MainWindow(QMainWindow):
         self.pages: dict[str, QWidget] = {}
         builders = {"dashboard": self._page_dashboard, "desk": self._page_desk, "chart": self._page_chart, "trades": self._page_trades,
                     "skills": self._page_skills, "learn": self._page_learn, "backtest": self._page_backtest,
+                    "scan": self._page_scan,
                     "settings": self._page_settings, "help": self._page_help, "selftest": self._page_selftest}
         for key, *_ in NAV:
             w = builders[key](); self.pages[key] = w; self.stack.addWidget(w)
@@ -779,6 +791,149 @@ class MainWindow(QMainWindow):
         if self.settings.symbols:
             self._dash_chart_last = time.time()
             self._load_chart(self.dash_chart, self.settings.symbols[0], self.settings.timeframe)
+
+    # ============================================================ MARKET SCAN
+    def _page_scan(self) -> QWidget:
+        inner = QWidget(); v = QVBoxLayout(inner); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(14)
+
+        c = Card("اسکن بازار", "به‌جای تایپ‌کردن نماد، از روی عددها انتخاب کن")
+        h = QHBoxLayout(); h.setSpacing(10)
+        self.btn_scan = button("🔎 اسکن کن", "primary", self._run_scan)
+        self.btn_scan_deep = button("📊 محاسبه‌ی نوسان و سیگنال", "", self._deepen_scan)
+        self.btn_scan_deep.setEnabled(False)
+        self.btn_scan_use = button("✓ انتخاب‌شده‌ها را بگذار روی نمادها", "ghost", self._scan_to_symbols)
+        self.btn_scan_use.setEnabled(False)
+        h.addWidget(self.btn_scan); h.addWidget(self.btn_scan_deep); h.addStretch(); h.addWidget(self.btn_scan_use)
+        c.add_layout(h)
+        self.lbl_scan = hint("«اسکن کن» را بزن. یک درخواست به صرافی می‌زند و همه‌ی جفت‌های "
+                             "نقدشونده را می‌آورد. جفت‌های استیبل و آن‌هایی که روزانه کمتر از "
+                             "نیم درصد تکان می‌خورند کنار گذاشته می‌شوند - کارمزدشان از حرکتشان بیشتر است.")
+        c.add(self.lbl_scan)
+        v.addWidget(c)
+
+        c2 = Card("بازار", "روی ردیف‌ها کلیک کن تا انتخاب شوند (Ctrl برای چندتایی)")
+        self.tbl_scan = table(["نماد", "قیمت", "گردش ۲۴س", "دامنه‌ی روز", "تغییر ۲۴س",
+                               "نوسان (ATR)", "روند ۳۰ روز", "رژیم", "سیگنال الان"])
+        self.tbl_scan.setMinimumHeight(420)
+        # Equal-width columns cut "long · donchian_breakout" down to "long · ...", which is the
+        # only column that carries a word rather than a number. Let the numbers shrink to their
+        # contents and give the slack to the signal.
+        from PySide6.QtWidgets import QHeaderView as _HV
+        _hs = self.tbl_scan.horizontalHeader()
+        for _i in range(8):
+            _hs.setSectionResizeMode(_i, _HV.ResizeToContents)
+        _hs.setSectionResizeMode(8, _HV.Stretch)
+        self.tbl_scan.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tbl_scan.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.empty_scan = Empty("هنوز اسکن نشده.")
+        c2.add(self.tbl_scan, 1); c2.add(self.empty_scan)
+        self.tbl_scan.setVisible(False)
+        v.addWidget(c2, 1)
+
+        v.addWidget(hint(
+            "⚠ این جدول چیزی را توصیه نمی‌کند. قبل از ساختنش امتحان کردم که آیا می‌شود از روی "
+            "نوسان، مومنتوم، قدرت روند یا نتیجه‌ی بک‌تستِ گذشته حدس زد کدام ارز بهتر جواب می‌دهد: "
+            "روی ۲۸ ارز، با رتبه‌بندی روی نیمه‌ی اول تاریخچه و سنجش روی نیمه‌ی دوم. هیچ‌کدام دوام "
+            "نیاورد — همبستگی نوسان با بازده ۰.۰۰۵ بود، و مومنتوم که در یک نقطه خوب به نظر می‌رسید، "
+            "روی چهار تاریخ مختلف میانگین برتری‌اش ‎-۰.۱٪‎ شد. این عددها فقط برای این‌اند که "
+            "با چشم باز انتخاب کنی، نه اینکه از حفظ نماد تایپ کنی."))
+        return self._scroll(inner)
+
+    def _run_scan(self):
+        from ..market import scanner
+        self.btn_scan.setEnabled(False); self.lbl_scan.setText("در حال گرفتن فهرست بازار…")
+        md = self.market_data()
+
+        def job():
+            return scanner.scan(self.settings, md, limit=40,
+                                on_progress=lambda m: self.bridge.event.emit("[scan] " + m))
+
+        def done(rows):
+            self.btn_scan.setEnabled(True)
+            self._scan_rows = rows
+            self._fill_scan()
+            self.btn_scan_deep.setEnabled(bool(rows)); self.btn_scan_use.setEnabled(bool(rows))
+            self.lbl_scan.setText(f"{len(rows)} نماد نقدشونده. برای نوسان و سیگنال، دکمه‌ی بعدی را بزن "
+                                  f"(برای هر نماد یک درخواست می‌زند، پس چند ثانیه طول می‌کشد).")
+
+        def fail(m):
+            self.btn_scan.setEnabled(True)
+            self.lbl_scan.setText("اسکن انجام نشد: " + m.splitlines()[0])
+
+        self._run_bg(job, done, fail)
+
+    def _deepen_scan(self):
+        from ..market import scanner
+        rows = getattr(self, "_scan_rows", None)
+        if not rows:
+            return
+        self.btn_scan_deep.setEnabled(False)
+        md = self.market_data()
+        tf = self.settings.timeframe
+
+        def job():
+            return scanner.deepen(self.settings, md, rows, timeframe=tf,
+                                  on_progress=lambda m: self.bridge.event.emit("[scan] " + m))
+
+        def done(deep):
+            self.btn_scan_deep.setEnabled(True)
+            self._scan_rows = deep
+            self._fill_scan()
+            bad = [r for r in deep if r.get("error")]
+            self.lbl_scan.setText(f"محاسبه شد." + (f"  ({len(bad)} نماد داده نداشت)" if bad else ""))
+
+        def fail(m):
+            self.btn_scan_deep.setEnabled(True)
+            self.lbl_scan.setText("محاسبه انجام نشد: " + m.splitlines()[0])
+
+        self._run_bg(job, done, fail)
+
+    def _fill_scan(self):
+        rows = getattr(self, "_scan_rows", []) or []
+        out = []
+        for r in rows:
+            out.append([
+                r["symbol"],
+                ltr(f"{r['price']:g}"),
+                ltr(f"{r['volume_usd']/1e6:,.0f}M"),
+                ltr(f"{r['range_pct']:.1f}%"),
+                ltr(f"{r['change_pct']:+.1f}%"),
+                ltr(f"{r['atr_pct']:.2f}%") if r.get("atr_pct") else "—",
+                ltr(f"{r['mom_pct']:+.1f}%") if r.get("mom_pct") else "—",
+                r.get("regime", "—"),
+                r.get("signal", "") or ("خطا: " + r["error"] if r.get("error") else ""),
+            ])
+        fill(self.tbl_scan, out, tones={4: "pnl", 6: "pnl"})
+        self.tbl_scan.setVisible(bool(out)); self.empty_scan.setVisible(not out)
+
+    def _scan_to_symbols(self):
+        rows = getattr(self, "_scan_rows", []) or []
+        # selectedRows(), not selectedIndexes(): the latter returns one index per CELL, so a
+        # single selected row arrives nine times and has to be de-duplicated by hand.
+        picked = sorted(i.row() for i in self.tbl_scan.selectionModel().selectedRows())
+        syms = [rows[i]["symbol"] for i in picked if 0 <= i < len(rows)]
+        if not syms:
+            QMessageBox.information(self, "اسکن بازار",
+                                    "اول چند ردیف را انتخاب کن (با Ctrl می‌توانی چندتایی بگیری).")
+            return
+        cap = self.settings.risk.max_open_positions
+        extra = (f"\n\nتوجه: «حداکثر پوزیشن باز» {cap} است، پس از این {len(syms)} نماد "
+                 f"حداکثر {cap} تا هم‌زمان معامله می‌شوند." if len(syms) > cap else "")
+        if QMessageBox.question(self, "اسکن بازار",
+                f"نمادهای برنامه با این {len(syms)} تا جایگزین شوند؟\n\n"
+                + "، ".join(syms) + extra) != QMessageBox.Yes:
+            return
+        self.settings.symbols = syms
+        self.settings.save()
+        if hasattr(self, "s_symbols"):
+            self.s_symbols.setText(", ".join(syms))
+        for combo in (self.ch_symbol, self.bt_symbol, self.desk_symbol):
+            cur = combo.currentText(); combo.blockSignals(True); combo.clear(); combo.addItems(syms)
+            combo.setCurrentText(cur if cur in syms else syms[0]); combo.blockSignals(False)
+        self._sync_watch_symbols()
+        self.refresh()
+        QMessageBox.information(self, "انجام شد",
+            f"{len(syms)} نماد تنظیم شد. اگر موتور در حال اجراست، «توقف» و بعد «شروع» را بزن.")
 
     # ============================================================ TRADES
     def _page_trades(self) -> QWidget:

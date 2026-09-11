@@ -913,3 +913,48 @@ def test_a_position_is_still_managed_when_candles_are_unavailable():
     assert db2.open_trades("paper"), "it cannot close a position it has no price for"
     assert any("UNMANAGED" in (l["message"] or "") for l in db2.recent_journal(50)), \
         "a position nobody can watch must be reported, not skipped in silence"
+
+
+def test_the_scanner_skips_pairs_that_cannot_pay_for_their_own_fees():
+    """The first live run put USDC/USDT near the top on volume alone: a stablecoin pair with a
+    0.04% daily range, where the round trip costs many times the whole day's movement."""
+    from trader.market import scanner
+
+    class FakeEx:
+        markets = {}
+        def load_markets(self): return self.markets
+        def fetch_tickers(self):
+            return {
+                "BTC/USDT":  {"last": 60000.0, "quoteVolume": 500e6, "high": 61000, "low": 59000, "percentage": 1.2},
+                "USDC/USDT": {"last": 1.0,     "quoteVolume": 400e6, "high": 1.0004, "low": 1.0,  "percentage": 0.0},
+                "PEG/USDT":  {"last": 1.0,     "quoteVolume": 100e6, "high": 1.002,  "low": 1.0,  "percentage": 0.0},
+                "TINY/USDT": {"last": 2.0,     "quoteVolume": 1e6,   "high": 2.2,    "low": 1.8,  "percentage": 5.0},
+                "ALT/USDT":  {"last": 5.0,     "quoteVolume": 20e6,  "high": 5.4,    "low": 4.8,  "percentage": 3.0},
+            }
+    ex = FakeEx()
+    ex.markets = {s: {"spot": True, "active": True} for s in ex.fetch_tickers()}
+
+    class FakeMd:
+        active_source = "bybit"
+        def _ex(self, src): return ex
+
+    rows = scanner.scan(Settings(), FakeMd(), limit=20)
+    got = [r["symbol"] for r in rows]
+    assert "BTC/USDT" in got and "ALT/USDT" in got
+    assert "USDC/USDT" not in got, "a stablecoin pair is a fee generator, not a trade"
+    assert "PEG/USDT" not in got, "0.2% of daily range cannot pay a round trip either"
+    assert "TINY/USDT" not in got, "below the liquidity floor"
+    assert got == sorted(got, key=lambda s: -dict((r["symbol"], r["volume_usd"]) for r in rows)[s])
+
+
+def test_the_scanner_says_so_when_the_source_cannot_list_a_market():
+    """KCEX has no tickers endpoint. Better to say that than to return an empty list that looks
+    like 'the market has nothing in it'."""
+    from trader.market import scanner
+
+    class KcexMd:
+        active_source = "kcex"
+        def _ex(self, src): raise AssertionError("must not even try")
+
+    with pytest.raises(scanner.ScanUnavailable, match="KCEX"):
+        scanner.scan(Settings(), KcexMd())

@@ -413,3 +413,86 @@ def test_the_settings_page_writes_back_the_largest_position_field(win):
     assert _S.load().risk.max_position_frac == 0.2, "and survive a reload"
     assert not [a for a in win.settings.advisories() if "بزرگ‌ترین پوزیشن" in a], \
         "5 positions at 20% each is consistent - it must stop warning"
+
+
+def test_the_scan_page_turns_a_selection_into_the_symbol_list(win, monkeypatch):
+    """The point of the page: choose symbols from numbers on screen instead of typing tickers
+    from memory. If the selection does not reach settings.symbols, it is decoration."""
+    from PySide6.QtWidgets import QMessageBox
+    app = QApplication.instance()
+    win.goto("scan")
+    app.processEvents()
+
+    win._scan_rows = [
+        {"symbol": "AAA/USDT", "price": 1.0, "volume_usd": 50e6, "range_pct": 4.0, "change_pct": 2.0},
+        {"symbol": "BBB/USDT", "price": 2.0, "volume_usd": 40e6, "range_pct": 5.0, "change_pct": -1.0},
+        {"symbol": "CCC/USDT", "price": 3.0, "volume_usd": 30e6, "range_pct": 6.0, "change_pct": 0.5},
+    ]
+    win._fill_scan()
+    app.processEvents()
+    assert win.tbl_scan.rowCount() == 3 and win.tbl_scan.isVisible()
+
+    # nothing selected -> it must say so, not silently wipe the symbol list
+    before = list(win.settings.symbols)
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: QMessageBox.Ok))
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    win.tbl_scan.clearSelection()
+    win._scan_to_symbols()
+    assert win.settings.symbols == before, "an empty selection must not replace the symbols"
+
+    # Through the selection model, which is what a mouse click goes through. QTableWidget's
+    # selectRow() convenience silently does nothing on a table that was hidden and re-shown,
+    # so a test built on it passes while proving nothing.
+    from PySide6.QtCore import QItemSelectionModel
+    sm = win.tbl_scan.selectionModel()
+    for row in (0, 2):
+        sm.select(win.tbl_scan.model().index(row, 0),
+                  QItemSelectionModel.Select | QItemSelectionModel.Rows)
+    assert len(sm.selectedRows()) == 2, "two rows should be selected"
+    win._scan_to_symbols()
+    app.processEvents()
+    assert win.settings.symbols == ["AAA/USDT", "CCC/USDT"], win.settings.symbols
+    from trader.config import Settings as _S
+    assert _S.load().symbols == ["AAA/USDT", "CCC/USDT"], "the choice must survive a restart"
+    assert win.ch_symbol.currentText() in ("AAA/USDT", "CCC/USDT"), "the chart combo follows"
+
+
+def test_the_scan_page_admits_it_predicts_nothing(win):
+    """This page shows numbers next to coins, which is exactly the shape of a recommendation.
+    Volatility, momentum, ADX and past backtest were each tested as a way to pick coins and
+    none survived, so the page has to say so where it is read - not only in a commit message."""
+    from PySide6.QtWidgets import QLabel
+    app = QApplication.instance()
+    win.goto("scan")
+    app.processEvents()
+    text = " ".join(l.text() for l in win.stack.currentWidget().findChildren(QLabel))
+    assert "توصیه نمی‌کند" in text, "the page must not read as a recommendation"
+    assert "۰.۰۰۵" in text or "0.005" in text, "the measured correlation belongs on the page"
+
+
+def test_a_number_wrapped_for_rtl_still_gets_its_colour():
+    """fill() decides green or red from the first character. The bidi isolate that stops this
+    right-to-left window reordering "+1.23" into "1.23+" is itself the first character, so the
+    floating-P&L column quietly lost its colour the moment those cells were isolated."""
+    from PySide6.QtGui import QColor
+    from trader.gui.widgets import table, fill
+    from trader.gui import theme
+    from trader.gui.app import ltr, money_pct
+
+    QApplication.instance() or QApplication([])
+    t = table(["a"])
+    fill(t, [[ltr("+21.0%")], [ltr("-1.9%")], [money_pct(3.5, 1.2)], [money_pct(-3.5, -1.2)],
+             ["—"]], tones={0: "pnl"})
+    green, red = QColor(theme.SUCCESS), QColor(theme.DANGER)
+    assert t.item(0, 0).foreground().color() == green, "an isolated positive must still be green"
+    assert t.item(1, 0).foreground().color() == red, "an isolated negative must still be red"
+    assert t.item(2, 0).foreground().color() == green
+    assert t.item(3, 0).foreground().color() == red
+    # and a cell with no sign is left alone rather than coloured at random
+    assert t.item(4, 0).foreground().color() not in (green, red)
+
+
+def test_numbers_are_isolated_so_rtl_cannot_reverse_them():
+    from trader.gui.app import ltr
+    assert ltr("+21.0%") == "⁦+21.0%⁩"
+    assert ltr("") == "", "an empty cell needs no wrapping"

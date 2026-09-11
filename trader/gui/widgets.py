@@ -125,14 +125,23 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
     return t
 
 
+# The bidi isolates that keep a number from being reordered in this right-to-left window.
+# They are invisible, they are the FIRST characters of the string, and they silently defeated
+# the sign test below: the floating-P&L column lost its green and red the moment those cells
+# started being isolated, and nothing looked wrong enough to notice.
+_BIDI = "\u2066\u2067\u2068\u2069\u200e\u200f"
+
+
 def fill(t: QTableWidget, rows: list[list[Any]], tones: dict[int, str] | None = None) -> None:
     """tones: {column_index: 'pnl'} colours positive/negative numbers in that column."""
     t.setRowCount(len(rows))
     for i, row in enumerate(rows):
         for j, v in enumerate(row):
             it = QTableWidgetItem("" if v is None else str(v))
-            if tones and j in tones and isinstance(v, str) and v[:1] in "+-":
-                it.setForeground(QColor(theme.SUCCESS if v.startswith("+") else theme.DANGER))
+            if tones and j in tones and isinstance(v, str):
+                bare = v.strip(_BIDI).strip()
+                if bare[:1] in "+-":
+                    it.setForeground(QColor(theme.SUCCESS if bare.startswith("+") else theme.DANGER))
             t.setItem(i, j, it)
 
 
