@@ -25,6 +25,13 @@ from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QMessageBox  # noq
 @pytest.fixture(scope="module")
 def win():
     app = QApplication.instance() or QApplication([])
+    from trader.gui import theme
+    # The REAL stylesheet. main() applies it and the tests did not, so every geometry this
+    # suite measured - column widths, paddings, row heights - was a different app from the one
+    # on screen. That is how three separate attempts at the floating-P&L column were made from
+    # green tests and two of them were wrong: without the stylesheet the columns fit with room
+    # to spare at every width, and with it they do not.
+    app.setStyleSheet(theme.QSS)
     from trader.gui.app import MainWindow, WheelGuard
     app._wheel_guard = WheelGuard()
     app.installEventFilter(app._wheel_guard)
@@ -566,8 +573,14 @@ def test_no_table_column_is_narrower_than_what_is_in_it():
         fill(t, [["ETH/USDT", "خرید", "2,452.06", "2,450.00", "50.02 $", "2,372.96", "2,627.56",
                   "⁦-0.14 $ (-0.28%)⁩"]], tones={7: "pnl"})
         app.processEvents()
+        # Against the TEXT, not against sizeHintForColumn. The hint carries padding a cell does
+        # not draw, and fit_columns gives that padding back a pixel at a time when the columns
+        # would otherwise overflow - which is what keeps the last column from losing its front
+        # in a right-to-left table. A column at its text width plus a margin is not cut; a
+        # column below it is, and that is the line this draws.
+        from trader.gui.widgets import _text_width
         cut = [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())
-               if t.columnWidth(c) < t.sizeHintForColumn(c)]
+               if t.columnWidth(c) < _text_width(t, c) + 2]
         if cut:
             bad[width] = cut
     assert not bad, f"columns cut their contents at these widths: {bad}"
@@ -1312,3 +1325,57 @@ def test_the_analysis_chart_falls_back_to_the_entry_when_the_exit_kept_no_bars(w
     finally:
         win.db, win._closed_rows = keep_db, keep_rows
         db.close()
+
+
+def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page(win):
+    """The bug this exists for does not reproduce in a table built on its own.
+
+    Standalone, the last column is handed three to eleven times the width it needs and
+    sum(columns) equals the viewport exactly - every measurement says "fits, with room to
+    spare". That is why this column was touched three times from Linux and two of those were
+    wrong. Inside the real dashboard card at a 900px window the columns want 661px, the
+    viewport is 647, and columnViewportPosition() of the last column is -14: "-0.14 $ (-0.28%)"
+    starts fourteen pixels off the left edge and renders as "4 $ (-0.28%)". In a right-to-left
+    table the overflow is always paid by the FRONT of the last column, and the front is the
+    sign - the one thing that column exists to show.
+
+    The row count is half the trigger: five rows fine, six cut, eight fine again, because by
+    eight the vertical scrollbar was already there when the widths were computed.
+    """
+    from trader.gui.widgets import fill, _text_width
+    app = QApplication.instance() or QApplication([])
+    win.show()
+    win.goto("dashboard")
+    t = win.tbl_positions
+    row = ["ETH/USDT", "خرید", "2,457.83", "2,452.92", "50.02 $", "2,372.96", "2,627.56",
+           "⁦-0.14 $ (-0.28%)⁩"]
+    bad, tight = {}, 0
+    for rows in (2, 4, 5, 6, 8, 12):
+        for w in (900, 1000, 1100, 1381, 1650, 2278):
+            win.resize(w, 900)
+            t.show()
+            fill(t, [list(row) for _ in range(rows)])
+            for _ in range(4):
+                app.processEvents()
+            last = t.columnCount() - 1
+            pos = t.columnViewportPosition(last)
+            why = []
+            if pos < 0:
+                why.append(f"starts {pos}px off the left")
+            if pos + t.columnWidth(last) > t.viewport().width() + 1:
+                why.append("ends past the right")
+            for c in range(t.columnCount()):
+                if t.columnWidth(c) < _text_width(t, c) + 2:
+                    why.append(f"col {c} narrower than its text")
+                    break
+            if sum(t.columnWidth(c) for c in range(t.columnCount())) >= t.viewport().width() - 2:
+                tight += 1
+            if why:
+                bad[(rows, w)] = "; ".join(why)
+    assert not bad, f"the positions table was unreadable here: {bad}"
+    # This test passed for a while while proving nothing, because the suite was not applying
+    # the application stylesheet: without it the columns fit at every width with room to spare
+    # and the failing case was never reached. The fixture applies theme.QSS now, and this
+    # refuses to pass if the sweep never gets near the edge again.
+    assert tight >= 4, (f"only {tight} of the swept combinations came close to filling the "
+                        f"table - the sweep is not reaching the case this test is about")

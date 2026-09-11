@@ -249,6 +249,43 @@ _BIDI = "\u2066\u2067\u2068\u2069\u200e\u200f"
 DEAD_SCROLL = 8
 
 
+def _text_width(t: QTableWidget, col: int) -> int:
+    """The widest actual text in a column, header included. No padding, no guesswork."""
+    fm = t.fontMetrics()
+    head = t.horizontalHeaderItem(col)
+    widest = fm.horizontalAdvance(head.text()) if head else 0
+    for r in range(t.rowCount()):
+        it = t.item(r, col)
+        if it is not None:
+            widest = max(widest, fm.horizontalAdvance(it.text()))
+    return int(widest)
+
+
+def _room(t: QTableWidget) -> int:
+    """Usable width, counting a vertical scrollbar that is ABOUT to appear.
+
+    fit_columns runs inside fill(), straight after the rows are set, and at that moment Qt has
+    not yet decided whether the vertical scrollbar is needed - viewport().width() still reports
+    the wider number. One row later it appears and takes ten pixels, and in a right-to-left
+    table those ten come off the FRONT of the last column. Measured in the real dashboard:
+    five rows fine, six rows cut by 10px, eight rows fine again - because by eight the bar was
+    already there when the widths were computed. A test that fills a table once never sees it.
+
+    So the need is predicted from the row heights rather than waited for.
+    """
+    room = t.viewport().width()
+    vb = t.verticalScrollBar()
+    have_h = t.viewport().height()
+    # Only predict when the viewport HAS a height. Before a widget is laid out that is zero,
+    # and "any row is taller than nothing" would subtract a scrollbar on every table in the
+    # app, at every width - which is exactly what it did, until the sweep test caught it.
+    if have_h > 0 and not vb.isVisible():
+        need_h = sum(t.rowHeight(r) for r in range(t.rowCount()))
+        if need_h > have_h:
+            room -= vb.sizeHint().width()
+    return room
+
+
 def fit_columns(t: QTableWidget) -> None:
     """Stretch the last column only while there is room to spare.
 
@@ -264,7 +301,7 @@ def fit_columns(t: QTableWidget) -> None:
     if not n or not getattr(t, "_stretch_last", True):
         return
     need = sum(t.sizeHintForColumn(c) for c in range(n))
-    room = t.viewport().width()
+    room = _room(t)
     hh = t.horizontalHeader()
     # HEADROOM, not "need < room". Deciding on the exact boundary meant that at a width two
     # pixels above the content the stretch was applied anyway, and stretching then redistributes
@@ -278,10 +315,47 @@ def fit_columns(t: QTableWidget) -> None:
     # see. That is what it looked like on a 1366px window - all eight columns visible and an
     # inert bar under them. ResizeToContents pads each section a little beyond the hint above,
     # so the total can end up a few pixels over the viewport with no column actually cut.
-    # DEAD_SCROLL is in PIXELS and only means what it says because the table scrolls per pixel
-    # - see the note in table(). Read against the real overflow rather than the scrollbar's own
-    # maximum, which is 0 while the bar is switched off and would latch the decision on.
-    over = sum(t.columnWidth(c) for c in range(n)) - t.viewport().width()
+    # A small overflow is PADDING, and in a right-to-left table it is paid by the front of the
+    # last column. Measured inside the real dashboard card at a 900px window: the columns want
+    # 661px, the viewport is 647, and columnViewportPosition() of the last column is -14 - so
+    # "-0.14 $ (-0.28%)" starts fourteen pixels off the left edge and renders as "4 $ (-0.28%)".
+    # The SIGN is the first thing lost, and the sign is the whole point of that column.
+    #
+    # None of this reproduces in a table built on its own: standalone, the last column is given
+    # three to eleven times the width it needs and sum(columns) always equals the viewport
+    # exactly. That is why this column has been touched three times from measurements that all
+    # said "fits, with room to spare" - scripts/probe_positions_table.py measures it in place.
+    #
+    # ResizeToContents hands every column its hint, and a hint carries padding the text does not
+    # use. So a small excess is taken back a pixel or two at a time across ALL of them, rather
+    # than let one column lose its front. Below the floor it stops and lets the scrollbar do its
+    # job - at that point the content genuinely does not fit and pretending otherwise would cut
+    # something.
+    widths = [t.columnWidth(c) for c in range(n)]
+    room = _room(t)
+    over = sum(widths) - room
+    if 0 < over <= room * 0.15:
+        # The floor is the TEXT, measured - not a fraction of the hint. A column may give back
+        # the padding it is not using and may never give back a character, so nothing here can
+        # ever elide anything; when the padding runs out the loop stops and the scrollbar takes
+        # over, which is the honest answer to content that genuinely does not fit.
+        floors = [_text_width(t, c) + 6 for c in range(n)]
+        donors = [c for c in range(n) if widths[c] > floors[c]]
+        for _ in range(4):
+            if over <= 0 or not donors:
+                break
+            share = max(1, int(over / len(donors) + 0.999))
+            for c in list(donors):
+                if over <= 0:
+                    break
+                give = min(share, over, widths[c] - floors[c])
+                if give <= 0:
+                    donors.remove(c)
+                    continue
+                hh.setSectionResizeMode(c, QHeaderView.Interactive)
+                widths[c] -= give
+                t.setColumnWidth(c, widths[c])
+                over -= give
     t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff if over <= DEAD_SCROLL
                                    else Qt.ScrollBarAsNeeded)
 
