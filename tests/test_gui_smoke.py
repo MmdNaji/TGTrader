@@ -697,3 +697,31 @@ def test_a_table_never_sticks_out_of_the_card_it_is_in(win):
     # The card has to have actually moved, or the loop proved nothing at all.
     assert len(seen) > 5, f"the layout never ran - the card was {seen} at every window width"
     assert not over, f"the table stuck out of its card at these window widths: {over}"
+
+
+def test_the_positions_table_gets_the_whole_width_of_the_dashboard(win):
+    """Positions and decisions used to share the row, half the window each. The positions table
+    has eight columns; half of a MAXIMISED 2278px window was 916px and the table needed about
+    950, so it did not fit even on a full screen - the symbol and the floating P&L could not be
+    read at the same time, at any window size there is.
+
+    Fonts differ between this box and Windows, so what is pinned here is the RATIO: the card
+    takes essentially the whole content area rather than a share of it. A future side-by-side
+    row brings the bug straight back and this is what catches it.
+    """
+    app = QApplication.instance() or QApplication([])
+    win.show()
+    win.goto("dashboard")
+    win.resize(1366, 900)
+    for t in (win.tbl_positions, win.tbl_decisions):
+        t.show()
+    for _ in range(5):
+        app.processEvents()
+    content = win.width() - 210          # the sidebar is the only fixed-width thing beside it
+    for name, t in (("positions", win.tbl_positions), ("decisions", win.tbl_decisions)):
+        card = t.parentWidget()
+        while card is not None and card.objectName() not in ("card", "cardAccent"):
+            card = card.parentWidget()
+        assert card is not None
+        assert card.width() > content * 0.85, (
+            f"the {name} card is {card.width()}px of {content}px - it is sharing the row again")

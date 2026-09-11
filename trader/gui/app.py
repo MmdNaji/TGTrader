@@ -479,7 +479,12 @@ class MainWindow(QMainWindow):
         mid.addWidget(c1, 3); mid.addWidget(c2, 2)
         v.addLayout(mid)
 
-        low = QHBoxLayout(); low.setSpacing(12)
+        # Positions and decisions used to sit SIDE BY SIDE, so each got half the window. The
+        # positions table has eight columns and needs about 950px of content; half of a
+        # maximised 2278px window is 916px, so it did not fit even on a full screen - you could
+        # read the symbol or the floating P&L, never both. Stacked, the card gets the whole
+        # width and both tables fit from a 1366px laptop upwards. The decisions table wanted the
+        # room too: its last column is a sentence.
         c3 = Card("پوزیشن‌های باز")
         self.tbl_positions = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
         # ElideRight, not ElideNone. With ElideNone in a right-to-left layout the cell is
@@ -512,8 +517,7 @@ class MainWindow(QMainWindow):
         self.tbl_decisions.setTextElideMode(Qt.ElideRight)
         self.empty_dec = Empty("هنوز تصمیمی ثبت نشده. «شروع» را بزن تا ربات بازار را بررسی کند.")
         c4.add(self.tbl_decisions); c4.add(self.empty_dec)
-        low.addWidget(c3, 1); low.addWidget(c4, 1)
-        v.addLayout(low)
+        v.addWidget(c3); v.addWidget(c4)
 
         c5 = Card("گزارش زنده")
         self.txt_log = QPlainTextEdit(); self.txt_log.setReadOnly(True); self.txt_log.setMaximumBlockCount(500); self.txt_log.setFixedHeight(140)
