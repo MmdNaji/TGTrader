@@ -141,8 +141,15 @@ class MarketData:
             # and falls back to all four types - so the limit had never once applied. Proven by
             # stubbing gate's four fetch_*_markets and calling fetch_markets: the list form ran
             # all four, the dict form ran spot alone. This is what left a thread stuck in an SSL
-            # read inside gate.fetch_future_markets at the end of the Windows test run, and it
-            # is why a price call was four times the work it needed to be everywhere else.
+            # read inside gate.fetch_future_markets at the end of the Windows test run.
+            #
+            # What it costs, measured against ccxt rather than guessed: load_markets() caches on
+            # the exchange OBJECT, so the four fetches are paid ONCE per object, not per call.
+            # That is still every time a new MarketData appears - the price feed builds one on
+            # every restart, and the engine and the scanner each build their own - and up to six
+            # times over when the fallback chain walks. Steady-state candle and price throughput
+            # is unchanged by this; the first call after each restart, and the risk of hanging
+            # in one of the three fetches nothing here ever wanted, are what it buys.
             params: dict = {"enableRateLimit": True, "timeout": 20000,
                             "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}}
             params.update(ccxt_proxy_params(self.settings))
