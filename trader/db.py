@@ -244,21 +244,29 @@ class Database:
         )
         return cur.rowcount > 0
 
-    def scale_out(self, trade_id: int, sold_qty: float, banked: float, new_stop: float) -> bool:
+    def scale_out(self, trade_id: int, sold_qty: float, banked: float, new_stop: float,
+                  fee_left: float) -> bool:
         """Book part of a position and leave the rest running, in one statement.
 
         `part_qty` keeps the ORIGINAL size. Without it, R at the close would be measured
         against whatever is left - selling half would double the reported R of the same move,
         and every statistic built on R would quietly inflate from the day this is switched on.
 
+        `fee_left` is what remains of the ENTRY fee after this sale has taken its share. Without
+        it the fee is charged one and a half times: the scale-out subtracts its share from what
+        it banks, the close then subtracts the whole thing again, and the journal reports less
+        profit than the account actually made. Found by a 750-bar session over real bars - the
+        journal said +153.45 and the account had moved +155.46, and the gap was exactly half an
+        entry fee per scaled trade, 36 of them.
+
         Guarded on `qty > sold_qty` so a scale-out can never take a position to zero or below,
         and on status='open' so it cannot touch a trade something else has already closed.
         """
         cur = self.execute(
             "UPDATE trades SET qty = qty - ?, part_pnl = COALESCE(part_pnl,0) + ?,"
-            " part_qty = COALESCE(part_qty, qty), stop_price = ?"
+            " part_qty = COALESCE(part_qty, qty), stop_price = ?, entry_fee = ?"
             " WHERE id = ? AND status = 'open' AND qty > ?",
-            (sold_qty, banked, new_stop, trade_id, sold_qty))
+            (sold_qty, banked, new_stop, fee_left, trade_id, sold_qty))
         return cur.rowcount > 0
 
     def update_stop(self, trade_id: int, stop: float) -> None:

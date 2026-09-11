@@ -626,8 +626,15 @@ class Engine:
                 return False
             gross = ((fill.price - entry) if side == "long" else (entry - fill.price)) * fill.qty
             entry_fee = float(pos.get("entry_fee") or 0.0)
-            banked = gross - fill.fee - entry_fee * frac
-            if not self.db.scale_out(int(pos["id"]), fill.qty, banked, entry):
+            # This sale takes its SHARE of the entry fee, and the row keeps the rest. Both
+            # halves matter: subtracting the share here without lowering the row charged the
+            # fee one and a half times, so every scaled trade reported less profit than the
+            # account actually made.
+            sold_share = fill.qty / qty if qty else frac
+            fee_taken = entry_fee * sold_share
+            banked = gross - fill.fee - fee_taken
+            if not self.db.scale_out(int(pos["id"]), fill.qty, banked, entry,
+                                     entry_fee - fee_taken):
                 # The sale happened and the journal did not record it. Closing the rest is the
                 # only state both sides can agree on.
                 self.log(f"{pos['symbol']}: scale-out sold {fill.qty:g} but the journal did not "
@@ -637,6 +644,7 @@ class Engine:
         pos["qty"] = qty - fill.qty
         pos["part_qty"] = qty
         pos["stop_price"] = entry
+        pos["entry_fee"] = entry_fee - fee_taken
         self.db.add_decision(pos["symbol"], "close", None, "risk",
                              f"نصف پوزیشن در {want_r:g}R برداشته شد، حد ضرر روی نقطه‌ی سربه‌سر",
                              {"banked": banked, "sold": fill.qty, "left": pos["qty"]})

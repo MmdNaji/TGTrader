@@ -1560,6 +1560,41 @@ def test_the_scale_out_is_off_unless_asked_for():
         db.close()
 
 
+def test_a_scaled_trade_reports_exactly_what_the_account_made():
+    """The journal's P&L has to equal the money the account actually moved. It did not.
+
+    A scale-out took its share of the entry fee off what it banked and left the row's entry_fee
+    alone, so the close charged the WHOLE fee again - one and a half fees per scaled trade, and
+    every one of them under-reported profit. Found by a 750-bar session over real bars: the
+    journal said +153.45 where the account had moved +155.46, and the gap was exactly half an
+    entry fee times the 36 trades that had scaled.
+
+    A return figure cannot show this. Only reconciling the two sides can."""
+    s = Settings(); s.mode = "paper"; s.use_llm_for_decisions = False
+    s.paper_start_balance = 2000; s.risk.partial_take_r = 1.0; s.risk.partial_take_frac = 0.5
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_recon.db")
+    try:
+        pb = PaperBroker(2000, allow_short=False); pb.reset(2000)
+        eng = Engine(s, db, broker=pb)
+        eng.log = lambda m, lvl="info": None
+        fee_in = 10.0 * 100.05 * 0.001
+        pb.market_order("X/Y", "buy", 10.0, 100.0)
+        tid = db.open_trade("paper", "X/Y", "long", 10.0, 100.05, 90.0, 125.0, "t", "r",
+                            entry_fee=fee_in)
+        assert eng._maybe_scale_out(dict(db.one("SELECT * FROM trades WHERE id=?", (tid,))), 112.0)
+        left = float(db.one("SELECT entry_fee FROM trades WHERE id=?", (tid,))["entry_fee"])
+        assert left == pytest.approx(fee_in / 2, rel=1e-6), \
+            f"the row still carries {left:.6f} of a {fee_in:.6f} entry fee after selling half"
+
+        eng.close_position(dict(db.one("SELECT * FROM trades WHERE id=?", (tid,))), 120.0, "target")
+        done = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+        assert done["pnl"] == pytest.approx(pb.cash() - 2000, abs=1e-9), (
+            f"journal {done['pnl']:+.6f} against an account that moved "
+            f"{pb.cash() - 2000:+.6f}")
+    finally:
+        db.close()
+
+
 def test_a_scale_out_that_would_bank_a_loss_does_not_happen():
     """Driven on the real engine at a 0.02R threshold, the sale booked -0.045: the gross gain on
     the half sold was 0.017 and the fees were 0.06. The accounting was right and the ACTION was

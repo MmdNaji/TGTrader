@@ -1681,3 +1681,50 @@ def test_the_scale_out_setting_reaches_the_file(win):
     win._save_settings()
     QApplication.instance().processEvents()
     assert _S.load().risk.partial_take_r == 0.0, "and it must switch back off"
+
+
+def test_a_position_nobody_is_watching_says_so_on_screen():
+    """A symbol can go quiet - halted, delisted, or just dropped by the data source - while a
+    position is open on it. The engine notices and, after five minutes, writes a line to the
+    log. On screen the row looked ordinary with a dash where the price goes, and a dash reads
+    as "loading", not as "the stop on this trade is not being checked".
+
+    Found by blacking a symbol out mid-session with a position open on it: the engine's state
+    was right and nothing the owner looks at said a word."""
+    import time as _t
+    from trader.config import Settings
+    from trader.db import Database
+    from trader.engine import Engine
+    from trader.execution.paper import PaperBroker
+    import pathlib
+    app = QApplication.instance() or QApplication([])
+    w = fresh_window()
+    db = Database(pathlib.Path(tempfile.mkdtemp(prefix="tg-dark-")) / "d.db")
+    try:
+        s = Settings(); s.mode = "paper"; s.use_llm_for_decisions = False
+        db.open_trade("paper", "BTC/USDT", "long", 0.01, 60000.0, 58000.0, 66000.0, "t", "r")
+        w.db, w.settings = db, s
+        eng = Engine(s, db, broker=PaperBroker(1000, allow_short=False))
+        eng._unmanaged = {"BTC/USDT": _t.time() - 7 * 60}
+        eng.last_prices = {}
+        w.engine = eng
+        w.goto("dashboard")
+        w.refresh()
+        for _ in range(4):
+            app.processEvents()
+
+        banner = w.lbl_advice.text()
+        assert w.lbl_advice.isVisible(), "a position with no price left the banner hidden"
+        assert "BTC/USDT" in banner, f"the banner does not name the symbol: {banner!r}"
+        assert "حد ضرر" in banner, "the banner does not say what is actually at risk"
+
+        t = w.tbl_positions
+        cells = [t.item(0, c).text() for c in range(t.columnCount()) if t.item(0, c)]
+        assert any("بی‌قیمت" in c for c in cells), \
+            f"the row shows nothing unusual: {cells}"
+        assert not any(c.strip() == "—" for c in cells[3:4]), \
+            "the price cell still reads as a plain dash"
+    finally:
+        w.engine = None
+        db.close()
+        w.close(); w.deleteLater()

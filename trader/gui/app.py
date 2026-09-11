@@ -1914,6 +1914,19 @@ class MainWindow(QMainWindow):
     def refresh(self):
         s = self.settings; mode = self.live_mode()
         advice = s.advisories()
+        # A position nobody is watching belongs at the TOP of the page, not in a log. The
+        # settings advisories are things that will cost money later; this one is costing it now,
+        # so it goes first and it names the symbols.
+        dark_now = {sym: (time.time() - since) / 60.0
+                    for sym, since in (getattr(self.engine, "_unmanaged", {}) or {}).items()}
+        if dark_now and self.engine:
+            held = {r["symbol"] for r in self.db.open_trades(mode)}
+            bad = {k: v for k, v in dark_now.items() if k in held}
+            if bad:
+                worst = max(bad.values())
+                advice = [f"قیمت {'، '.join(sorted(bad))} نمی‌آید"
+                          + (f" ({int(worst)} دقیقه)" if worst >= 1 else "")
+                          + " — حد ضرر این پوزیشن‌ها همین حالا بررسی نمی‌شود."] + advice
         if hasattr(self, "lbl_advice"):
             self.lbl_advice.setText("⚠ " + "  ·  ".join(advice) if advice else "")
             self.lbl_advice.setVisible(bool(advice))
@@ -1944,6 +1957,12 @@ class MainWindow(QMainWindow):
         # streams when it is not. The KPI below and the positions table must read the SAME dict,
         # or the card and the row under it can disagree about the same position.
         prices = {**(self.engine.last_prices if self.engine else {}), **self._live}
+        # Symbols the engine has lost the price for, with how long ago it went. Read from the
+        # engine's own state rather than inferred from a missing price: a price can be missing
+        # for one pass and mean nothing.
+        now = time.time()
+        mins_dark = {sym: (now - since) / 60.0
+                     for sym, since in (getattr(self.engine, "_unmanaged", {}) or {}).items()}
         # The number beside "daily loss cap" has to BE the number the cap uses, or the card is
         # telling the user they are safe while the engine thinks otherwise. Realised-only sat at
         # +0.00 through a live run in which equity fell - nothing had closed yet - which reads as
@@ -1975,8 +1994,15 @@ class MainWindow(QMainWindow):
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
             val = float(r["qty"]) * float(r["entry_price"])
             pct = (fl / val * 100) if (fl is not None and val) else None
+            # A position whose symbol has gone quiet has NOBODY CHECKING ITS STOP, and until now
+            # the only sign of that was a log line after five minutes. On screen the row looked
+            # ordinary with a dash where the price goes - and a dash reads as "loading". Found
+            # by blacking a symbol out mid-session with a position open on it.
+            dark = mins_dark.get(r["symbol"])
+            now_cell = (f"⚠ بی‌قیمت {int(dark)}د" if dark is not None and dark >= 1
+                        else ("⚠ بی‌قیمت" if dark is not None else (price(px) if px else "—")))
             rows.append([r["symbol"], FA_SIDE.get(r["side"], r["side"]), price(r["entry_price"]),
-                         price(px) if px else "—", money(val), price(r["stop_price"]),
+                         now_cell, money(val), price(r["stop_price"]),
                          price(r["take_profit"]) if r["take_profit"] else "—",
                          money_pct(fl, pct)])
         self._pos_data = [dict(x) for x in opens]
