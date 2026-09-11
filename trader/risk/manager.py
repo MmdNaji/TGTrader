@@ -45,6 +45,15 @@ class RiskManager:
         self.mode = mode
         self._kill_file: Path = data_dir() / "KILL_SWITCH"
 
+    def now(self) -> float:
+        """The clock this risk layer measures a day by - the DATABASE's clock, not the wall's.
+
+        It has to be the same clock the rows were stamped with, or `day_start()` and `closed_at`
+        are measured against different things. Following ``db.clock`` means a replay sets one
+        attribute and both ends move together.
+        """
+        return getattr(self.db, "clock", time.time)()
+
     # ------------------------------------------------------------ kill switch
     def kill_switch_on(self) -> bool:
         return self._kill_file.exists()
@@ -59,11 +68,15 @@ class RiskManager:
     def day_start(self) -> float:
         """UTC midnight, computed straight from the epoch.
 
+        ``self.now`` is a callable rather than a direct ``time.time()`` for the same reason
+        ``Database.clock`` is: a replay has to be able to hand this its own clock, or the daily
+        cap becomes a lifetime cap over a run that never crosses a real midnight.
+
         The previous version built a tuple from gmtime, passed it to mktime (which reads a tuple
         as LOCAL time) and then subtracted time.timezone to undo that. It lands on the right
         second in a fixed-offset zone and is off by an hour in a DST one - which silently moves
         the daily loss limit's reset by an hour twice a year. The epoch has no such ambiguity."""
-        now = time.time()
+        now = self.now()
         return now - (now % 86400.0)
 
     def daily_pnl(self) -> float:

@@ -194,6 +194,16 @@ def main() -> int:
     market = Replay(frames, start=250, chaos=args.chaos)
     eng.market = market
 
+    # THE REPLAY'S OWN CLOCK, and this is not a detail. Every row is stamped through
+    # `db.clock`, and the risk layer measures a day through the same clock, so with the wall
+    # clock in place a two-year replay runs inside one real UTC day: `day_start()` never moves,
+    # `pnl_since(day_start)` returns EVERY trade the session ever closed, and the daily loss
+    # cap becomes a lifetime one. Measured before this was wired: the cap tripped on the third
+    # closed trade of eighty and refused 121 entries over the remaining two years. The session
+    # was reporting what a bot does with entries switched off for most of its life.
+    index = frames[syms[0]].index
+    db.clock = lambda: float(index[min(market.i, len(index) - 1)].timestamp())
+
     logs: list[str] = []
     eng.log = lambda m, lvl="info": logs.append(f"[{lvl}] {m}")
 
@@ -333,6 +343,21 @@ def main() -> int:
             kinds[body.split(":")[0][:58] if ":" in body else body[:58]] += 1
         for k, c in kinds.most_common(5):
             print(f"    {c:>5}x  {k}")
+    # The daily cap must behave like a DAILY one. If it fires and never releases, the run
+    # measured a bot with entries switched off, whatever its return figure says.
+    cap_holds = db.query("SELECT ts FROM decisions WHERE action='hold' AND source='risk'"
+                         " AND reason LIKE 'daily loss%' ORDER BY ts", ())
+    if cap_holds:
+        days = len({int(float(r["ts"]) // 86400) for r in cap_holds})
+        span = (float(cap_holds[-1]["ts"]) - float(cap_holds[0]["ts"])) / 86400.0
+        print(f"daily loss cap: {len(cap_holds)} entries refused across {days} separate days "
+              f"(first to last: {span:.0f} days)")
+        if days == 1 and span > 2:
+            problems.append(f"the daily loss cap refused {len(cap_holds)} entries spread over "
+                            f"{span:.0f} days but they all fell on ONE day by the clock - the "
+                            f"replay clock is not reaching the risk layer, so the cap never "
+                            f"reset and this run measured a bot that had stopped entering")
+
     if args.blackout and not blacked:
         problems.append(f"--blackout {args.blackout} never fired - no position was open at or "
                         f"after bar {max(args.blackout, 250)}, so this run tested nothing "

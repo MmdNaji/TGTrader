@@ -275,6 +275,7 @@ class Engine:
             if p["symbol"] not in symbols:
                 symbols.append(p["symbol"])
         self._leader_regime = self._read_leader(symbols)
+        candidates: list[dict[str, Any]] = []
         for symbol in symbols:
             if self._stop.is_set():
                 return
@@ -287,7 +288,9 @@ class Engine:
                     if self._manage(pos, df, price):
                         open_positions = [p for p in open_positions if p["id"] != pos["id"]]
                     continue
-                self._consider_entry(symbol, df, price, open_positions)
+                cand = self._scout(symbol, df, price)
+                if cand is not None:
+                    candidates.append(cand)
             except Exception as exc:
                 # One bad symbol must not leave every other position unmanaged for the whole pass.
                 msg = f"{symbol}: {exc}"
@@ -303,6 +306,18 @@ class Engine:
                     open_positions = [p for p in open_positions if p["id"] != pos["id"]]
                 continue
             self._order_err.pop(f"loop:{symbol}", None)
+
+        for cand in self._rank_candidates(candidates):
+            if self._stop.is_set():
+                return
+            try:
+                self._enter(cand, open_positions)
+            except Exception as exc:
+                msg = f"{cand['symbol']}: {exc}"
+                if self._order_err.get(f"enter:{cand['symbol']}") != msg:
+                    self.log(f"entry failed - {msg}", "warn")
+                    self._order_err[f"enter:{cand['symbol']}"] = msg
+
         if self.last_prices:
             try:
                 self.db.record_equity(self.mode, self.broker.equity(self.last_prices))
@@ -357,6 +372,18 @@ class Engine:
 
     # ------------------------------------------------------------ entries
     def _consider_entry(self, symbol: str, df, price: float, open_positions: list[dict]) -> None:
+        """Look at one symbol and take the trade if there is one. Kept for direct callers."""
+        cand = self._scout(symbol, df, price)
+        if cand is not None:
+            self._enter(cand, open_positions)
+
+    def _scout(self, symbol: str, df, price: float) -> dict[str, Any] | None:
+        """Read the chart and report what it found, WITHOUT spending a slot on it.
+
+        Split out of ``_consider_entry`` so the pass can rank candidates before any of them
+        takes capital - see ``loop_once``. Nothing here touches the account, so a symbol that
+        is scouted and then not entered costs nothing but the arithmetic.
+        """
         agg = self.settings.aggressiveness
         # Outside scalping, evaluate on the CLOSED bar. The last row of the frame is the bar
         # still forming: a signal read off it can un-happen before the bar closes, which is a
@@ -380,6 +407,36 @@ class Engine:
             return
         self._last_bar[symbol] = bar_ts
         snap = snapshot(eval_df)
+        return {"symbol": symbol, "df": df, "eval_df": eval_df, "price": price,
+                "regime": regime, "signals": signals, "snap": snap, "bar_ts": bar_ts,
+                "strength": max((s.strength for s in signals), default=0.0)}
+
+    def _rank_candidates(self, candidates: list[dict]) -> list[dict]:
+        """Decide which setup gets the money when more want a slot than there are slots.
+
+        This is a real question, not a detail: over 16 symbols and 750 daily bars, 343 entries
+        were refused because all four slots were taken. On most bars the engine is not asking
+        "is there a setup", it is asking "which of these".
+
+        It is a separate method so the answer can be MEASURED rather than argued about - the
+        experiment swaps it and replays the same bars.
+
+        It returns them in the order they were scouted, which is the symbol list's own order -
+        exactly what the engine did before the scout/enter split, so the split changed no
+        behaviour. Ranking by `strength` was tried first and is NOT what this returns: the
+        built-in strategies hand out CONSTANTS (EmaTrend 0.6, DonchianBreakout 0.55,
+        RsiReversion 0.5) and over 750 bars only two distinct values were ever seen, so sorting
+        by it ranks by which rule fired and then falls back to the symbol order anyway. A
+        ranking key that cannot tell two setups apart is not a ranking.
+        """
+        return candidates
+
+    def _enter(self, cand: dict[str, Any], open_positions: list[dict]) -> None:
+        """Take the trade a scout found, if the risk layer still has room for it."""
+        symbol, price = cand["symbol"], cand["price"]
+        eval_df, regime, signals = cand["eval_df"], cand["regime"], cand["signals"]
+        snap, bar_ts = cand["snap"], cand["bar_ts"]
+        agg = self.settings.aggressiveness
         equity = self.broker.equity(self.last_prices)
 
         refuse = self.risk.check(symbol, open_positions, equity, self.last_prices)

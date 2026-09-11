@@ -107,6 +107,14 @@ CREATE TABLE IF NOT EXISTS journal (
 class Database:
     def __init__(self, path: Path | None = None):
         self.path = path or (data_dir() / "trader.db")
+        # Every row this class stamps asks the clock through here, so a REPLAY can hand it the
+        # bar's own time instead of the wall clock. That is not a convenience: the daily loss
+        # cap reads `closed_at` against UTC midnight, and a two-year replay that runs inside one
+        # real day has no midnight in it - measured, the cap tripped on the third closed trade
+        # of eighty and refused 121 entries for the rest of the run, because as far as it could
+        # tell every trade the session ever took closed today. A test whose risk layer behaves
+        # differently from the live one is not testing the live one.
+        self.clock = time.time
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -141,7 +149,7 @@ class Database:
 
     # ------------------------------------------------------------ journal
     def log(self, message: str, level: str = "info") -> None:
-        self.execute("INSERT INTO journal(ts, level, message) VALUES (?,?,?)", (time.time(), level, message))
+        self.execute("INSERT INTO journal(ts, level, message) VALUES (?,?,?)", (self.clock(), level, message))
 
     def recent_journal(self, limit: int = 200) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM journal ORDER BY id DESC LIMIT ?", (limit,))
@@ -151,7 +159,7 @@ class Database:
                      reason: str, payload: dict[str, Any] | None = None) -> int:
         cur = self.execute(
             "INSERT INTO decisions(ts, symbol, action, confidence, source, reason, payload) VALUES (?,?,?,?,?,?,?)",
-            (time.time(), symbol, action, confidence, source, reason, json.dumps(payload or {}, ensure_ascii=False)),
+            (self.clock(), symbol, action, confidence, source, reason, json.dumps(payload or {}, ensure_ascii=False)),
         )
         return int(cur.lastrowid)
 
@@ -169,7 +177,7 @@ class Database:
         cur = self.execute(
             "INSERT INTO trade_analysis(trade_id, kind, ts, symbol, timeframe, payload, candles)"
             " VALUES (?,?,?,?,?,?,?)",
-            (trade_id, kind, time.time(), symbol, timeframe,
+            (trade_id, kind, self.clock(), symbol, timeframe,
              json.dumps(payload or {}, ensure_ascii=False),
              json.dumps(candles, ensure_ascii=False) if candles else None),
         )
@@ -191,7 +199,7 @@ class Database:
         Returns how many rows were cleared. VACUUM is what actually gives the disk back -
         setting a column to NULL only frees pages inside the file.
         """
-        cutoff = time.time() - max(1, int(days)) * 86400.0
+        cutoff = self.clock() - max(1, int(days)) * 86400.0
         cur = self.execute(
             "UPDATE trade_analysis SET candles=NULL WHERE candles IS NOT NULL AND ts < ?",
             (cutoff,))
@@ -230,7 +238,7 @@ class Database:
         cur = self.execute(
             "INSERT INTO trades(mode, symbol, side, qty, entry_price, stop_price, init_stop, entry_fee,"
             " take_profit, strategy, reason, opened_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (mode, symbol, side, qty, entry, stop, stop, entry_fee, tp, strategy, reason, time.time()),
+            (mode, symbol, side, qty, entry, stop, stop, entry_fee, tp, strategy, reason, self.clock()),
         )
         return int(cur.lastrowid)
 
@@ -240,7 +248,7 @@ class Database:
         cur = self.execute(
             "UPDATE trades SET exit_price=?, pnl=?, r_multiple=?, closed_at=?, status='closed'"
             " WHERE id=? AND status='open'",
-            (exit_price, pnl, r_multiple, time.time(), trade_id),
+            (exit_price, pnl, r_multiple, self.clock(), trade_id),
         )
         return cur.rowcount > 0
 
@@ -307,7 +315,7 @@ class Database:
         self.execute("DELETE FROM decisions")
 
     def record_equity(self, mode: str, equity: float) -> None:
-        self.execute("INSERT INTO equity(ts, mode, equity) VALUES (?,?,?)", (time.time(), mode, equity))
+        self.execute("INSERT INTO equity(ts, mode, equity) VALUES (?,?,?)", (self.clock(), mode, equity))
 
     def equity_curve(self, mode: str, limit: int = 2000) -> list[tuple[float, float]]:
         rows = self.query("SELECT ts, equity FROM equity WHERE mode=? ORDER BY ts DESC LIMIT ?", (mode, limit))

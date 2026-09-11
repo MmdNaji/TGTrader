@@ -1628,3 +1628,55 @@ def test_a_scale_out_that_would_bank_a_loss_does_not_happen():
         assert row["part_pnl"] > 0, "a scale-out at 1R should bank real money"
     finally:
         db.close()
+
+
+def test_the_daily_loss_cap_measures_a_day_by_the_same_clock_the_rows_were_stamped_with():
+    """A cap called DAILY must reset daily, including in a replay.
+
+    The heavy paper session runs two years of bars in about eighty seconds, so every trade it
+    closes carries a `closed_at` inside one real UTC day. With the wall clock in place,
+    `day_start()` never moved and `pnl_since(day_start)` returned EVERY trade the session had
+    ever closed - the cap tripped on the third closed trade of eighty and refused 121 entries
+    over the remaining two years. The session's return figure was measuring a bot that had
+    stopped entering, and nothing in the output said so.
+
+    The fix is that both ends read ONE clock: rows are stamped through `db.clock` and
+    `RiskManager.now()` follows it. This test moves that clock and checks the cap follows.
+    """
+    s = RiskSettings(); s.capital_limit = 1000.0; s.max_daily_loss = 0.03   # cap: -30
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_clock.db")
+    try:
+        day1 = 1_700_000_000.0 - (1_700_000_000.0 % 86400.0) + 3600.0      # mid-morning
+        db.clock = lambda: day1
+        rm = RiskManager(s, db, "paper")
+        assert rm.now() == day1, "the risk layer must read the database's clock, not the wall's"
+
+        tid = db.open_trade("paper", "X/Y", "long", 1.0, 100.0, 90.0, 120.0, "t", "r")
+        db.close_trade(tid, 60.0, -40.0, -4.0)                              # a 40 loss today
+        assert rm.daily_loss_hit([], {}), "a 40 loss against a 30 cap must trip it"
+
+        # the NEXT day, with nothing new closed, the cap has to be clear again
+        db.clock = lambda: day1 + 86400.0
+        assert not rm.daily_loss_hit([], {}), \
+            "yesterday's loss is still stopping today's trades - the cap is not daily"
+
+        # and it still trips on a fresh loss on the new day, so the reset did not disarm it
+        tid2 = db.open_trade("paper", "X/Y", "long", 1.0, 100.0, 90.0, 120.0, "t", "r")
+        db.close_trade(tid2, 60.0, -40.0, -4.0)
+        assert rm.daily_loss_hit([], {}), "the cap stopped working after its first reset"
+    finally:
+        db.close()
+
+
+def test_the_wall_clock_is_still_the_default():
+    """Nothing above may change what the LIVE bot does: with no clock set, it is time.time."""
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_clock_default.db")
+    try:
+        assert db.clock is time.time
+        before = time.time()
+        tid = db.open_trade("paper", "X/Y", "long", 1.0, 100.0, 90.0, 120.0, "t", "r")
+        stamped = float(db.one("SELECT opened_at FROM trades WHERE id=?", (tid,))["opened_at"])
+        assert before <= stamped <= time.time() + 1
+        assert RiskManager(RiskSettings(), db, "paper").now() == pytest.approx(time.time(), abs=2)
+    finally:
+        db.close()
