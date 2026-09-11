@@ -53,6 +53,16 @@ QFrame#cardAccent {{ background: {SURFACE}; border: 1px solid {ACCENT_DIM}; bord
 #sectionTitle {{ font-size: 13px; font-weight: 700; color: {ACCENT}; padding-top: 6px; }}
 #empty {{ color: {MUTED}; font-size: 13px; padding: 24px; }}
 
+/* ---------- banners ----------
+   Two levels, and they are deliberately not variations of one style. #urgent means the money
+   is exposed RIGHT NOW (a position with no price, the kill switch, the loss cap); #advice means
+   a setting could be better. Red box with a left bar against plain amber text: the difference
+   has to survive being seen every day next to advisories the owner has learned to skip. */
+QLabel#urgent {{ background: rgba(248,113,113,0.12); border: 1px solid rgba(248,113,113,0.45);
+                 border-left: 4px solid {DANGER}; border-radius: 9px; padding: 10px 14px;
+                 color: {DANGER}; font-weight: 700; }}
+QLabel#advice {{ padding: 2px 2px; color: {WARN}; }}
+
 /* ---------- pills ---------- */
 QLabel#pill, QLabel#pillOk, QLabel#pillWarn, QLabel#pillDanger, QLabel#pillMuted, QLabel#pillGold {{ min-height: 20px; max-height: 20px; }}
 QLabel#pillOk {{ padding: 3px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; background: rgba(52,211,153,0.15); color: {SUCCESS}; }}

@@ -1713,10 +1713,42 @@ def test_a_position_nobody_is_watching_says_so_on_screen():
         for _ in range(4):
             app.processEvents()
 
-        banner = w.lbl_advice.text()
-        assert w.lbl_advice.isVisible(), "a position with no price left the banner hidden"
+        banner = w.lbl_urgent.text()
+        assert w.lbl_urgent.isVisible(), "a position with no price left the banner hidden"
         assert "BTC/USDT" in banner, f"the banner does not name the symbol: {banner!r}"
         assert "حد ضرر" in banner, "the banner does not say what is actually at risk"
+
+        # It must not be mixed in with advice about SETTINGS. The Windows session looked at the
+        # real screen and reported the two sharing one block, one colour and one size, joined by
+        # a middle dot - "your money is unprotected right now" reading as the fourth item in a
+        # list the owner has learned to skip. Being first is not being different.
+        assert "بی‌قیمت" not in w.lbl_advice.text() and "حد ضرر این پوزیشن" not in w.lbl_advice.text(), \
+            "the urgent warning is back inside the settings advisories"
+
+        # and prove it LOOKS different, measured on the rendered widget.
+        #
+        # The first version of this check took the reddest pixel in each banner and passed with
+        # the styling deliberately removed - because it was measuring the ⛔ and ⚠ EMOJI, which
+        # are red whatever the stylesheet says. A check that passes on the broken case is worse
+        # than no check. This one samples the banner's own BACKGROUND in the padding, away from
+        # any text: the urgent banner paints a red box, a settings advisory paints nothing.
+        s.risk.reward_risk = 2.0          # guarantee at least one settings advisory to compare to
+        w.refresh()
+        for _ in range(4):
+            app.processEvents()
+        assert w.lbl_advice.isVisible(), "no settings advisory to compare against"
+
+        def corner(widget):
+            img = widget.grab().toImage()
+            c = img.pixelColor(1, 1)
+            return c.red() - c.green()
+        hot, mild = corner(w.lbl_urgent), corner(w.lbl_advice)
+        assert hot > 60, (
+            f"the urgent banner paints no box of its own (red-over-green {hot} in its corner) - "
+            f"it is styled like the settings advisory sitting next to it")
+        assert hot > mild + 50, (
+            f"the two banners look the same (corner red-over-green {hot} vs {mild}); being "
+            f"FIRST is not being different")
 
         t = w.tbl_positions
         cells = [t.item(0, c).text() for c in range(t.columnCount()) if t.item(0, c)]

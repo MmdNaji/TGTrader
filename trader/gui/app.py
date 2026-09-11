@@ -475,6 +475,16 @@ class MainWindow(QMainWindow):
     def _page_dashboard(self) -> QWidget:
         inner = QWidget(); v = QVBoxLayout(inner); v.setContentsMargins(22, 18, 22, 22); v.setSpacing(14)
 
+        # TWO banners, not one, and they must not look alike. "your money is unprotected right
+        # now" used to sit in the same block, the same colour and the same size as "this setting
+        # could be better", separated by a middle dot - the Windows session read the real screen
+        # and said what that does: someone who sees three settings advisories every day and has
+        # learned to skip them skips the fourth sentence too. Being FIRST is not being
+        # different. Same reasoning as the danger styling on "close everything" and "reset".
+        self.lbl_urgent = QLabel(""); self.lbl_urgent.setObjectName("urgent")
+        self.lbl_urgent.setWordWrap(True); self.lbl_urgent.setVisible(False)
+        v.addWidget(self.lbl_urgent)
+
         # Settings that are legal but fight each other. The symptom without this is a bot that
         # opens one trade and then refuses every other one, with the reason buried in a
         # truncated column nobody reads.
@@ -1914,9 +1924,10 @@ class MainWindow(QMainWindow):
     def refresh(self):
         s = self.settings; mode = self.live_mode()
         advice = s.advisories()
-        # A position nobody is watching belongs at the TOP of the page, not in a log. The
-        # settings advisories are things that will cost money later; this one is costing it now,
-        # so it goes first and it names the symbols.
+        # A position nobody is watching belongs at the TOP of the page, in its OWN banner, not
+        # in a log and not in the same paragraph as advice about a setting. The advisories cost
+        # money later; this one is costing it now.
+        urgent: list[str] = []
         dark_now = {sym: (time.time() - since) / 60.0
                     for sym, since in (getattr(self.engine, "_unmanaged", {}) or {}).items()}
         if dark_now and self.engine:
@@ -1924,9 +1935,14 @@ class MainWindow(QMainWindow):
             bad = {k: v for k, v in dark_now.items() if k in held}
             if bad:
                 worst = max(bad.values())
-                advice = [f"قیمت {'، '.join(sorted(bad))} نمی‌آید"
-                          + (f" ({int(worst)} دقیقه)" if worst >= 1 else "")
-                          + " — حد ضرر این پوزیشن‌ها همین حالا بررسی نمی‌شود."] + advice
+                urgent.append(f"قیمت {'، '.join(sorted(bad))} نمی‌آید"
+                              + (f" ({int(worst)} دقیقه)" if worst >= 1 else "")
+                              + " — حد ضرر این پوزیشن‌ها همین حالا بررسی نمی‌شود.")
+        if hasattr(self, "lbl_urgent"):
+            # One per line. These are separate emergencies, and joining two of them with a
+            # middle dot makes them read as one long sentence about nothing in particular.
+            self.lbl_urgent.setText("\n".join("⛔  " + u for u in urgent))
+            self.lbl_urgent.setVisible(bool(urgent))
         if hasattr(self, "lbl_advice"):
             self.lbl_advice.setText("⚠ " + "  ·  ".join(advice) if advice else "")
             self.lbl_advice.setVisible(bool(advice))
