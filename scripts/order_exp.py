@@ -9,11 +9,12 @@ This replays the SAME bars with only `Engine._rank_candidates` swapped, across t
 window, two halves and three thirds. Two randoms are in there as a CONTROL: without them there
 is no way to tell an ordering that is better from an ordering that got lucky.
 
+    .venv/bin/python scripts/order_exp.py --fetch          # first time, to fill the cache
     .venv/bin/python scripts/order_exp.py [--bars 1000] [--symbols 16] [--seeds 4]
 
-It needs the bar cache that `paper_session.py` builds (`.bars/` in the repo, or $TGTRADER_BARS)
-and it never touches the network or a real account. It is deterministic: the same cache gives
-the same table on any machine, and two machines disagreeing is itself a finding.
+The symbol universe is PINNED in this file, not read off the cache directory - see UNIVERSE.
+Everything else is offline and deterministic, so the same table must come out on any machine,
+and two machines disagreeing is itself a finding.
 """
 from __future__ import annotations
 
@@ -33,6 +34,38 @@ BARS_DIR = pathlib.Path(os.environ.get("TGTRADER_BARS", REPO / ".bars"))
 
 os.environ["TGTRADER_OFFLINE"] = "1"
 os.environ["TGTRADER_NO_AUTOUPDATE"] = "1"
+
+# THE UNIVERSE IS PINNED HERE, not read off whatever happens to be in the cache.
+#
+# The Windows session ran this against a six-symbol cache and spotted the problem before
+# sending any numbers: with 6 symbols and 4 slots, two names go hungry, not twelve - so the
+# effect being measured barely exists. Six against sixteen is not one experiment on two
+# machines, it is two different experiments, and the difference says nothing about whether the
+# code is deterministic. Reading the symbol list from the directory guarantees that everyone
+# who runs this measures something slightly different and believes they measured the same thing.
+UNIVERSE = ["AAVE/USDT", "ADA/USDT", "ARB/USDT", "BNB/USDT", "BTC/USDT", "DOGE/USDT",
+            "ETH/USDT", "LINK/USDT", "LTC/USDT", "MNT/USDT", "NEAR/USDT", "SOL/USDT",
+            "SUI/USDT", "UNI/USDT", "WLD/USDT", "XRP/USDT"]
+
+
+def fetch_universe(bars: int, timeframe: str = "1d") -> None:
+    """Fill the cache with exactly the pinned symbols. Uses ccxt directly, before anything
+    from `trader` is imported, so TGTRADER_OFFLINE still holds for the session itself."""
+    import ccxt
+    BARS_DIR.mkdir(parents=True, exist_ok=True)
+    ex = ccxt.bybit({"enableRateLimit": True, "timeout": 20000,
+                     "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}})
+    ex.load_markets()
+    for sym in UNIVERSE:
+        f = BARS_DIR / (sym.replace("/", "_") + ".json")
+        if f.exists() and len(json.loads(f.read_text())) >= bars:
+            continue
+        rows = ex.fetch_ohlcv(sym, timeframe, limit=max(bars, 1000))
+        if len(rows) < bars:
+            print(f"  {sym}: only {len(rows)} bars on the exchange, not {bars}")
+            continue
+        f.write_text(json.dumps(rows))
+        print(f"  {sym}: {len(rows)} bars")
 
 
 class Replay:
@@ -159,19 +192,33 @@ def main() -> int:
     ap.add_argument("--bars", type=int, default=1000)
     ap.add_argument("--symbols", type=int, default=16)
     ap.add_argument("--seeds", type=int, default=4, help="how many random controls")
+    ap.add_argument("--fetch", action="store_true",
+                    help="pull the pinned symbols from the exchange first")
     args = ap.parse_args()
 
+    if args.fetch:
+        fetch_universe(args.bars)
+
     from trader.market.data import ohlcv_to_frame
-    frames = {}
-    for f in sorted(BARS_DIR.glob("*.json")):
+    want = UNIVERSE[: args.symbols]
+    frames, missing = {}, []
+    for sym in want:
+        f = BARS_DIR / (sym.replace("/", "_") + ".json")
+        if not f.exists():
+            missing.append(f"{sym} (not cached)")
+            continue
         df = ohlcv_to_frame(json.loads(f.read_text()))
-        if len(df) >= args.bars:
-            frames[f.stem.replace("_", "/")] = df.tail(args.bars)
-        if len(frames) >= args.symbols:
-            break
-    if len(frames) < 2:
-        print(f"need at least 2 symbols with {args.bars} bars in {BARS_DIR}; "
-              f"run scripts/paper_session.py once to fill it")
+        if len(df) < args.bars:
+            missing.append(f"{sym} (only {len(df)} bars)")
+            continue
+        frames[sym] = df.tail(args.bars)
+    if missing:
+        # Refuse rather than quietly measure a smaller universe. The whole point of this run is
+        # that two machines can compare numbers, and they cannot if one of them silently
+        # dropped four symbols.
+        print(f"this experiment is pinned to {len(want)} symbols and {len(missing)} are not "
+              f"available:\n  " + "\n  ".join(missing))
+        print(f"\nrun it once with --fetch to pull exactly these into {BARS_DIR}")
         return 2
 
     n = args.bars
