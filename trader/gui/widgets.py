@@ -199,7 +199,8 @@ class Empty(QLabel):
         self.setObjectName("empty"); self.setAlignment(Qt.AlignCenter); self.setWordWrap(True)
 
 
-def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
+def table(headers: list[str], stretch_last: bool = True,
+          optional: tuple[int, ...] = ()) -> QTableWidget:
     """Columns sized to their contents, with the last one absorbing whatever is left over.
 
     Every column used to be QHeaderView.Stretch, which means EQUAL width regardless of what is
@@ -217,6 +218,16 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
     for i in range(len(headers)):
         hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
     t._stretch_last = bool(stretch_last)
+    # Columns this table can do WITHOUT when there is not room for all of them, in the order
+    # they should go. Eight columns of prices genuinely need about 1,000px on Windows metrics,
+    # so at a 900px window the table overflowed by 406 and everything past the fifth column
+    # lived behind a scrollbar. Reachable, but nobody scrolls a table sideways to find out
+    # whether they are up or down on a trade.
+    #
+    # What survives is what the row is FOR: which coin, what it is worth now, and the number
+    # that says how it is going. A hidden column is not lost - clicking the row opens the full
+    # detail - and every one of them comes back the moment the window is wide enough.
+    t._optional = tuple(optional)
     if headers and headers[0] == "#":
         hh.setSectionResizeMode(0, QHeaderView.Fixed); t.setColumnWidth(0, 48)
     # Scroll by PIXEL, not by item. Two reasons, and the first one was a live bug: with the
@@ -301,6 +312,11 @@ def fit_columns(t: QTableWidget) -> None:
     if not n or not getattr(t, "_stretch_last", True):
         return
     hh = t.horizontalHeader()
+    # Every optional column comes BACK first, so the decision below is made against the whole
+    # table rather than against whatever last time left hidden.
+    for c in getattr(t, "_optional", ()):
+        if c < t.columnCount():
+            t.setColumnHidden(c, False)
     # START FROM THE CONTENT, every time. The shave below puts a column into Interactive mode to
     # hold a hand-picked width, and nothing used to put it back - so the next refresh measured
     # the shaved width, shaved it again, and the columns walked steadily downwards: 661 -> 605
@@ -314,6 +330,12 @@ def fit_columns(t: QTableWidget) -> None:
             hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
     need = sum(t.sizeHintForColumn(c) for c in range(n))
     room = _room(t)
+    # Drop what this table said it can spare, one at a time, only while it does not fit.
+    for c in getattr(t, "_optional", ()):
+        if need <= room or c >= n:
+            break
+        need -= t.sizeHintForColumn(c)
+        t.setColumnHidden(c, True)
     # HEADROOM, not "need < room". Deciding on the exact boundary meant that at a width two
     # pixels above the content the stretch was applied anyway, and stretching then redistributes
     # and squeezes the last column under its own hint - the truncation comes back at precisely

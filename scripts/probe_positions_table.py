@@ -96,7 +96,11 @@ def main() -> int:
             # off the edge with no way back, or being narrower than the text in it.
             unreachable = (pos7 < 0 or pos7 + cols[n] > t.viewport().width()) and \
                           (not sb.isVisible() or sb.maximum() < max(0, over))
-            elided = [c for c in range(t.columnCount()) if cols[c] < _text_width(t, c) + 2]
+            # A column the table deliberately DROPPED reads as zero-width; that is not the
+            # same thing as one squeezed below its content, and only the second is a fault.
+            hidden = [c for c in range(t.columnCount()) if t.isColumnHidden(c)]
+            elided = [c for c in range(t.columnCount())
+                      if not t.isColumnHidden(c) and cols[c] < _text_width(t, c) + 2]
             wider_than_card = card is not None and t.width() > card.width()
             # the same data filled twice must not come out narrower the second time
             fill(t, [list(ROW) for _ in range(rows)])
@@ -105,7 +109,9 @@ def main() -> int:
             drift = sum(t.columnWidth(c) for c in range(t.columnCount())) - sum(cols)
             verdict = ", ".join(x for x, bad in (
                 ("UNREACHABLE", unreachable), (f"ELIDED{elided}", bool(elided)),
-                ("WIDER-THAN-CARD", wider_than_card), (f"DRIFT({drift})", drift < 0)) if bad) or "ok"
+                ("WIDER-THAN-CARD", wider_than_card), (f"DRIFT({drift})", drift < 0)) if bad)
+            if not verdict:
+                verdict = f"ok (dropped {hidden})" if hidden else "ok"
             print(f"{rows:>4} {w:>5} {card.width() if card else -1:>5} {t.width():>5} "
                   f"{t.viewport().width():>5} {sum(cols):>7}  {cols[n]:>5} "
                   f"{t.sizeHintForColumn(n):>8} {pos7:>8} "
@@ -113,6 +119,8 @@ def main() -> int:
                   f"{str(vb.isVisible())[:1]:>5}  {verdict}")
     print("\nUNREACHABLE     = a column is off the viewport with no scrollbar range to reach it")
     print("ELIDED[..]      = those columns are narrower than the text in them")
+    print("ok (dropped..)  = it did not fit, so the table let those columns go - by design;")
+    print("                  they come back as soon as there is room, and the row detail has all")
     print("WIDER-THAN-CARD = the table is drawn wider than the card holding it")
     print("DRIFT(-n)       = refilling the SAME data made the columns n pixels narrower;")
     print("                  the dashboard refills every 1.5s, so any drift compounds")

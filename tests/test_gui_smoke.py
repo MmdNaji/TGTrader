@@ -1401,12 +1401,23 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page():
                 before = now
             last = t.columnCount() - 1
             pos = t.columnViewportPosition(last)
+            sb = t.horizontalScrollBar()
+            over = sum(t.columnWidth(c) for c in range(t.columnCount())) - t.viewport().width()
             why = []
-            if pos < 0:
-                why.append(f"starts {pos}px off the left")
-            if pos + t.columnWidth(last) > t.viewport().width() + 1:
-                why.append("ends past the right")
+            # OFF-SCREEN IS NOT THE FAULT - UNREACHABLE IS. This test and the probe had opposite
+            # rules and one of them was always red: the probe called "off the edge with a
+            # working scrollbar" ok, this called any negative broken. The probe was right. The
+            # bug that started all of this was a scrollbar being SUPPRESSED, so nothing could be
+            # reached; content you can scroll to is content you have.
+            if (pos < 0 or pos + t.columnWidth(last) > t.viewport().width() + 1) and \
+                    (not sb.isVisible() or sb.maximum() < max(0, over)):
+                why.append(f"the last column is at {pos} with no scrollbar to reach it "
+                           f"(overflow {over}, bar {sb.isVisible()}/{sb.maximum()})")
+            # A column the table deliberately DROPPED is not a cut column; a column squeezed
+            # below its content is. Those look identical if you only read the width.
             for c in range(t.columnCount()):
+                if t.isColumnHidden(c):
+                    continue
                 # Against Qt's OWN content width, reduced by what fit_columns says it took.
                 # An absolute text measure needs the font the cells are really drawn with, and
                 # that is not reliably the table's: on Windows this reported every column short
@@ -1446,6 +1457,18 @@ def test_the_last_column_never_starts_off_the_left_edge_in_the_real_page():
     # refuses to pass if the sweep never gets near the edge again.
     assert tight >= 4, (f"only {tight} of the swept combinations came close to filling the "
                         f"table - the sweep is not reaching the case this test is about")
+    # The three that say what the row is FOR must survive every width: which coin, what it is
+    # worth now, and the number that says how the trade is going.
+    win.resize(820, 760)
+    t.show()
+    fill(t, [list(row) for _ in range(8)])
+    for _ in range(5):
+        app.processEvents()
+    keep = {0: "نماد", 3: "قیمت", 7: "سود شناور"}
+    gone = {name for c, name in keep.items() if t.isColumnHidden(c)}
+    assert not gone, f"the table dropped columns it cannot do without: {gone}"
+    assert any(t.isColumnHidden(c) for c in (1, 2, 4, 6)), \
+        "at 820px nothing was dropped - the table is either huge or the rule never ran"
     # And the table has to have MOVED. Six window widths that all produce one viewport width
     # means Qt never laid the table out and every number above is the size it was born with -
     # which is exactly how this test reported a 406px overflow on a machine where three other

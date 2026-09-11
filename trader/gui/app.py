@@ -524,7 +524,8 @@ class MainWindow(QMainWindow):
         # width and both tables fit from a 1366px laptop upwards. The decisions table wanted the
         # room too: its last column is a sentence.
         c3 = Card("پوزیشن‌های باز")
-        self.tbl_positions = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
+        self.tbl_positions = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"],
+                                   optional=(4, 6, 2, 1))
         # ElideRight, not ElideNone. With ElideNone in a right-to-left layout the cell is
         # clipped from the LEFT, so "ETH/USDT" arrives as ".../ETH" - the quote currency gone
         # and the ellipsis at the front - while the decisions table, which already used
@@ -551,7 +552,8 @@ class MainWindow(QMainWindow):
         c3.add_action(button("بستن همه", "danger", self.close_all))
         c3.add_action(button("🧪 ریست تست", "ghost", self.reset_test))
         c4 = Card("آخرین تصمیم‌ها", "نگه‌داشتن هم یک تصمیم است؛ دلیلش را بخوان")
-        self.tbl_decisions = table(["زمان", "نماد", "اقدام", "اطمینان", "منبع", "دلیل"]); self.tbl_decisions.setMinimumHeight(160)
+        self.tbl_decisions = table(["زمان", "نماد", "اقدام", "اطمینان", "منبع", "دلیل"],
+                                   optional=(4, 3)); self.tbl_decisions.setMinimumHeight(160)
         self.tbl_decisions.setTextElideMode(Qt.ElideRight)
         self.empty_dec = Empty("هنوز تصمیمی ثبت نشده. «شروع» را بزن تا ربات بازار را بررسی کند.")
         c4.add(self.tbl_decisions); c4.add(self.empty_dec)
@@ -879,7 +881,8 @@ class MainWindow(QMainWindow):
         self.desk_symbol.currentTextChanged.connect(lambda _: (self._sync_watch_symbols(), self.refresh_desk_chart()))
         self.desk_tf.currentTextChanged.connect(lambda _: self.refresh_desk_chart())
         cbot = Card("پوزیشن‌های باز", "روی هر ردیف بزن تا چارت بالا برود روی همان ارز")
-        self.tbl_desk = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"])
+        self.tbl_desk = table(["نماد", "جهت", "ورود", "قیمت", "ارزش", "حد ضرر", "هدف", "سود شناور"],
+                              optional=(4, 6, 2, 1))
         self.tbl_desk.setTextElideMode(Qt.ElideRight)
         self.tbl_desk.cellClicked.connect(self._desk_row_to_chart)
         self.empty_desk = Empty("پوزیشن بازی نیست.")
