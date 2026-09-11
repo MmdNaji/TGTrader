@@ -1680,3 +1680,57 @@ def test_the_wall_clock_is_still_the_default():
         assert RiskManager(RiskSettings(), db, "paper").now() == pytest.approx(time.time(), abs=2)
     finally:
         db.close()
+
+
+def test_the_unmanaged_warning_backs_off_instead_of_repeating_itself():
+    """The one warning that says "your stop is not being watched" must stay readable.
+
+    Its de-duplication key was the whole MINUTE, which means "say it again every minute for as
+    long as this lasts": on a one-minute live loop a symbol dark for a day writes 1,440
+    identical error lines. The first heavy session able to reach the warning at all produced
+    699 of them for one dark symbol, and a journal of one repeated sentence is a journal nobody
+    reads - which costs the warning the only thing it is for.
+    """
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.paper_start_balance = 1000; s.risk.capital_limit = 1000
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_unmanaged.db")
+    try:
+        pb = PaperBroker(1000); pb.reset(1000)
+        eng = Engine(s, db, broker=pb)
+        said: list[tuple[str, str]] = []
+        eng.log = lambda m, lvl="info": said.append((lvl, m))
+
+        class Dark:
+            is_kcex = False
+            def price(self, sym): raise RuntimeError("no price")
+        eng.market = Dark()
+
+        t0 = 1_700_000_000.0
+        clock = {"t": t0}
+        db.clock = lambda: clock["t"]
+        pos = {"id": 1, "symbol": "X/Y", "side": "long", "qty": 1.0,
+               "entry_price": 100.0, "stop_price": 90.0, "take_profit": 120.0}
+
+        # a full day of a one-minute loop with the price never arriving
+        for minute in range(1441):
+            clock["t"] = t0 + minute * 60.0
+            assert eng._manage_on_price_alone(pos) is False
+        warnings = [m for lvl, m in said if lvl == "error" and "UNMANAGED" in m]
+        assert warnings, "a whole day with no price and it never said so"
+        assert len(warnings) <= 12, (
+            f"{len(warnings)} identical warnings in one day - the back-off is gone")
+        # and it really is saying something new each time, not the same sentence
+        assert len(set(warnings)) == len(warnings), "it repeated itself verbatim"
+        # the first one must not wait long: five minutes unwatched is already worth saying
+        assert any("minutes" in w for w in warnings[:1]), \
+            "the first warning should arrive in minutes, not hours"
+
+        # and once the price comes back, the state clears so a later outage warns again
+        class Lit:
+            is_kcex = False
+            def price(self, sym): return 100.0
+        eng.market = Lit()
+        eng._manage_on_price_alone(pos)
+        assert "X/Y" not in eng._unmanaged, "the symbol is priced again and still marked dark"
+    finally:
+        db.close()

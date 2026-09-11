@@ -719,12 +719,31 @@ class Engine:
         try:
             price = float(self.market.price(sym))
         except Exception as exc:
-            first = self._unmanaged.setdefault(sym, time.time())
-            mins = (time.time() - first) / 60.0
+            # The DATABASE's clock, for the same reason the daily loss cap uses it: this is
+            # "how long has this market been dark to us", and in a replay that is replay time.
+            # Live it is `time.time` and nothing changes. Before this, the blackout scenario
+            # could never reach five minutes - the whole two-year replay takes eighty seconds -
+            # so the one warning that says a stop is not being watched was the one thing the
+            # heavy session could not exercise.
+            now = self.db.clock()
+            first = self._unmanaged.setdefault(sym, now)
+            mins = (now - first) / 60.0
             key = f"unmanaged:{sym}"
-            if mins > 5 and self._order_err.get(key) != f"{int(mins)}":
-                self._order_err[key] = f"{int(mins)}"
-                self.log(f"UNMANAGED: {sym} has had no price for {mins:.0f} minutes - its stop "
+            # Say it again when the wait has DOUBLED, not every time it changes. The de-dup key
+            # used to be the whole minute, which says "warn once per minute for as long as this
+            # lasts" - on a one-minute live loop a symbol dark for a day writes 1,440 identical
+            # error lines, and the first heavy session that could actually reach the warning
+            # produced 699 of them. A journal of one repeated sentence is a journal nobody
+            # reads, which costs the warning its whole purpose. This ladders 5, 10, 20, 40 ...
+            # minutes: nine lines in the first day, and the wait in each one is news.
+            said = float(self._order_err.get(key) or 0.0)
+            if mins > 5 and mins >= max(5.0, said * 2):
+                self._order_err[key] = f"{mins:.0f}"
+                # one language per line: this one has always been English, and "1.0 روز" inside
+                # an English sentence reads as a bug in the message rather than as a warning
+                wait = (f"{mins/1440:.1f} days" if mins >= 1440 else
+                        (f"{mins/60:.1f} hours" if mins >= 60 else f"{mins:.0f} minutes"))
+                self.log(f"UNMANAGED: {sym} has had no price for {wait} - its stop "
                          f"is not being checked ({exc})", "error")
             return False
         self._unmanaged.pop(sym, None)
