@@ -1198,18 +1198,18 @@ def test_the_daily_loss_cap_sees_positions_that_are_still_open():
     Tripping it blocks NEW entries and never closes anything, so a cap that fires on a drawdown
     that later recovers costs a few missed entries. A cap that cannot see open losses costs the
     account."""
-    import tempfile, pathlib
     from trader.config import Settings
     from trader.db import Database
     from trader.risk.manager import RiskManager
 
-    with tempfile.TemporaryDirectory() as tmp:
-        db = Database(pathlib.Path(tmp) / "t.db")
+    home = Path(os.environ["TGTRADER_HOME"])
+    db = Database(home / "t_dailyloss.db")
+    try:
         s = Settings()
         s.risk.capital_limit = 1000.0
         s.risk.max_daily_loss = 0.03            # cap = 30.00
         rm = RiskManager(s.risk, db, "paper")
-        rm._kill_file = pathlib.Path(tmp) / "KILL"      # never touch the real switch from a test
+        rm._kill_file = home / "KILL_dailyloss"         # never touch the real switch from a test
 
         open_positions = [{"symbol": "ETH/USDT", "side": "long", "qty": 1.0, "entry_price": 100.0},
                           {"symbol": "BNB/USDT", "side": "long", "qty": 2.0, "entry_price": 50.0}]
@@ -1237,3 +1237,39 @@ def test_the_daily_loss_cap_sees_positions_that_are_still_open():
         # and with the open positions left out, it is the old realised-only answer - so nothing
         # that still calls it the old way silently changes meaning
         assert not rm.daily_loss_hit()
+    finally:
+        # Windows will not delete a file that is still open, and Database holds its sqlite
+        # connection for its whole life. This test first used tempfile.TemporaryDirectory and
+        # every assertion passed on Windows before __exit__ raised PermissionError on the .db -
+        # a green suite that exits 1, the fifth Linux-green / Windows-red bug in this project.
+        db.close()
+
+
+def test_no_test_uses_a_self_cleaning_temp_dir():
+    """Windows refuses to delete a file another process still has open, and `Database` holds its
+    sqlite connection for its whole life. A test that put a Database inside a self-cleaning temp
+    directory therefore passed every assertion and then raised PermissionError on the way out -
+    a suite reporting "97 passed" and exiting 1, found only because the Windows session builds
+    from it.
+
+    This file makes ONE temp dir at import with mkdtemp and never cleans it; the OS does that.
+    That is the convention, and this keeps it - a rule nobody can see is a rule the next person
+    breaks, which is exactly what happened here.
+
+    Parsed, not grepped: a text search matches its own explanation, which is how the first
+    version of this check failed on its own docstring.
+    """
+    import ast
+    import pathlib as _pl
+    bad = {}
+    for path in sorted(_pl.Path(__file__).parent.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name == "TemporaryDirectory":
+                bad.setdefault(path.name, []).append(node.lineno)
+    assert not bad, (f"use the module-level mkdtemp instead: {bad} - a TemporaryDirectory "
+                     f"cannot be removed on Windows while a Database still holds the file")

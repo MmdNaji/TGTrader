@@ -162,11 +162,20 @@ if (-not (Test-Path $staged)) { Die "‏PyInstaller تمام شد ولی $staged
 # with the old build rather than with none.
 $previous = "dist\.previous"
 Remove-Item -Recurse -Force $previous -ErrorAction SilentlyContinue
-if (Test-Path "dist\TGTrader") { Move-Item "dist\TGTrader" $previous }
+# A locked file - antivirus, or the folder open in Explorer - fails the rename of the FOLDER,
+# not just of the file. If that happens here, nothing has moved yet and the old build is still
+# exactly where it was, so say that and stop rather than carrying on.
+if (Test-Path "dist\TGTrader") {
+    try { Move-Item "dist\TGTrader" $previous -ErrorAction Stop }
+    catch { Die "‏dist\TGTrader قفل است (پنجره‌ی Explorer یا آنتی‌ویروس؟). بیلد قبلی دست‌نخورده ماند. $_" }
+}
 try {
     Move-Item "$staging\TGTrader" "dist\TGTrader" -ErrorAction Stop
 } catch {
-    if (Test-Path $previous) { Move-Item $previous "dist\TGTrader" }
+    # Put the old one back. If even THAT fails, the build is not lost - it is under .previous -
+    # so the message has to name the folder, or it reads as "everything is gone".
+    try { if (Test-Path $previous) { Move-Item $previous "dist\TGTrader" -ErrorAction Stop } }
+    catch { Die "‏بیلد تازه جابه‌جا نشد و بیلد قبلی هم برنگشت. بیلد قبلی سالم است در: $root\$previous" }
     Die "‏جابه‌جایی بیلد تازه انجام نشد؛ بیلد قبلی سر جایش برگشت. $_"
 }
 Remove-Item -Recurse -Force $previous, $staging -ErrorAction SilentlyContinue
