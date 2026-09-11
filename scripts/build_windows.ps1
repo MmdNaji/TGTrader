@@ -36,13 +36,20 @@ Set-Location $root
 
 # Run an external program without letting its stderr become a terminating error.
 #
-# $ErrorActionPreference = "Stop" plus a native command is a trap in Windows PowerShell 5.1:
-# if anything merges stderr (2>&1, *>&1, or a logging wrapper around this script), every line
-# the program writes to stderr is wrapped as a NativeCommandError - and with "Stop" that is
-# TERMINATING. PyInstaller writes its ordinary INFO progress to stderr, so the build would die
-# on its first normal line of output, blaming a message that is not an error at all.
+# PyInstaller writes its ordinary INFO progress to stderr. In Windows PowerShell 5.1 a native
+# program's stderr becomes a NativeCommandError when it is MERGED into the output stream, and
+# under $ErrorActionPreference = "Stop" such an error is terminating.
 #
-# Exit codes are what actually matter here, and every caller already checks $LASTEXITCODE.
+# What is actually established, and what is not:
+#   - Redirecting from OUTSIDE this script (powershell -File build_windows.ps1 *>&1) does NOT
+#     break it. Measured on Windows 11 / PS 5.1: the full build ran and exited 0. The records
+#     are created in the caller's scope, which has its own preference.
+#   - The risk is a redirect INSIDE this file, or a wrapper that runs it in the same scope with
+#     "Stop" in force. That case has not been reproduced here; this guard removes it as a
+#     question rather than proving it first.
+#
+# It costs nothing either way: exit codes are what decide, and every caller checks
+# $LASTEXITCODE. Do not read this comment as "the build was dying" - it was not.
 function Invoke-Native {
     param([Parameter(Mandatory)][scriptblock]$Cmd)
     $prev = $ErrorActionPreference

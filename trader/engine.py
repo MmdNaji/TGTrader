@@ -72,6 +72,7 @@ class Engine:
         self._reconciled = False
         self._leader_regime: str | None = None   # trend of BTC on this pass
         self._unmanaged: dict[str, float] = {}   # symbol -> when its price last went missing
+        self._last_beat = 0.0                    # when the engine last said it was alive
         self.status: dict[str, Any] = {"running": False, "last_loop": 0.0, "error": ""}
         load_seed_skills(db)
         self.strategies = ([Scalp()] + list(DEFAULT_STRATEGIES)
@@ -213,6 +214,31 @@ class Engine:
                 self.db.record_equity(self.mode, self.broker.equity(self.last_prices))
             except Exception as exc:
                 self.log(f"equity read failed: {exc}", "warn")
+        self._heartbeat(open_positions, symbols)
+
+    def _heartbeat(self, open_positions: list[dict], symbols: list[str]) -> None:
+        """Say we are alive, even when nothing happened.
+
+        A quiet engine and a dead one look identical from outside, and that is not a cosmetic
+        problem: measured on the owner's machine, eight minutes passed with five positions open
+        and not one line printed. Nothing distinguished "watching five stops, nothing hit" from
+        "the loop died" or "the network went away" - the only negative signal was the ABSENCE
+        of an UNMANAGED warning, which itself only appears in one specific failure.
+        """
+        now = time.time()
+        if now - self._last_beat < max(60.0, float(self.settings.loop_seconds)):
+            return
+        self._last_beat = now
+        held = len(open_positions)
+        priced = sum(1 for s in symbols if s in self.last_prices)
+        try:
+            eq = self.broker.equity(self.last_prices)
+            money = f"، سرمایه {eq:,.2f}"
+        except Exception:
+            money = ""
+        stale = [s for s in symbols if s not in self.last_prices]
+        tail = f"، بدون قیمت: {', '.join(stale[:4])}" if stale else ""
+        self.log(f"زنده‌ام · {held} پوزیشن باز، {priced} از {len(symbols)} نماد قیمت دارند{money}{tail}")
 
     def _leader(self, symbols: list[str]) -> str | None:
         if self.settings.market != "crypto" or not self.settings.align_with_leader:

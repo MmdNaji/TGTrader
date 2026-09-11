@@ -1036,3 +1036,49 @@ def test_the_selftest_reports_how_many_positions_actually_fit():
     # and the limit that bites is reported, not guessed: raise the cap and it is cash
     n, _, _ = fits(1000, 0.01, 0.50, 0.20, 20)
     assert n == 5, f"20% each means five, whatever the risk budget allows; got {n}"
+
+
+def test_the_engine_says_it_is_alive_even_when_nothing_happens():
+    """A quiet engine and a dead one looked identical from outside. Measured on the owner's
+    machine: eight minutes, five positions open, not one line printed. The only negative signal
+    was the ABSENCE of an UNMANAGED warning, which itself only appears in one failure mode."""
+    s, db, pb, eng = _engine("t_beat.db", symbols=("X/Y",))
+    eng.market = FakeMarket(synth(900, seed=5))
+    s.loop_seconds = 1
+
+    def beats():
+        return [j for j in db.recent_journal(200) if "زنده‌ام" in (j["message"] or "")]
+
+    eng.loop_once()
+    assert len(beats()) == 1, "the first pass should report in"
+
+    # it must not repeat on every pass - that would bury real events
+    eng.loop_once()
+    eng.loop_once()
+    assert len(beats()) == 1, "a heartbeat every loop is noise, not a signal"
+
+    # ...and it does repeat once the interval has gone by
+    eng._last_beat -= 120
+    eng.loop_once()
+    assert len(beats()) == 2
+
+    msg = beats()[0]["message"]
+    assert "پوزیشن باز" in msg and "نماد قیمت دارند" in msg, msg
+
+
+def test_the_heartbeat_names_the_symbols_that_have_no_price():
+    """'0 of 8 symbols have a price' is the difference between a working engine and one that
+    is looping over a dead connection."""
+    s, db, pb, eng = _engine("t_beat2.db", symbols=("A/B", "C/D"))
+
+    class Dead:
+        is_kcex = False
+        def candles(self, *a, **k): raise RuntimeError("no market-data source reachable")
+        def price(self, *a, **k): raise RuntimeError("no market-data source reachable")
+
+    eng.market = Dead()
+    eng.loop_once()
+    beat = [j for j in db.recent_journal(200) if "زنده‌ام" in (j["message"] or "")]
+    assert beat, "a total data outage is exactly when it must still report in"
+    assert "بدون قیمت" in beat[0]["message"], beat[0]["message"]
+    assert "0 از 2" in beat[0]["message"] or "۰ از ۲" in beat[0]["message"], beat[0]["message"]
