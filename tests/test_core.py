@@ -958,3 +958,81 @@ def test_the_scanner_says_so_when_the_source_cannot_list_a_market():
 
     with pytest.raises(scanner.ScanUnavailable, match="KCEX"):
         scanner.scan(Settings(), KcexMd())
+
+
+def test_a_model_that_answers_nothing_is_a_failure_not_a_pass():
+    """The self-test printed "OpenAI (gpt-5) replied: " with nothing after it and called it a
+    pass: ping() returned "" and the check just concatenated it. A dead key reported green."""
+    from trader.diagnostics import _answered
+    assert _answered("OK", "x") == "OK"
+    for empty in ("", "   ", "\n", None):
+        with pytest.raises(RuntimeError, match="empty answer"):
+            _answered(empty, "gpt-5")
+
+
+def test_ping_raises_when_the_model_produces_no_text():
+    """On a gpt-5-class model max_completion_tokens covers the REASONING, so a 20-token budget
+    went entirely on thinking and left no room for a word."""
+    from trader.brain.openai_brain import OpenAIBrain
+
+    class FakeChoice:
+        def __init__(self, content): self.message = type("M", (), {"content": content, "refusal": None})(); self.finish_reason = "length"
+
+    class FakeClient:
+        def __init__(self, content): self._c = content; self.sent = {}
+        @property
+        def chat(self):
+            outer = self
+            class C:
+                @property
+                def completions(self):
+                    class K:
+                        def create(_s, **kw):
+                            outer.sent = kw
+                            return type("R", (), {"choices": [FakeChoice(outer._c)]})()
+                    return K()
+            return C()
+
+    b = OpenAIBrain.__new__(OpenAIBrain)
+    b.settings = Settings(); b.model = "gpt-5"
+    b.client = FakeClient("")
+    with pytest.raises(RuntimeError, match="no text"):
+        b.ping()
+    # and the budget is big enough for the reasoning to leave room for an answer
+    assert b.client.sent["max_completion_tokens"] >= 1000
+    assert b.client.sent.get("reasoning_effort") == "low", "a ping should not pay to think"
+
+    b.client = FakeClient("OK")
+    assert b.ping() == "OK"
+
+
+def test_the_selftest_reports_how_many_positions_actually_fit():
+    """Reporting a single qty said nothing about the question people have - how many trades will
+    this open, and what stops it opening more. Guessing that from a screenshot of the settings
+    is exactly how a prediction of "2" met a reality of 5."""
+    def fits(cap, rpt, open_risk, frac, maxpos, price=100.0, dist=2.0):
+        r = RiskSettings(capital_limit=cap, risk_per_trade=rpt, max_open_risk=open_risk,
+                         max_position_frac=frac, max_open_positions=maxpos)
+        rm = RiskManager(r, None, "paper")
+        opens, cash, n = [], float(cap), 0
+        while n < maxpos:
+            sz = rm.size("long", price, dist, cap, cash=cash, open_positions=opens)
+            if sz is None:
+                break
+            opens.append({"entry_price": price, "init_stop": price - dist, "qty": sz.qty})
+            cash -= sz.notional
+            n += 1
+        return n, rm.open_risk(opens), r
+
+    # the configuration recommended to the owner: five positions really do fit
+    n, risk_used, r = fits(1000, 0.01, 0.06, 0.20, 5)
+    assert n == 5, f"5 at 20% each inside a 6% risk budget should all fit, got {n}"
+    assert risk_used <= 0.06 * 1000 + 1e-9
+
+    # his older one: half the account per trade leaves room for two, whatever maxpos says
+    n, _, _ = fits(1000, 0.10, 0.06, 0.50, 20)
+    assert n == 2, f"at 50% of capital each, cash reaches two positions, got {n}"
+
+    # and the limit that bites is reported, not guessed: raise the cap and it is cash
+    n, _, _ = fits(1000, 0.01, 0.50, 0.20, 20)
+    assert n == 5, f"20% each means five, whatever the risk budget allows; got {n}"

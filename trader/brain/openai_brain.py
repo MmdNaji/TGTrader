@@ -103,6 +103,23 @@ class OpenAIBrain:
         return out.get("reply", ""), out.get("skills", [])
 
     def ping(self) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model, messages=[{"role": "user", "content": "Reply with the single word OK."}], max_completion_tokens=20)
-        return (resp.choices[0].message.content or "").strip()
+        """Prove the key works AND that the model answers. Returning "" was worse than useless:
+        the self-test printed "OpenAI (gpt-5) replied: " with nothing after it and called that a
+        pass, so a broken key or a model that never produces content reported green.
+
+        max_completion_tokens covers the REASONING on a gpt-5-class model, so 20 was never
+        enough to leave room for a word - the budget went entirely on thinking."""
+        kw = dict(model=self.model,
+                  messages=[{"role": "user", "content": "Reply with the single word OK."}],
+                  max_completion_tokens=2000)
+        if self.model.startswith("gpt-5") or self.model.startswith("o"):
+            kw["reasoning_effort"] = "low"      # a ping needs no thinking; keep it cheap
+        resp = self.client.chat.completions.create(**kw)
+        choice = resp.choices[0]
+        text = (choice.message.content or "").strip()
+        if not text:
+            raise RuntimeError(
+                f"{self.model} returned no text (finish_reason={choice.finish_reason}). "
+                "On a reasoning model this usually means the token budget went entirely on "
+                "reasoning - or the key is valid but the model is refusing.")
+        return text

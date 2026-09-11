@@ -191,7 +191,14 @@ class Brain:
         return out.get("reply", ""), out.get("skills", [])
 
     def ping(self) -> str:
-        resp = self._create(model=self.settings.model, max_tokens=50,
+        """Same rule as the OpenAI ping: an empty answer is a failure, not a pass."""
+        resp = self._create(model=self.settings.model, max_tokens=1000,
                             messages=[{"role": "user", "content": "Reply with the single word OK."}],
                             output_config={"effort": "low"})
-        return next((b.text for b in resp.content if b.type == "text"), "").strip()
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("model refused the ping")
+        text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+        if not text:
+            raise RuntimeError(f"{self.settings.model} returned no text "
+                               f"(stop_reason={resp.stop_reason})")
+        return text

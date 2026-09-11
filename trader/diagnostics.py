@@ -11,6 +11,18 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Callable
 
 from . import __version__, updater
+
+
+def _answered(text: str, who: str) -> str:
+    """A check that only looks for the absence of an exception is not a check.
+
+    The self-test reported "OpenAI (gpt-5) replied: " - with nothing after it - as a PASS,
+    because ping() returned an empty string and the check simply concatenated it. A dead key or
+    a model that never produces content both came out green.
+    """
+    if not (text or "").strip():
+        raise RuntimeError(f"{who} connected but returned an empty answer")
+    return text
 from .config import Settings
 from .db import Database
 
@@ -126,13 +138,44 @@ def run_all(settings: Settings, db: Database, progress: Callable[[str], None] | 
     run("قوانین پایه", c_rules)
 
     def c_risk():
+        """Sizes one trade, then keeps opening more until something refuses.
+
+        It used to report a single qty with no context, which said nothing about the question
+        people actually have - how many positions will this open, and why not more. Answering
+        that from a qty alone is not possible, and guessing at it from a screenshot of the
+        settings is how a prediction ends up wrong.
+        """
         from .risk.manager import RiskManager
-        rm = RiskManager(settings.risk, db, settings.mode)
-        atr = ctx["snap"].get("atr14") or 1.0; px = float(ctx["df"]["close"].iloc[-1])
-        sz = rm.size("long", px, settings.risk.atr_stop_mult * atr, settings.risk.capital_limit)
+        r = settings.risk
+        rm = RiskManager(r, db, settings.mode)
+        atr = ctx["snap"].get("atr14") or 1.0
+        px = float(ctx["df"]["close"].iloc[-1])
+        dist = r.atr_stop_mult * atr
+        sz = rm.size("long", px, dist, r.capital_limit)
         if sz is None:
-            raise RuntimeError(f"capital limit {settings.risk.capital_limit} too small for {ctx['sym']} at {px:g}")
-        return f"qty {sz.qty:.6g}, risk {sz.risk_amount:.4f}, stop {sz.stop_price:.6g}, tp {sz.take_profit:.6g}, kill={rm.kill_switch_on()}"
+            raise RuntimeError(f"capital limit {r.capital_limit} too small for {ctx['sym']} at {px:g}")
+
+        # how far the money actually goes, by the same code the engine uses
+        opens, cash, fits = [], float(r.capital_limit), 0
+        while fits < max(r.max_open_positions, 1):
+            s2 = rm.size("long", px, dist, r.capital_limit, cash=cash, open_positions=opens)
+            if s2 is None:
+                break
+            opens.append({"entry_price": px, "init_stop": px - dist, "qty": s2.qty})
+            cash -= s2.notional
+            fits += 1
+        why = ("«حداکثر پوزیشن باز»" if fits >= r.max_open_positions
+               else ("نقدینگی" if cash < r.capital_limit * 0.05 else "«سقف ریسک همزمان»"))
+        detail = {"capital": r.capital_limit, "risk_per_trade_pct": r.risk_per_trade * 100,
+                  "max_open_risk_pct": r.max_open_risk * 100,
+                  "max_position_frac_pct": r.max_position_frac * 100,
+                  "max_open_positions": r.max_open_positions,
+                  "positions_that_fit": fits, "limited_by": why,
+                  "one_trade_notional": round(sz.notional, 2),
+                  "one_trade_risk": round(sz.risk_amount, 4)}
+        return (f"سرمایه {r.capital_limit:g} · هر معامله {sz.notional:.2f} با ریسک "
+                f"{sz.risk_amount:.2f} · جا برای {fits} پوزیشن هم‌زمان (محدودکننده: {why}) · "
+                f"kill={rm.kill_switch_on()}", detail)
     run("مدیریت ریسک", c_risk)
 
     def c_backtest():
@@ -156,14 +199,15 @@ def run_all(settings: Settings, db: Database, progress: Callable[[str], None] | 
             if not settings.anthropic_api_key:
                 raise RuntimeError("no Claude key")
             from .brain.claude import Brain
-            return "Claude replied: " + Brain(settings).ping()
+            return "Claude replied: " + _answered(Brain(settings).ping(), "Claude")
         run("اتصال Claude", c_claude)
 
         def c_openai():
             if not settings.openai_api_key:
                 raise RuntimeError("no OpenAI key")
             from .brain.openai_brain import OpenAIBrain
-            return f"OpenAI ({settings.openai_model}) replied: " + OpenAIBrain(settings).ping()
+            return (f"OpenAI ({settings.openai_model}) replied: "
+                    + _answered(OpenAIBrain(settings).ping(), settings.openai_model))
         run("اتصال OpenAI", c_openai)
 
         def c_decide():
