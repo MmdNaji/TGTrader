@@ -131,9 +131,16 @@ class ElidedLabel(QLabel):
 
     QLabel's minimum width is the width of its text, so one long Persian sentence sitting in a
     row that cannot wrap becomes a floor under the WHOLE WINDOW. Measured here: the topbar
-    subtitle alone accounted for 224 of the 984 pixels the window refused to go below, and the
-    same row on Windows is wider again - the Windows build could not be made narrower than
-    1617 physical pixels, which does not fit a 1366-pixel laptop screen at all.
+    subtitle alone accounted for 224 of the 984 pixels the window refused to go below.
+
+    CORRECTION, and it matters for anyone calibrating against the numbers in these comments.
+    The Windows figures quoted around this change - a 1617px floor, then 1050 - are PHYSICAL
+    pixels on a 150% display. Qt sizes in LOGICAL pixels, so the floor was ~1078 logical before
+    and ~700 after. I wrote that 1617 "does not fit a 1366px laptop"; that was wrong - a 1366
+    laptop at 100% has 1366 logical pixels and would have fitted either way. What was actually
+    wrong is that ~1078 logical is far more than this window needs, so it could not share a
+    screen with anything else and had no room left on a scaled display. The causes were real
+    defects; the consequence I claimed was not.
 
     So this one reports a minimum width of zero, keeps the full sentence for the tooltip, and
     draws as much of it as fits with an ellipsis.

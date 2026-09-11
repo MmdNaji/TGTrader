@@ -300,12 +300,39 @@ class CandleChart(QWidget):
         # title
         p.setPen(GOLD); p.setFont(QFont("Segoe UI", 10, QFont.Bold))
         chg = (last / float(win["open"].iloc[0]) - 1) * 100
-        title = f"{self.symbol}  {self.timeframe}   {self._fmt(last)}   {chg:+.2f}%"
+        # Built up piece by piece and stopped when the box is full, instead of written out and
+        # cut. On a 1366px screen the whole "BTC/USDT  1d  76,865.40  -5.21%" did not fit, and
+        # the RTL window cut it from the FRONT: what was left on screen read ":65.40  -5.21%".
+        # Nobody sees that as a truncated header - they see a price of 65.40. Same damage as
+        # "شروع 7" on the equity curve, and the same rule applies: whole or not at all.
+        #
+        # The symbol and timeframe are the identity of the chart and always stay; the price is
+        # dropped first because it is also on the right-hand price pill, two centimetres away.
+        fm = p.fontMetrics()
+        # The 170px reserved on the right is for the two EMA legends. On a narrow chart that is
+        # most of the header, and the legends are decoration while the symbol is the identity of
+        # what you are looking at - so below this width the legends go and the title gets the row.
+        legend = plot.width() >= 430
+        room = max(0.0, plot.width() - (170 if legend else 8))
+        title = f"{self.symbol}  {self.timeframe}"
+        extras = [self._fmt(last), f"{chg:+.2f}%"]
         if plot.width() > 620:
-            title += f"  ({n} bars)"
-        p.drawText(QRectF(plot.left() + 4, 2, plot.width() - 170, 20), Qt.AlignLeft | Qt.AlignVCenter, title)
-        p.setFont(self._font); p.setPen(GOLD); p.drawText(QRectF(plot.right() - 150, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA20")
-        p.setPen(BLUE); p.drawText(QRectF(plot.right() - 75, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA50")
+            extras.append(f"({n} bars)")
+        for extra in extras:
+            wider = f"{title}   {extra}"
+            if fm.horizontalAdvance(wider) > room:
+                break
+            title = wider
+        if fm.horizontalAdvance(title) > room:
+            # even the symbol does not fit: elide it, so what is left is visibly a cut NAME
+            # rather than a number that can be mistaken for a price.
+            title = fm.elidedText(title, Qt.ElideRight, int(room))
+        p.drawText(QRectF(plot.left() + 4, 2, room, 20), Qt.AlignLeft | Qt.AlignVCenter, title)
+        if legend:
+            p.setFont(self._font); p.setPen(GOLD)
+            p.drawText(QRectF(plot.right() - 150, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA20")
+            p.setPen(BLUE)
+            p.drawText(QRectF(plot.right() - 75, 2, 70, 20), Qt.AlignLeft | Qt.AlignVCenter, "— EMA50")
 
     _TF_SEC = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 

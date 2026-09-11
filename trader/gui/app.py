@@ -33,10 +33,15 @@ from .help_fa import HELP_HTML
 from .widgets import (Card, Kpi, pill, set_pill, hint, section, FormRow, Empty, table, fill, EquityCurve,
                       button, ElidedLabel)
 
-# Below this WINDOW width the topbar buttons keep their icon and drop their words. The four
-# labelled buttons plus the page subtitle were 764 of the 984 pixels this window refused to go
-# below - and the Windows build refused at 1617 physical pixels, which does not fit a 1366px
-# laptop screen at all. The tooltip carries the full label, so nothing is lost but the room.
+# Below this WINDOW width the topbar buttons keep their icon and drop their words, and the KPI
+# tiles go two by two. The four labelled buttons plus the page subtitle were 764 of the 984
+# pixels this window refused to go below. The tooltip carries the full label, so nothing is lost
+# but the room.
+#
+# This number is in LOGICAL pixels, which is what Qt reports and what everything here compares
+# against. The Windows session's figures are PHYSICAL pixels on a 150% display - their 1381px
+# window is ~920 logical, which is why it compacts there and matches this threshold. Divide
+# before comparing, or this constant looks wrong by half.
 COMPACT_W = 1150
 
 NAV = [

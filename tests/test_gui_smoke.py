@@ -608,12 +608,16 @@ def test_closing_everything_says_what_it_costs(win, monkeypatch):
 
 
 def test_the_window_fits_a_small_laptop_screen(win):
-    """It could not be made narrower than 1617 physical pixels on the Windows build, which does
-    not fit a 1366-pixel laptop screen at all - the user could not see the right-hand edge of
-    their own window. Nothing asked for that floor; it was the sum of things that merely could
-    not shrink: one-line card subtitles, the topbar's four labelled buttons and its page
-    subtitle, and four pages that were not inside a scroll area and so imposed their widest
-    control row on the whole window.
+    """It could not be made narrower than 1617 PHYSICAL pixels on the Windows build - about 1078
+    logical, that display running at 150%. Nothing asked for that floor; it was the sum of things
+    that merely could not shrink: one-line card subtitles, the topbar's four labelled buttons and
+    its page subtitle, and four pages that were not inside a scroll area and so imposed their
+    widest control row on the whole window.
+
+    I first wrote that 1617 "does not fit a 1366px laptop". That was wrong - those were physical
+    pixels, and a 1366 laptop at 100% has 1366 logical ones. The defects were real; the
+    consequence I attached to them was not. What is true is that a window needing ~1078 logical
+    pixels cannot share a screen and has nothing left over on a scaled display.
 
     Fonts differ between this box and Windows, so the number here is not the number there. What
     this pins is that no page and no card is allowed to be the floor - only the topbar is, and
@@ -1008,3 +1012,40 @@ def test_a_card_subtitle_uses_the_card_it_is_in(win):
         if c.width() > need + 120 and lbl.width() < need:
             wrapped[lbl.text()[:24]] = (c.width(), lbl.width(), need)
     assert not wrapped, f"subtitles wrapped inside cards with room to spare: {wrapped}"
+
+
+def test_the_chart_header_is_never_cut_into_a_number():
+    """At 1366px "BTC/USDT  1d  76,865.40  -5.21%" did not fit its box, and the right-to-left
+    window cut it from the FRONT: ":65.40  -5.21%" was left on screen. Nobody reads that as a
+    truncated header - they read a price of 65.40.
+
+    Same damage as "شروع 7" on the equity curve, so the same rule: the header is built up until
+    the box is full, never written out and cut. The symbol and timeframe always stay."""
+    from PySide6.QtGui import QImage
+    from trader.gui.chart import CandleChart
+    import pandas as pd
+
+    app = QApplication.instance() or QApplication([])
+    n = 140
+    idx = pd.date_range("2026-05-01", periods=n, freq="D")
+    df = pd.DataFrame({"open": [80000.0] * n, "high": [81000.0] * n, "low": [76000.0] * n,
+                       "close": [76865.4] * n, "volume": [10.0] * n}, index=idx)
+    ch = CandleChart()
+    ch.set_data(df, "BTC/USDT", "1d")
+    cut, kept_symbol = {}, 0
+    widths = range(260, 1500, 40)
+    for width in widths:
+        ch.resize(width, 420)
+        img = QImage(width, 420, QImage.Format_ARGB32)
+        img.fill(0)
+        drawn = _capture_text(lambda: ch.render(img))
+        app.processEvents()
+        head = [(r, t, a) for r, t, a in drawn if t.startswith("BTC/USDT") or t.startswith("BTC")]
+        assert head, f"no header drawn at {width}px"
+        for rect, text, adv in head:
+            if adv > rect.width() + 1:
+                cut[width] = (text, round(rect.width()), adv)
+            if "BTC" in text:
+                kept_symbol += 1
+    assert not cut, f"the header was painted into a box too small for it: {cut}"
+    assert kept_symbol == len(list(widths)), "the symbol was dropped at some width"
