@@ -138,10 +138,16 @@ if (-not $SkipTests) {
 
 # ---------------------------------------------------------------- 5. ساخت exe
 Say "ساخت exe  (چند دقیقه طول می‌کشد)"
-Remove-Item -Recurse -Force "dist\TGTrader" -ErrorAction SilentlyContinue
+# Built into a staging folder and moved into place only once PyInstaller has SUCCEEDED.
+# The previous version deleted dist\TGTrader first, so anything that stopped the script
+# between that line and the end of the build destroyed a perfectly good previous build:
+# a cancelled run, a closed window, a power cut. It cost one on 2026-09-11. Nothing here
+# touches the last good build until there is a new one to replace it with.
+$staging = "dist\.staging"
+Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
 # PyInstaller prints its ordinary progress to stderr - see Invoke-Native above.
 Invoke-Native {
-    & $vpy -m PyInstaller --noconfirm --clean --windowed --name TGTrader `
+    & $vpy -m PyInstaller --noconfirm --clean --windowed --name TGTrader --distpath $staging `
         --add-data "trader\knowledge\seed;trader\knowledge\seed" `
         --collect-all ccxt --collect-submodules trader `
         --hidden-import PySide6.QtSvg --hidden-import pyautogui --hidden-import mss --hidden-import PIL `
@@ -149,8 +155,23 @@ Invoke-Native {
 }
 if ($LASTEXITCODE -ne 0) { Die "PyInstaller شکست خورد." }
 
+$staged = "$staging\TGTrader\TGTrader.exe"
+if (-not (Test-Path $staged)) { Die "‏PyInstaller تمام شد ولی $staged ساخته نشد." }
+# Only now is the previous build touched - and it is RENAMED aside, not deleted, so that a
+# move that fails (a file held open by an antivirus scan is the usual one) leaves the machine
+# with the old build rather than with none.
+$previous = "dist\.previous"
+Remove-Item -Recurse -Force $previous -ErrorAction SilentlyContinue
+if (Test-Path "dist\TGTrader") { Move-Item "dist\TGTrader" $previous }
+try {
+    Move-Item "$staging\TGTrader" "dist\TGTrader" -ErrorAction Stop
+} catch {
+    if (Test-Path $previous) { Move-Item $previous "dist\TGTrader" }
+    Die "‏جابه‌جایی بیلد تازه انجام نشد؛ بیلد قبلی سر جایش برگشت. $_"
+}
+Remove-Item -Recurse -Force $previous, $staging -ErrorAction SilentlyContinue
 $exe = "dist\TGTrader\TGTrader.exe"
-if (-not (Test-Path $exe)) { Die "‏PyInstaller تمام شد ولی $exe ساخته نشد." }
+if (-not (Test-Path $exe)) { Die "‏جابه‌جایی از $staging به dist\TGTrader انجام نشد." }
 $mb = [math]::Round((Get-ChildItem "dist\TGTrader" -Recurse | Measure-Object Length -Sum).Sum / 1MB)
 Ok "ساخته شد: $exe  ($mb مگابایت)"
 
