@@ -1,3 +1,17 @@
+﻿<#
+  ================================================================================
+  THIS FILE MUST BE SAVED AS UTF-8 *WITH* A BOM. DO NOT STRIP THE BOM.
+
+  It contains Persian text, and Windows PowerShell 5.1 - which is what
+  build_windows.bat launches - decodes a BOM-less file as the system ANSI code
+  page, not UTF-8. The Persian turns to mojibake and the script fails to run at
+  all. PowerShell 7 does not care, which is exactly why this cannot be caught on
+  a Linux box: pwsh 7 is the only PowerShell there.
+
+  Editing on Linux? `sed`, `>` and most editors will quietly drop the three bytes.
+  Check with:  head -c 3 scripts/build_windows.ps1 | xxd    ->  efbbbf
+  ================================================================================
+#>
 <#
   ساخت TGTrader روی ویندوز خودت - بدون GitHub.
 

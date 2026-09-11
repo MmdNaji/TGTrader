@@ -1,6 +1,7 @@
 @echo off
-REM ساخت TGTrader روی همین کامپیوتر. فقط روی این فایل دوبار کلیک کن.
-REM اگر پایتون نصب نیست، اسکریپت خودش می‌گوید از کجا بگیری.
+REM Build TGTrader on this machine. Just double-click this file.
+REM If Python is missing, the script tells you where to get it.
+REM (Kept ASCII-only on purpose: cmd.exe reads .bat in the console code page.)
 setlocal
 cd /d "%~dp0\.."
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_windows.ps1" %*

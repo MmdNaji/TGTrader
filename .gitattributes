@@ -1,0 +1,9 @@
+# Windows shells read these, so check them out with CRLF.
+#
+# scripts/build_windows.ps1 also carries a UTF-8 BOM on purpose: Windows PowerShell 5.1
+# decodes a BOM-less file as the system ANSI code page, and that file contains Persian.
+# Git only rewrites line endings here, never the BOM - do not add working-tree-encoding,
+# which would re-encode the content.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.iss text eol=crlf
