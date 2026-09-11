@@ -4,6 +4,7 @@ The engine runs in its own thread; the window only reads state and issues comman
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QFileDialog, QMessageBox, QPlainTextEdit,
     QSplitter, QProgressDialog, QTextBrowser, QStackedWidget, QScrollArea, QButtonGroup, QFrame,
-    QAbstractSpinBox, QSlider, QInputDialog, QAbstractItemView,
+    QAbstractSpinBox, QSlider, QInputDialog, QAbstractItemView, QDialog,
 )
 
 from .. import __version__, updater
@@ -1098,13 +1099,114 @@ class MainWindow(QMainWindow):
         for x in (self.kpi_t_n, self.kpi_t_win, self.kpi_t_pnl, self.kpi_t_pf, self.kpi_t_r):
             k.addWidget(x)
         v.addLayout(k)
-        c = Card("تاریخچه", "برای قضاوت درباره‌ی یک روش حداقل ۳۰ معامله لازم است")
+        c = Card("تاریخچه", "روی هر ردیف بزن تا چارت همان لحظه و تحلیل پشت آن معامله را ببینی · "
+                            "برای قضاوت درباره‌ی یک روش حداقل ۳۰ معامله لازم است")
         self.tbl_trades = table(["باز", "بسته", "نماد", "جهت", "مقدار", "ورود", "خروج", "سود/زیان", "R", "استراتژی", "دلیل"])
         self.tbl_trades.setMinimumHeight(420)
+        self.tbl_trades.setToolTip("روی یک ردیف بزن تا تحلیل کامل آن معامله باز شود")
+        self.tbl_trades.cellClicked.connect(lambda r, _c: self._show_trade_analysis(r))
         self.empty_trades = Empty("هنوز معامله‌ای بسته نشده.")
         c.add(self.tbl_trades, 1); c.add(self.empty_trades)
         v.addWidget(c, 1)
         return self._scroll(inner)
+
+    # ------------------------------------------------------------ trade analysis
+    def _show_trade_analysis(self, row: int, show: bool = True):
+        """The chart AS IT WAS when the trade was taken, with the reasoning under it.
+
+        Drawn from the bars stored with the trade, not from a fresh fetch: a chart pulled today
+        shows what happened afterwards, which makes every entry look either obvious or stupid
+        with information the bot did not have. The point of this view is to judge the decision
+        on what was on the screen at the time.
+        """
+        import pandas as pd
+        from ..market.indicators import enrich
+        rows = getattr(self, "_closed_rows", [])
+        if not (0 <= row < len(rows)):
+            return None
+        tr = rows[row]
+        recs = self.db.trade_analysis(int(tr["id"]))
+        if not recs:
+            QMessageBox.information(
+                self, "تحلیل موجود نیست",
+                "این معامله پیش از افزوده‌شدن ثبت تحلیل باز شده است. معامله‌های تازه تحلیلشان "
+                "را با خودشان نگه می‌دارند.")
+            return None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"تحلیل معامله #{tr['id']} — {tr['symbol']}")
+        dlg.resize(min(1100, max(760, self.width() - 120)), min(760, max(520, self.height() - 90)))
+        lay = QVBoxLayout(dlg); lay.setContentsMargins(14, 12, 14, 12); lay.setSpacing(10)
+
+        head = QLabel(self._analysis_headline(tr)); head.setObjectName("cardTitle"); head.setWordWrap(True)
+        lay.addWidget(head)
+
+        chart = CandleChart(); chart.setMinimumHeight(280)
+        by_kind = {r["kind"]: r for r in recs}
+        src = by_kind.get("close") or by_kind.get("open")
+        bars = json.loads(src["candles"]) if src and src["candles"] else []
+        if bars:
+            df = pd.DataFrame(bars, columns=["ts", "open", "high", "low", "close", "volume"])
+            df["time"] = pd.to_datetime(df["ts"], unit="s", utc=True)
+            df = df.set_index("time").drop(columns=["ts"])
+            chart.set_data(enrich(df), tr["symbol"], src["timeframe"] or self.settings.timeframe,
+                           position={"entry_price": tr["entry_price"], "stop_price": tr["init_stop"],
+                                     "take_profit": tr["take_profit"]},
+                           trades=[dict(tr)])
+            lay.addWidget(chart, 1)
+        else:
+            lay.addWidget(Empty("کندل‌های آن لحظه ذخیره نشده‌اند."))
+
+        body = QTextBrowser(); body.setOpenExternalLinks(False)
+        body.setHtml(self._analysis_html(recs))
+        lay.addWidget(body, 1)
+
+        row_btn = QHBoxLayout()
+        row_btn.addWidget(button("📈 چارت زنده‌ی این ارز", "ghost",
+                                 lambda: (dlg.accept(), self._chart_for(tr["symbol"]))))
+        row_btn.addStretch()
+        close_btn = button("بستن", "primary", dlg.accept)
+        row_btn.addWidget(close_btn)
+        lay.addLayout(row_btn)
+        # `show` is off in tests: exec() spins its own event loop and never returns without a
+        # user. Everything above has already run, so what a test inspects is the real dialog.
+        dlg._chart, dlg._body = chart, body
+        if show:
+            dlg.exec()
+        return dlg
+
+    def _chart_for(self, symbol: str) -> None:
+        self.ch_symbol.setCurrentText(symbol)
+        self.goto("chart")
+        self.refresh_chart()
+
+    def _analysis_headline(self, tr: dict) -> str:
+        side = FA_SIDE.get(tr["side"], tr["side"])
+        pnl = tr.get("pnl")
+        r = tr.get("r_multiple")
+        bits = [f"{tr['symbol']} · {side}"]
+        if pnl is not None:
+            bits.append(ltr(f"{float(pnl):+,.4f} $"))
+        if r is not None:
+            bits.append(ltr(f"{float(r):+.2f}R"))
+        bits.append(f"{self._ts(tr.get('opened_at'))} → {self._ts(tr.get('closed_at'))}")
+        return "  ·  ".join(bits)
+
+    def _analysis_html(self, recs) -> str:
+        from .. import analysis as ana
+        parts = ["<style>h3{margin:10px 0 4px} b{color:#e6b34a} "
+                 "p{margin:2px 0 8px;line-height:1.7} .k{color:#8a94a7}</style>"]
+        titles = {"open": "تحلیل ورود", "close": "تحلیل خروج"}
+        for rec in recs:
+            payload = json.loads(rec["payload"])
+            parts.append(f"<h3>{titles.get(rec['kind'], rec['kind'])}</h3>")
+            for headline, text in ana.explain(payload, rec["kind"]):
+                safe = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        .replace("\n", "<br>"))
+                parts.append(f"<p><span class='k'>{headline}:</span> <b>{safe}</b></p>"
+                             if len(safe) < 60 else
+                             f"<p><span class='k'>{headline}:</span><br>{safe}</p>")
+        return "".join(parts)
 
     # ============================================================ SKILLS
     def _page_skills(self) -> QWidget:
@@ -1775,6 +1877,7 @@ class MainWindow(QMainWindow):
         self.kpi_t_pnl.set(f"{st['pnl']:+.4f}" if st["trades"] else "—", tone="green" if st["pnl"] > 0 else ("red" if st["pnl"] < 0 else ""))
         self.kpi_t_pf.set(pf if st["trades"] else "—"); self.kpi_t_r.set(f"{st['avg_r']:+.2f}" if st["trades"] else "—")
         closed = self.db.closed_trades(mode, 200)
+        self._closed_rows = [dict(r) for r in closed]
         fill(self.tbl_trades, [[self._ts(r["opened_at"]), self._ts(r["closed_at"]), r["symbol"], r["side"], f"{r['qty']:g}", f"{r['entry_price']:g}",
                                 f"{r['exit_price']:g}" if r["exit_price"] else "", f"{r['pnl']:+.4f}" if r["pnl"] is not None else "",
                                 f"{r['r_multiple']:+.2f}" if r["r_multiple"] is not None else "", r["strategy"], r["reason"]] for r in closed], tones={7: "pnl", 8: "pnl"})

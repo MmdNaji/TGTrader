@@ -1,6 +1,7 @@
 """Offline tests: indicators, regime, strategies, risk sizing, paper broker, backtest, knowledge, skills, engine loop."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -1273,3 +1274,62 @@ def test_no_test_uses_a_self_cleaning_temp_dir():
                 bad.setdefault(path.name, []).append(node.lineno)
     assert not bad, (f"use the module-level mkdtemp instead: {bad} - a TemporaryDirectory "
                      f"cannot be removed on Windows while a Database still holds the file")
+
+
+def test_every_trade_carries_the_analysis_behind_it():
+    """The owner asked to see the chart analysis behind the trades. A reason string on its own
+    cannot be checked against anything - "entered on a pullback in an uptrend" is either true or
+    a story, and by the time anyone looks the chart has moved on. So the bars are stored with the
+    reasoning and the view redraws the chart AS IT WAS.
+
+    This drives the real engine loop, not a hand-built row: the analysis has to survive the same
+    path a live trade takes, including the fill price being different from the price the decision
+    was taken at."""
+    from trader import analysis
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.risk.capital_limit = 1000; s.paper_start_balance = 1000
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_analysis.db")
+    pb = PaperBroker(1000); pb.reset(1000)
+    eng = Engine(s, db, broker=pb)
+    eng.market = FakeMarket(synth(900, seed=3))
+    for _ in range(550):
+        eng.loop_once()
+
+    closed = db.closed_trades("paper")
+    assert closed, "the harness opened no trade, so this proves nothing"
+    tid = int(closed[0]["id"])
+    rows = db.trade_analysis(tid)
+    kinds = [r["kind"] for r in rows]
+    assert "open" in kinds and "close" in kinds, f"a closed trade has {kinds}"
+
+    opened = json.loads([r for r in rows if r["kind"] == "open"][0]["payload"])
+    # the ARITHMETIC, not just the verdict - these are the numbers the owner can disagree with
+    for key in ("entry", "stop", "target", "stop_distance", "round_trip_fee", "gross_target",
+                "reward_risk", "qty", "notional", "regime", "indicators"):
+        assert key in opened, f"the entry analysis does not record {key}"
+    assert opened["stop_distance"] > 0
+    # the stop recorded must be the one the trade actually opened with, off the FILL price
+    row = db.one("SELECT * FROM trades WHERE id=?", (tid,))
+    assert opened["entry"] == pytest.approx(float(row["entry_price"]))
+    assert opened["stop"] == pytest.approx(float(row["init_stop"]))
+
+    bars = json.loads([r for r in rows if r["kind"] == "open"][0]["candles"])
+    assert 20 <= len(bars) <= analysis.MAX_BARS
+    assert all(len(b) == 6 for b in bars), "a bar is [ts, o, h, l, c, v]"
+    # the chart must end AT the decision, not after it - a bar the engine had not seen yet
+    # would make every entry look like it was taken with hindsight
+    assert bars[-1][0] <= float(row["opened_at"])
+
+    closed_p = json.loads([r for r in rows if r["kind"] == "close"][0]["payload"])
+    assert closed_p["why"] in ("stop", "target", "manual", "trail", "reverse", "close_all")
+    assert closed_p["exit"] == pytest.approx(float(row["exit_price"]))
+    assert closed_p["pnl"] == pytest.approx(float(row["pnl"]))
+
+    # and it renders into something a person can read, in Persian, with no placeholders left
+    for kind, payload in (("open", opened), ("close", closed_p)):
+        lines = analysis.explain(payload, kind)
+        assert len(lines) >= 4, f"{kind} explained in {len(lines)} lines"
+        for head, text in lines:
+            assert head and text, f"empty line in the {kind} explanation: {head!r} {text!r}"
+            assert "None" not in text, f"an unfilled value reached the reader: {head}: {text}"
+    db.close()

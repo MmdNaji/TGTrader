@@ -33,6 +33,18 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 
+CREATE TABLE IF NOT EXISTS trade_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,                -- open | close
+    ts REAL NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT,
+    payload TEXT NOT NULL,             -- JSON: regime, indicators, signals, the arithmetic
+    candles TEXT                       -- JSON: the bars AS THEY WERE, so the chart can be redrawn
+);
+CREATE INDEX IF NOT EXISTS idx_ta_trade ON trade_analysis(trade_id);
+
 CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -140,6 +152,38 @@ class Database:
             (time.time(), symbol, action, confidence, source, reason, json.dumps(payload or {}, ensure_ascii=False)),
         )
         return int(cur.lastrowid)
+
+    # ------------------------------------------------------------ trade analysis
+    def add_trade_analysis(self, trade_id: int, kind: str, symbol: str, timeframe: str,
+                           payload: dict[str, Any], candles: list | None = None) -> int:
+        """Store WHY a trade was opened or closed, with the bars as they looked at the time.
+
+        The decision row already records the reasoning, but it is not attached to the trade and
+        it does not keep the chart. Without the bars, "it entered on a pullback in an uptrend"
+        cannot be checked against anything later - and checking is the whole point of writing it
+        down. The owner asked to see the chart analysis behind each trade; this is what that
+        view reads.
+        """
+        cur = self.execute(
+            "INSERT INTO trade_analysis(trade_id, kind, ts, symbol, timeframe, payload, candles)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (trade_id, kind, time.time(), symbol, timeframe,
+             json.dumps(payload or {}, ensure_ascii=False),
+             json.dumps(candles, ensure_ascii=False) if candles else None),
+        )
+        return int(cur.lastrowid)
+
+    def trade_analysis(self, trade_id: int) -> list[sqlite3.Row]:
+        return self.query("SELECT * FROM trade_analysis WHERE trade_id=? ORDER BY id", (trade_id,))
+
+    def has_analysis(self, trade_ids: list[int]) -> set[int]:
+        """Which of these trades carry an analysis - so a list can mark the ones worth opening."""
+        if not trade_ids:
+            return set()
+        marks = ",".join("?" * len(trade_ids))
+        rows = self.query(f"SELECT DISTINCT trade_id FROM trade_analysis WHERE trade_id IN ({marks})",
+                          tuple(trade_ids))
+        return {int(r["trade_id"]) for r in rows}
 
     def recent_decisions(self, limit: int = 50) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,))

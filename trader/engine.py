@@ -21,6 +21,7 @@ import time
 import traceback
 from typing import Any, Callable
 
+from . import analysis
 from .config import Settings
 from .db import Database
 from .execution.base import Broker
@@ -415,6 +416,23 @@ class Engine:
                 else fill.price - self.settings.risk.reward_risk * stop_distance
             tid = self.db.open_trade(self.mode, symbol, side, fill.qty, fill.price, stop, tp,
                                      strategy, decision.get("reason", ""), entry_fee=fill.fee)
+        # Written AFTER the fill, because it records the stop and target computed from the
+        # price actually paid - not the ones planned off the pre-order price.
+        try:
+            self.db.add_trade_analysis(
+                tid, "open", symbol, self.settings.timeframe,
+                analysis.entry_analysis(
+                    symbol=symbol, timeframe=self.settings.timeframe, side=side, regime=regime,
+                    snap=snap, signals=signals, decision=decision, source=source,
+                    price=fill.price, stop=stop, target=tp, stop_distance=stop_distance,
+                    qty=fill.qty, fee_rate=self.fee_rate(), round_trip=round_trip,
+                    gross_target=gross_target, reward_risk=self.settings.risk.reward_risk,
+                    equity=equity, risk_amount=getattr(sizing, "risk_amount", None),
+                    leader=lead, leader_regime=self._leader_regime),
+                analysis.bars(eval_df))
+        except Exception as exc:
+            # A missing analysis must never cost a trade that is already open on the exchange.
+            self.log(f"analysis not stored for {symbol}: {exc}", "warn")
         self._entered_bar[symbol] = bar_ts
         open_positions.append({"id": tid, "symbol": symbol, "side": side, "qty": fill.qty,
                                "entry_price": fill.price, "stop_price": stop, "init_stop": stop})
@@ -459,7 +477,7 @@ class Engine:
         # The CLOSED bar, to match what _consider_entry compares against. Stamping the forming
         # bar made a two-bar cooldown last three outside scalp mode.
         closed_ts = float(df.index[-2].timestamp()) if len(df) > 1 else float(df.index[-1].timestamp())
-        return self.close_position(pos, price, why, bar_ts=closed_ts)
+        return self.close_position(pos, price, why, bar_ts=closed_ts, df=df)
 
     def _manage_on_price_alone(self, pos: dict) -> bool:
         """Stop and target only, from the live price, when candles are unavailable.
@@ -500,7 +518,11 @@ class Engine:
         self.log(f"{sym}: closing on the live price alone - candles are unavailable", "warn")
         return self.close_position(pos, price, why)
 
-    def close_position(self, pos: dict, price: float, why: str, bar_ts: float | None = None) -> bool:
+    def close_position(self, pos: dict, price: float, why: str, bar_ts: float | None = None,
+                       df=None) -> bool:
+        """`df` is the frame this close was decided on, kept with the analysis so the exit can
+        be looked at on the same chart as the entry. It is optional: a close driven by the live
+        price alone genuinely has no frame, and an exit with no chart is better than no exit."""
         side = pos["side"]
         with self._trade_lock:
             # Idempotency starts here: if the row is no longer open, somebody else closed it.
@@ -539,6 +561,21 @@ class Engine:
             self._cooldown[pos["symbol"]] = bar_ts if bar_ts else time.time()
         self.db.add_decision(pos["symbol"], "close", None, "risk", why,
                              {"pnl": pnl, "r": r, "fees": fill.fee + entry_fee})
+        try:
+            opened = pos.get("opened_at")
+            self.db.add_trade_analysis(
+                int(pos["id"]), "close", pos["symbol"], self.settings.timeframe,
+                analysis.exit_analysis(
+                    symbol=pos["symbol"], timeframe=self.settings.timeframe, side=side, why=why,
+                    entry=entry, exit_price=fill.price, stop=pos.get("stop_price"),
+                    init_stop=init_stop, target=pos.get("take_profit"), qty=fill.qty,
+                    pnl=pnl, r_multiple=r, fees=fill.fee + entry_fee,
+                    held_seconds=(time.time() - float(opened)) if opened else None,
+                    regime=detect_regime(df) if df is not None and len(df) > 50 else None,
+                    snap=snapshot(df) if df is not None and len(df) else None),
+                analysis.bars(df) if df is not None else None)
+        except Exception as exc:
+            self.log(f"exit analysis not stored for {pos['symbol']}: {exc}", "warn")
         self.log(f"CLOSE {side} {pos['symbol']} @ {fill.price:g} pnl={pnl:+.4f} "
                  f"fees={fill.fee + entry_fee:.6g} ({why})")
         return True

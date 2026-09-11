@@ -1049,3 +1049,66 @@ def test_the_chart_header_is_never_cut_into_a_number():
                 kept_symbol += 1
     assert not cut, f"the header was painted into a box too small for it: {cut}"
     assert kept_symbol == len(list(widths)), "the symbol was dropped at some width"
+
+
+def test_the_trade_analysis_view_draws_the_chart_as_it_was(win):
+    """Clicking a closed trade has to open the chart AS IT WAS at the time, with the reasoning
+    under it. Drawn from the bars stored with the trade, never from a fresh fetch: a chart pulled
+    today shows what happened afterwards, which makes every entry look either obvious or stupid
+    with information the bot did not have.
+
+    This builds the real dialog rather than checking that a method exists - the view was the
+    thing the owner asked for, and a view nobody has looked at is not a view."""
+    from trader.config import Settings
+    from trader.db import Database
+    from trader.engine import Engine
+    from trader.execution.paper import PaperBroker
+    import pandas as pd, numpy as np
+
+    app = QApplication.instance() or QApplication([])
+    # a market with a real trend, so the built-in rules actually take something
+    n = 900
+    rng = np.random.default_rng(7)
+    close = 100 * np.exp(np.cumsum(rng.normal(0.0012, 0.02, n)))
+    idx = pd.date_range("2026-01-01", periods=n, freq="h", tz="UTC")
+    df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+
+    class FakeMarket:
+        def __init__(self, d): self.df = d; self.i = 300
+        def candles(self, symbol, timeframe=None, limit=400, max_age=20.0):
+            self.i = min(self.i + 1, len(self.df)); return self.df.iloc[:self.i].tail(limit)
+        def price(self, symbol): return float(self.df["close"].iloc[self.i - 1])
+
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.risk.capital_limit = 1000; s.paper_start_balance = 1000
+    import pathlib
+    db = Database(pathlib.Path(tempfile.mkdtemp(prefix="tg-analysis-")) / "a.db")
+    try:
+        pb = PaperBroker(1000); pb.reset(1000)
+        eng = Engine(s, db, broker=pb)
+        eng.market = FakeMarket(df)
+        for _ in range(550):
+            eng.loop_once()
+        closed = db.closed_trades("paper")
+        assert closed, "the harness closed no trade, so the view has nothing to show"
+
+        win.db = db
+        win.settings = s
+        win._closed_rows = [dict(r) for r in closed]
+        dlg = win._show_trade_analysis(0, show=False)
+        assert dlg is not None, "the dialog was not built"
+        app.processEvents()
+
+        assert dlg._chart.df is not None and len(dlg._chart.df) > 20, "the chart got no candles"
+        assert dlg._chart.position, "entry / stop / target were not handed to the chart"
+        html = dlg._body.toPlainText()
+        for must in ("تحلیل ورود", "تحلیل خروج", "چرا این حد ضرر", "چرا این هدف", "نتیجه"):
+            assert must in html, f"the analysis text is missing «{must}»"
+        assert "None" not in html, "an unfilled value reached the reader"
+        # the chart must stop AT the trade, never after it
+        last_bar = float(dlg._chart.df.index[-1].timestamp())
+        assert last_bar <= float(closed[0]["closed_at"]) + 1
+        dlg.deleteLater()
+    finally:
+        db.close()
