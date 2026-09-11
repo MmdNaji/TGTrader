@@ -158,9 +158,7 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
     hh = t.horizontalHeader()
     for i in range(len(headers)):
         hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
-    if headers and stretch_last:
-        # the last column takes the slack, so short tables still fill the card
-        hh.setSectionResizeMode(len(headers) - 1, QHeaderView.Stretch)
+    t._stretch_last = bool(stretch_last)
     if headers and headers[0] == "#":
         hh.setSectionResizeMode(0, QHeaderView.Fixed); t.setColumnWidth(0, 48)
     t.verticalHeader().setVisible(False)
@@ -179,6 +177,32 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
 _BIDI = "\u2066\u2067\u2068\u2069\u200e\u200f"
 
 
+def fit_columns(t: QTableWidget) -> None:
+    """Stretch the last column only while there is room to spare.
+
+    Keeping a column on Stretch permanently lets Qt squeeze it BELOW its content when the
+    window is tight, which is how "-0.14 $ (-0.28%)" became "-0.14 $..." - and the horizontal
+    scrollbar could not help, because as far as the table was concerned everything fitted.
+
+    Measured across widths with everything on ResizeToContents and nothing stretched: no column
+    is ever cut and the table scrolls when it must, at the cost of blank space on a wide card.
+    So the stretch is applied only when the contents genuinely leave slack, which gives both.
+    """
+    n = t.columnCount()
+    if not n or not getattr(t, "_stretch_last", True):
+        return
+    need = sum(t.sizeHintForColumn(c) for c in range(n))
+    room = t.viewport().width()
+    hh = t.horizontalHeader()
+    # HEADROOM, not "need < room". Deciding on the exact boundary meant that at a width two
+    # pixels above the content the stretch was applied anyway, and stretching then redistributes
+    # and squeezes the last column under its own hint - the truncation comes back at precisely
+    # the widths where it is hardest to notice.
+    headroom = 24
+    hh.setSectionResizeMode(n - 1, QHeaderView.Stretch if need + headroom <= room
+                            else QHeaderView.ResizeToContents)
+
+
 def fill(t: QTableWidget, rows: list[list[Any]], tones: dict[int, str] | None = None) -> None:
     """tones: {column_index: 'pnl'} colours positive/negative numbers in that column."""
     t.setRowCount(len(rows))
@@ -190,6 +214,10 @@ def fill(t: QTableWidget, rows: list[list[Any]], tones: dict[int, str] | None = 
                 if bare[:1] in "+-":
                     it.setForeground(QColor(theme.SUCCESS if bare.startswith("+") else theme.DANGER))
             t.setItem(i, j, it)
+    # after the data, because the decision depends on what is now in the cells. The live tables
+    # are refilled on the refresh timer, so a window the user resizes by hand catches up on the
+    # next tick rather than needing a resize event of its own.
+    fit_columns(t)
 
 
 class EquityCurve(QWidget):

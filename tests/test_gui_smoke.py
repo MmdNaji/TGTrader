@@ -557,12 +557,20 @@ def test_no_table_column_is_narrower_than_what_is_in_it():
              ["AVAX/USDT", "خرید", "7.4837", "7.4900", "50.00 $", "7.1392", "8.1728",
               "⁦+0.03 $ (+0.06%)⁩"]], tones={7: "pnl"})
     t.show()
-    for width in (520, 900, 1400):
+    # Swept rather than sampled: the failure came back at the exact widths where the contents
+    # almost fit, which three round numbers walk straight past.
+    bad = {}
+    for width in range(300, 1460, 20):
         t.resize(width, 200)
+        app.processEvents()
+        fill(t, [["ETH/USDT", "خرید", "2,452.06", "2,450.00", "50.02 $", "2,372.96", "2,627.56",
+                  "⁦-0.14 $ (-0.28%)⁩"]], tones={7: "pnl"})
         app.processEvents()
         cut = [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())
                if t.columnWidth(c) < t.sizeHintForColumn(c)]
-        assert not cut, f"at {width}px these columns cut their contents: {cut}"
+        if cut:
+            bad[width] = cut
+    assert not bad, f"columns cut their contents at these widths: {bad}"
 
 
 def test_closing_everything_says_what_it_costs(win, monkeypatch):
