@@ -246,6 +246,24 @@ class Settings:
                     f"حدود {fits} پوزیشن می‌رسد. برای {r.max_open_positions} پوزیشن، "
                     f"«{L['max_position_frac']}» را حدود {100//max(r.max_open_positions,1)}٪ بگذار."
                     f"   (تنظیمات ← ریسک)")
+        # A setting that looks like it controls risk and does not. Position size is the SMALLER
+        # of "risk this fraction of capital" and "never exceed this fraction of capital as
+        # notional". The second is a fraction of PRICE and the first a fraction of the STOP
+        # DISTANCE, so the risk target can only ever bind if
+        #     stop distance / price  >=  risk_per_trade / max_position_frac
+        # Found on the owner's own machine: risk_per_trade 5% with max_position_frac 5% needs a
+        # stop 100% of price away, so his "5% risk" was really 0.54% and nothing said so.
+        if r.max_position_frac > 0 and r.risk_per_trade > 0:
+            need = r.risk_per_trade / r.max_position_frac
+            if need > 0.25:
+                out.append(
+                    f"«{L['risk_per_trade']}» {r.risk_per_trade*100:.1f}٪ عملاً اثری ندارد: "
+                    f"«{L['max_position_frac']}» {r.max_position_frac*100:.1f}٪ زودتر اندازه را "
+                    f"می‌بندد. برای اینکه آن عدد به کار بیفتد، حد ضرر باید "
+                    f"{need*100:.0f}٪ قیمت فاصله داشته باشد که واقعی نیست. "
+                    f"ریسک واقعی هر معامله ≈ «{L['max_position_frac']}» × فاصله‌ی حد ضرر است "
+                    f"— با حد ضرر ۱۰٪، حدود {r.max_position_frac*10:.2f}٪ سرمایه."
+                    f"   (تنظیمات ← ریسک)")
         if len(self.symbols) > r.max_open_positions:
             out.append(f"{len(self.symbols)} نماد در «{L['symbols']}» داری ولی "
                        f"«{L['max_open_positions']}» {r.max_open_positions} است - بقیه فقط "

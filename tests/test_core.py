@@ -1082,3 +1082,39 @@ def test_the_heartbeat_names_the_symbols_that_have_no_price():
     assert beat, "a total data outage is exactly when it must still report in"
     assert "بدون قیمت" in beat[0]["message"], beat[0]["message"]
     assert "0 از 2" in beat[0]["message"] or "۰ از ۲" in beat[0]["message"], beat[0]["message"]
+
+
+def test_it_says_when_the_risk_setting_can_never_actually_bind():
+    """Position size is the SMALLER of "risk this fraction of capital" and "never exceed this
+    fraction of capital as notional". The first scales with the STOP DISTANCE and the second
+    with PRICE, so a risk target is only reachable when
+        stop distance / price >= risk_per_trade / max_position_frac.
+    On the owner's machine both were 5%, needing a stop 100% of price away: his "5% risk per
+    trade" was really 0.54% and nothing told him."""
+    s = Settings()
+    s.risk.capital_limit = 1000
+    s.risk.risk_per_trade = 0.05
+    s.risk.max_position_frac = 0.05     # needs a 100% stop -> dead setting
+    s.risk.max_open_risk = 0.06
+    s.risk.max_open_positions = 20
+    s.symbols = ["BTC/USDT"]
+    advice = s.advisories()
+    assert any("اثری ندارد" in a for a in advice), advice
+
+    # and it is measurably true, through the real sizing code
+    rm = RiskManager(s.risk, None, "paper")
+    sz = rm.size("long", 76752.0, 8358.0, 1000.0)     # BTC, a 4xATR stop
+    assert sz is not None
+    assert sz.risk_amount / 1000 < 0.01, "the notional cap decides, not the 5% risk setting"
+
+    # a configuration where the risk target IS reachable must not be warned about
+    ok = Settings()
+    ok.risk.capital_limit = 1000
+    ok.risk.risk_per_trade = 0.01
+    ok.risk.max_position_frac = 0.20    # needs only a 5% stop, which is ordinary
+    ok.risk.max_open_risk = 0.06
+    ok.risk.max_open_positions = 5
+    ok.symbols = ["BTC/USDT"]
+    assert not [a for a in ok.advisories() if "اثری ندارد" in a], ok.advisories()
+    sz2 = RiskManager(ok.risk, None, "paper").size("long", 100.0, 8.0, 1000.0)
+    assert abs(sz2.risk_amount - 10.0) < 1e-6, "here the 1% risk target really is what binds"
