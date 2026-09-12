@@ -89,6 +89,37 @@ def fetch(timeout: float = 12.0, per_feed: int = 30) -> list[dict[str, Any]]:
     return items
 
 
+# Coin names that are also ordinary English words. Capitalisation alone does not settle these,
+# because English capitalises the first word of a sentence whatever it means: "Ripple effects
+# across markets" and "Optimism grows among traders" both survived the case rule. For these -
+# and only these - the text must ALSO carry a word that says it is about crypto.
+SOFT_NAMES = {"ripple", "optimism", "stellar", "avalanche", "render", "the graph", "cosmos",
+              "immutable", "polygon", "bonk", "sui network", "aptos", "sei network", "tron"}
+
+# Deliberately narrow. "traders", "markets" and "price" are not on this list: they appear in
+# every financial headline ever written and would let the whole problem back in.
+CRYPTO_WORDS = ("token", "coin", "crypto", "blockchain", "ledger", "protocol", "defi", "wallet",
+                "staking", "airdrop", "mainnet", "nft", "etf", "onchain", "on chain", "web3",
+                "stablecoin", "validator", "testnet", "layer 2", "l2")
+
+
+def _named(caps: str, low: str, name: str) -> bool:
+    """Is this name written the way English writes a proper noun - and does it mean the coin?
+
+    Two gates, and the second only for the names that are ordinary words. The trade-off is
+    chosen on purpose: requiring crypto context loses some real stories (a genuine Ripple
+    headline with no crypto word in it is missed) and that is the SAFER error. A false negative
+    costs the bot one headline; a false positive attaches a market-wide story to one coin and
+    can push a decision on it. Missing news is not the same kind of wrong as inventing it.
+    """
+    title = " ".join(w[:1].upper() + w[1:] for w in name.split())
+    if not (f" {title} " in caps or f" {name.upper()} " in caps):
+        return False
+    if name.lower() in SOFT_NAMES:
+        return any(w in low for w in CRYPTO_WORDS)
+    return True
+
+
 def coins_in(text: str, tickers: set[str]) -> list[str]:
     """Which of these coins is this headline actually about?
 
@@ -104,10 +135,18 @@ def coins_in(text: str, tickers: set[str]) -> list[str]:
     for tk in tickers:
         base = tk.split("/")[0].upper()
 
-        # A full NAME matches however it is written: "Solana", "solana", "SOLANA" are all the
-        # coin. Names are unambiguous by construction - nobody writes "ethereum" about anything
-        # else - so this is the reliable half.
-        if any(f" {n} " in low for n in NAMES.get(base, [])):
+        # A full NAME must be written AS A NAME - capitalised, the way English writes a proper
+        # noun. "Names are unambiguous by construction" was wrong and the Windows session
+        # caught it: `"OP": ["optimism"]`, `"RNDR": ["render"]`, `"XRP": ["ripple"]`,
+        # `"XLM": ["stellar"]`, `"AVAX": ["avalanche"]`, `"GRT": ["the graph"]` are all
+        # ordinary English words, and matching them case-insensitively let "ripple effects
+        # across markets", "a stellar quarter" and "the graph shows" in through the back door -
+        # past the very guard that two rounds of word-list whack-a-mole had been spent building.
+        #
+        # Same rule as the ticker, for the same reason: a headline that means the project writes
+        # "Optimism", one that means the feeling writes "optimism", and case is the only thing
+        # that separates them because the letters are identical.
+        if any(_named(caps, low, n) for n in NAMES.get(base, [])):
             hit.append(tk)
             continue
 

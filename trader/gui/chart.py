@@ -36,17 +36,29 @@ def _spread(items: list, plot) -> list:
         return items
     fixed = [it for it in items if it[4] == 0]
     anchor_y = fixed[0][0] if fixed else items[0][0]
-    gap = 21.0            # pill height 18 plus a little air
+
+    # The gap is the HEIGHT OF THE TWO PILLS INVOLVED, not a constant. It was 21 - "pill height
+    # 18 plus a little air" - and the live-price pill is 30 tall because it carries the
+    # countdown on a second line, so it needs 15 + 9 + air = 27 from a neighbour. At 21 it
+    # still overlapped by 3px after being spread, which is the same lie this function exists to
+    # stop, just smaller. A number that only holds while every box is the same size is a number
+    # that will be wrong the next time one of them grows.
+    def height(it) -> float:
+        return float(it[5]) if len(it) > 5 else 18.0
+
     out: list = []
     for it in sorted(items, key=lambda i: (i[4], abs(i[0] - anchor_y))):
         py = it[0]
         for _ in range(40):
-            clash = next((o for o in out if abs(o[0] - py) < gap), None)
+            clash = next((o for o in out
+                          if abs(o[0] - py) < (height(o) + height(it)) / 2.0 + 3.0), None)
             if clash is None:
                 break
-            py = clash[0] + gap if py >= anchor_y else clash[0] - gap
-        py = min(max(py, plot.top() + 9), plot.bottom() - 9)
-        out.append((py, it[1], it[2], it[3], it[4]))
+            need = (height(clash) + height(it)) / 2.0 + 3.0
+            py = clash[0] + need if py >= anchor_y else clash[0] - need
+        half = height(it) / 2.0
+        py = min(max(py, plot.top() + half), plot.bottom() - half)
+        out.append((py, it[1], it[2], it[3], it[4]) + tuple(it[5:]))
     return out
 
 
@@ -79,6 +91,7 @@ class CandleChart(QWidget):
         self.setFocusPolicy(Qt.ClickFocus)
         self.setMinimumHeight(320)
         self._font = QFont("Segoe UI", 8)
+        self._drawn_pills: list = []     # (top, bottom, text) of every right-axis pill painted
 
     # ------------------------------------------------------------ data
     def set_live_price(self, price: float) -> None:
@@ -209,6 +222,7 @@ class CandleChart(QWidget):
     def paintEvent(self, ev):
         p = QPainter(self); p.setRenderHint(QPainter.Antialiasing); p.setFont(self._font)
         p.fillRect(self.rect(), BG)
+        self._drawn_pills: list = []
         if self.df is None or len(self.df) < 2:
             p.setPen(TEXT); p.drawText(self.rect(), Qt.AlignCenter, "در حال دریافت داده…")
             return
@@ -313,7 +327,16 @@ class CandleChart(QWidget):
                 p.setPen(QPen(col, 1.4)); p.drawPath(path)
 
         # right-axis price pill (TradingView style)
-        def pill(price_y: float, color: QColor, text: str, sub: str = ""):
+        # COLLECTED FIRST, then spread, then drawn. `_spread` has existed since the day the
+        # live-price pill was found covering half the stop - and nothing ever called it. The
+        # test called it directly and checked its arithmetic, so the maths was green while the
+        # picture was wrong: on a real trade `75,073.62` sat half-under the green pill, and half
+        # a price still LOOKS like a whole one. Exactly the shape of the toggle_run bug - a
+        # correct function nobody reaches - and found the same way, by building the app and
+        # looking at it.
+        pills: list = []
+
+        def pill(price_y: float, color: QColor, text: str, sub: str = "", rank: int = 1):
             """The box is sized to the PRICE, never the price to the box.
 
             It was a fixed 74px with the text drawn into 66 of it, so a long price - a
@@ -324,6 +347,12 @@ class CandleChart(QWidget):
             characters - a rounded price is a normal thing to show, a truncated one is a lie.
             """
             h = 30 if sub else 18
+            pills.append((price_y, color, text, sub, rank, h))
+
+        def draw_pill(price_y: float, color: QColor, text: str, sub: str, h: float):
+            # Recorded AS DRAWN, not recomputed. Whether two pills overlap is a fact about the
+            # painting, and a test that recomputes the geometry can be green while nothing calls
+            # the spreader - which is exactly what happened for the life of `_spread`.
             f = QFont(self._font); f.setBold(True)
             fm_big, fm_small = QFontMetricsF(f), QFontMetricsF(self._font)
             gutter = max(40.0, self.width() - plot.right() - 6)
@@ -334,6 +363,7 @@ class CandleChart(QWidget):
             need = max(fm_big.horizontalAdvance(shown), fm_small.horizontalAdvance(sub) if sub else 0)
             w = min(gutter, max(74.0, need + 11))
             box = QRectF(plot.right() + 2, price_y - h / 2, w, h)
+            self._drawn_pills.append((box.top(), box.bottom(), shown))
             path = QPainterPath(); path.addRoundedRect(box, 4, 4)
             p.fillPath(path, color)
             p.setPen(QColor("#ffffff")); p.setFont(f)
@@ -421,8 +451,15 @@ class CandleChart(QWidget):
                    f"حدود {proj['bars']} کندل تا هدف اگر با سرعت این روزها برود")
             p.setFont(QFont("Segoe UI", 8))
             fm = p.fontMetrics()
+            # Shorten, never clip. At 718 logical pixels the caption was wider than the plot and
+            # `min(...)` alone pushed its LEFT edge off the chart, so "این روزها برود" was cut
+            # against the card behind it. A cut sentence is the same lie as a cut price: it
+            # still looks like a whole one. If the full text will not fit, a shorter true
+            # sentence is printed instead.
+            if fm.horizontalAdvance(cap) > plot.width() - 12:
+                cap = f"هدف {move:+.1f}٪ · حد ضرر {risk:+.1f}٪"
             tw = fm.horizontalAdvance(cap)
-            tx = min(x1, plot.right() - tw - 6)
+            tx = max(plot.left() + 6, min(x1, plot.right() - tw - 6))
             # BELOW the cone, not above it: above put it straight through the EMA legend along
             # the top of the plot, which the rendered picture showed and no measurement would.
             ty = min(plot.bottom() - 4, max(yt, ys) + fm.height() + 6)
@@ -438,7 +475,12 @@ class CandleChart(QWidget):
                 pill(y(float(self.position["take_profit"])), UP, self._fmt(float(self.position["take_profit"])))
             if self.position.get("stop_price"):
                 pill(y(float(self.position["stop_price"])), DOWN, self._fmt(float(self.position["stop_price"])))
-        pill(y(last), live_col, self._fmt(last), self._countdown())
+        pill(y(last), live_col, self._fmt(last), self._countdown(), rank=0)
+
+        # Now spread them and draw. Rank 0 last, so if anything still touches, the live price is
+        # the one on top - it is the only pill that must line up with its own line.
+        for py, col, txt, sub, rank, h in sorted(_spread(pills, plot), key=lambda i: -i[4]):
+            draw_pill(py, col, txt, sub, h)
 
         # closed-trade markers
         if self.trades and n:

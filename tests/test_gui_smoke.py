@@ -2079,3 +2079,63 @@ def test_open_positions_are_shown_best_first_and_the_row_still_opens_the_right_t
             f"the rows will shuffle under the cursor every price tick")
         assert src.index("_by_profit(opens") < src.index("self._pos_data"), \
             f"{fn.__name__} sorts after taking _pos_data - clicking a row opens the wrong trade"
+
+
+def test_the_price_pills_do_not_sit_on_top_of_each_other():
+    """The stop price is the most important number on the chart and it was half-hidden.
+
+    `_spread()` was written for exactly this, on the day the live-price pill was found covering
+    half of the stop - and NOTHING EVER CALLED IT. The test called it directly and checked its
+    arithmetic, so the maths stayed green while the picture was wrong: on a real trade
+    `75,073.62` sat half under the green pill, and half a price still looks like a whole one.
+    That is the toggle_run gap again - a correct function nobody reaches - and it was found the
+    same way, by building the app and looking at it.
+
+    So this test does not call `_spread`. It renders a trade with a tight stop and reads the
+    pixels back.
+    """
+    import numpy as np, pandas as pd
+    from PySide6.QtGui import QImage
+    from trader.gui.chart import CandleChart
+    from trader.market.indicators import enrich
+    app = QApplication.instance() or QApplication([])
+
+    n = 200
+    rng = np.random.default_rng(5)
+    close = 75000 * np.exp(np.cumsum(rng.normal(0.0005, 0.012, n)))
+    df = pd.DataFrame({"open": np.roll(close, 1), "high": close * 1.006, "low": close * 0.994,
+                       "close": close, "volume": rng.uniform(100, 900, n)},
+                      index=pd.date_range("2025-01-01", periods=n, freq="D", tz="UTC"))
+    df.iloc[0, 0] = close[0]
+    df = enrich(df)
+    last = float(df["close"].iloc[-1])
+
+    ch = CandleChart(); ch.resize(900, 460)
+    # a 0.7% stop - the shape every tight trade has, and the one that collided
+    ch.set_data(df, "BTC/USDT", "1d",
+                position={"entry_price": last, "stop_price": last * 0.993,
+                          "take_profit": last * 1.02, "side": "long"})
+    try:
+        img = QImage(900, 460, QImage.Format_ARGB32)
+        ch.render(img)
+
+        # THE BOXES THAT WERE ACTUALLY PAINTED, recorded by the painter itself. Two earlier
+        # versions of this check read a column of pixels in the gutter and both passed with the
+        # bug fully reinstated: the first filtered short runs as noise and so discarded the 4px
+        # sliver of stop that was the entire symptom, and the second was fooled because the live
+        # pill's own dark text splits it into two runs. Reading the painted geometry is not the
+        # same as recomputing it - if nothing calls the spreader, these boxes overlap.
+        pills = list(ch._drawn_pills)
+        assert len(pills) == 3, f"expected target, live price and stop, got {pills}"
+        pills.sort()
+        for (t1, b1, x1), (t2, b2, x2) in zip(pills, pills[1:]):
+            assert t2 >= b1, (
+                f"'{x1}' and '{x2}' overlap by {b1 - t2:.0f}px - the stop is under the live "
+                f"price again, and a price with its digits half covered still reads as a whole "
+                f"one. That is the same lie as a truncated price, by hiding instead of cutting.")
+
+        # and the three prices really are the ones this trade is about
+        shown = {x for _, _, x in ch._drawn_pills}
+        assert len(shown) == 3, f"two pills are showing the same number: {shown}"
+    finally:
+        ch.deleteLater()

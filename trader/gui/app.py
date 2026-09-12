@@ -269,10 +269,6 @@ class PriceFeed(_Tracked):
         backoff = 0.0
         while not self._stop.is_set():
             focus, rest = self._split_fn()
-            # The chart the user is actually looking at stays live every cycle; the rest take
-            # turns, one per cycle. Asking for all eight symbols every second was eight requests
-            # a second at one exchange, which is what produced "Too Many Requests" and left the
-            # bot with no market data at all for the symbols it holds.
             # EVERY symbol, every cycle. The rotation existed because this asked one request
             # per symbol, so eight coins was eight requests a second and the exchange said Too
             # Many Requests. Measured on bybit, `fetch_tickers` returns all 538 spot symbols in
