@@ -1069,7 +1069,7 @@ def test_the_engine_says_it_is_alive_even_when_nothing_happens():
     assert len(beats()) == 2
 
     msg = beats()[0]["message"]
-    assert "پوزیشن باز" in msg and "نماد قیمت دارند" in msg, msg
+    assert "پوزیشن باز" in msg and "نماد قیمت تازه دارند" in msg, msg
 
 
 def test_the_heartbeat_names_the_symbols_that_have_no_price():
@@ -1086,7 +1086,7 @@ def test_the_heartbeat_names_the_symbols_that_have_no_price():
     eng.loop_once()
     beat = [j for j in db.recent_journal(200) if "زنده‌ام" in (j["message"] or "")]
     assert beat, "a total data outage is exactly when it must still report in"
-    assert "بدون قیمت" in beat[0]["message"], beat[0]["message"]
+    assert "بدون قیمت تازه" in beat[0]["message"], beat[0]["message"]
     assert "0 از 2" in beat[0]["message"] or "۰ از ۲" in beat[0]["message"], beat[0]["message"]
 
 
@@ -1860,5 +1860,100 @@ def test_a_trade_side_the_close_path_cannot_read_is_refused_where_it_is_written(
         for bad in ("buy", "sell", "LONG", "", "l"):
             with pytest.raises(ValueError):
                 db.open_trade("paper", "X/Y", bad, 1.0, 100.0, 90.0, 120.0, "t", "r")
+    finally:
+        db.close()
+
+
+def test_a_price_from_before_the_outage_is_never_booked_as_a_fill():
+    """Close-everything used the cache FIRST and the exchange second.
+
+    `last_prices.get(sym) or market.price(sym)` - so once the network had gone away, pressing
+    "close everything" booked every position at whatever price was last seen before it went,
+    and wrote that into the journal as what happened. On paper that corrupts the record; live,
+    the exchange fills at the real price and the journal disagrees with the account. The cache
+    had no timestamp at all, so nothing could tell a quote from an hour-old memory.
+    """
+    s = Settings(); s.mode = "paper"; s.symbols = ["X/Y"]; s.use_llm_for_decisions = False
+    s.paper_start_balance = 10000; s.risk.capital_limit = 10000
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_stale.db")
+    try:
+        pb = PaperBroker(10000); pb.reset(10000)
+        eng = Engine(s, db, broker=pb)
+        eng.log = lambda m, lvl="info": None
+        t0 = 1_700_000_000.0
+        clock = {"t": t0}
+        db.clock = lambda: clock["t"]
+
+        live = {"p": 100.0, "up": True}
+
+        class Market:
+            is_kcex = False
+            def price(self, sym):
+                if not live["up"]:
+                    raise RuntimeError("network down")
+                return live["p"]
+        eng.market = Market()
+
+        # a price read now is the one used now
+        assert eng.fresh_price("X/Y") == 100.0
+        assert eng.price_age("X/Y") == 0.0
+
+        # thirty seconds later the network is gone: a recent cache is still fair to act on
+        clock["t"] = t0 + 30
+        live["up"] = False
+        assert eng.fresh_price("X/Y") == 100.0, "a 30-second-old price is usable"
+
+        # two hours later it is not, and it must REFUSE rather than quietly use it
+        clock["t"] = t0 + 7200
+        with pytest.raises(Exception):
+            eng.fresh_price("X/Y")
+        assert eng.price_age("X/Y") == 7200.0
+
+        # and when the network comes back the live price wins over the cache, both ways
+        live["up"] = True; live["p"] = 250.0
+        assert eng.fresh_price("X/Y") == 250.0
+        assert eng.price_age("X/Y") == 0.0
+
+        # the whole point: close_all books the LIVE price, not the remembered one
+        pb.market_order("X/Y", "buy", 1.0, 100.0)
+        tid = db.open_trade("paper", "X/Y", "long", 1.0, 100.0, 90.0, 120.0, "t", "r")
+        eng.last_prices["X/Y"] = 100.0          # a memory from before
+        eng._price_at["X/Y"] = t0               # two hours stale
+        clock["t"] = t0 + 7200
+        live["p"] = 250.0
+        eng.close_all("test")
+        row = dict(db.one("SELECT * FROM trades WHERE id=?", (tid,)))
+        assert row["status"] == "closed"
+        # not exactly 250: the paper broker applies slippage, which is the point of using it
+        assert float(row["exit_price"]) == pytest.approx(250.0, rel=0.01), (
+            f"booked at {row['exit_price']} - that is the price from before the outage")
+    finally:
+        db.close()
+
+
+def test_the_heartbeat_does_not_call_an_hours_old_price_a_price():
+    """Through an outage this line said "10 of 10 symbols have prices" while none had been read
+    for hours. The one line whose whole job is to report whether the bot can still see the
+    market was the line hiding that it could not."""
+    s, db, pb, eng = _engine("t_beat_stale.db", symbols=("A/B", "C/D"))
+    try:
+        t0 = 1_700_000_000.0
+        clock = {"t": t0}
+        db.clock = lambda: clock["t"]
+        eng.last_prices = {"A/B": 1.0, "C/D": 2.0}
+        eng._price_at = {"A/B": t0, "C/D": t0}
+
+        eng._last_beat = 0.0
+        eng._heartbeat([], ["A/B", "C/D"])
+        msg = [j["message"] for j in db.recent_journal(50) if "زنده‌ام" in (j["message"] or "")][0]
+        assert "2 از 2" in msg, msg
+
+        # three hours pass with nothing read
+        clock["t"] = t0 + 3 * 3600
+        eng._last_beat = 0.0
+        eng._heartbeat([], ["A/B", "C/D"])
+        msg = [j["message"] for j in db.recent_journal(50) if "زنده‌ام" in (j["message"] or "")][0]
+        assert "0 از 2" in msg, f"an hours-old price is still being counted as a price: {msg}"
+        assert "بدون قیمت تازه" in msg and "180د" in msg, f"it does not say how old: {msg}"
     finally:
         db.close()

@@ -70,6 +70,11 @@ class Engine:
         # loop closes them on its own; without it both can pass the "still open" check.
         self._trade_lock = threading.RLock()
         self.last_prices: dict[str, float] = {}
+        # WHEN each of those was read. Without it a price has no age, and a cache with no age is
+        # indistinguishable from a live quote - which is how a network outage stopped looking
+        # like one: `last_prices` kept yesterday's numbers, the heartbeat went on reporting
+        # every symbol as "priced", and `close_all` booked positions at prices from hours ago.
+        self._price_at: dict[str, float] = {}
         self._last_bar: dict[str, float] = {}      # last candle a symbol was evaluated on
         self._entered_bar: dict[str, float] = {}   # last candle a symbol was entered on
         self._llm_bar: dict[str, float] = {}       # last candle the model was asked about
@@ -288,6 +293,7 @@ class Engine:
                 df = enrich(self.market.candles(symbol, limit=400))
                 price = float(df["close"].iloc[-1])
                 self.last_prices[symbol] = price
+                self._price_at[symbol] = self.db.clock()
                 pos = next((p for p in open_positions if p["symbol"] == symbol), None)
                 if pos:
                     if self._manage(pos, df, price):
@@ -330,6 +336,32 @@ class Engine:
                 self.log(f"equity read failed: {exc}", "warn")
         self._heartbeat(open_positions, symbols)
 
+    def price_age(self, symbol: str) -> float | None:
+        """Seconds since this symbol's cached price was read, or None if there is none."""
+        at = self._price_at.get(symbol)
+        return None if at is None else max(0.0, self.db.clock() - at)
+
+    def fresh_price(self, symbol: str, max_age: float = 120.0) -> float:
+        """A price we are willing to act on: live if we can get one, cached only if it is young.
+
+        The cached value is the FALLBACK, not the first choice. `close_all` had it the other way
+        round - `last_prices.get(sym) or market.price(sym)` - so after an outage it closed every
+        position at whatever price was last seen before the network went away, and wrote that
+        into the journal as what happened. On paper that corrupts the record; live, the exchange
+        fills at the real price and the journal disagrees with the account.
+        """
+        try:
+            price = float(self.market.price(symbol))
+            self.last_prices[symbol] = price
+            self._price_at[symbol] = self.db.clock()
+            return price
+        except Exception:
+            age = self.price_age(symbol)
+            cached = self.last_prices.get(symbol)
+            if cached is not None and age is not None and age <= max_age:
+                return float(cached)
+            raise
+
     def _heartbeat(self, open_positions: list[dict], symbols: list[str]) -> None:
         """Say we are alive, even when nothing happened.
 
@@ -344,15 +376,26 @@ class Engine:
             return
         self._last_beat = now
         held = len(open_positions)
-        priced = sum(1 for s in symbols if s in self.last_prices)
+        # FRESH, not "we have a number for it". A cached price never expired, so through a
+        # network outage this line went on saying "10 of 10 symbols have prices" while none of
+        # them had been read for hours - the one line whose whole job is to say whether the bot
+        # can still see the market was the line hiding that it could not.
+        fresh_for = max(300.0, 5.0 * float(self.settings.loop_seconds))
+        ages = {s: self.price_age(s) for s in symbols}
+        priced = sum(1 for a in ages.values() if a is not None and a <= fresh_for)
         try:
             eq = self.broker.equity(self.last_prices)
             money = f"، سرمایه {eq:,.2f}"
         except Exception:
             money = ""
-        stale = [s for s in symbols if s not in self.last_prices]
-        tail = f"، بدون قیمت: {', '.join(stale[:4])}" if stale else ""
-        self.log(f"زنده‌ام · {held} پوزیشن باز، {priced} از {len(symbols)} نماد قیمت دارند{money}{tail}")
+        old_ones = sorted(((a, s) for s, a in ages.items() if a is None or a > fresh_for),
+                          key=lambda pair: -(pair[0] or 10 ** 9))
+        tail = ""
+        if old_ones:
+            names = "، ".join(f"{sym} ({int(a / 60)}د)" if a else f"{sym} (هیچ‌وقت)"
+                              for a, sym in old_ones[:4])
+            tail = f"، بدون قیمت تازه: {names}"
+        self.log(f"زنده‌ام · {held} پوزیشن باز، {priced} از {len(symbols)} نماد قیمت تازه دارند{money}{tail}")
 
     def _leader(self, symbols: list[str]) -> str | None:
         if self.settings.market != "crypto" or not self.settings.align_with_leader:
@@ -754,6 +797,7 @@ class Engine:
         self._unmanaged.pop(sym, None)
         self._order_err.pop(f"unmanaged:{sym}", None)
         self.last_prices[sym] = price
+        self._price_at[sym] = self.db.clock()
         side, stop = pos["side"], float(pos["stop_price"])
         tp = float(pos["take_profit"] or 0)
         why = None
@@ -849,7 +893,7 @@ class Engine:
     def close_all(self, why: str = "manual") -> None:
         for pos in [dict(r) for r in self.db.open_trades(self.mode)]:
             try:
-                price = self.last_prices.get(pos["symbol"]) or self.market.price(pos["symbol"])
+                price = self.fresh_price(pos["symbol"])
                 self.close_position(pos, price, why)
             except Exception as exc:
                 self.log(f"close_all failed on {pos['symbol']}: {exc}", "error")
