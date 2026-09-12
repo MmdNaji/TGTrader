@@ -1957,3 +1957,59 @@ def test_the_heartbeat_does_not_call_an_hours_old_price_a_price():
         assert "بدون قیمت تازه" in msg and "180د" in msg, f"it does not say how old: {msg}"
     finally:
         db.close()
+
+
+def test_the_liquidity_floor_comes_from_the_account_not_from_a_constant():
+    """"You only added the famous coins" - and the measurement says exactly that.
+
+    On the live bybit spot market (2026-09-12) 390 USDT pairs are active and exactly 39 clear
+    the old flat $3,000,000 floor. So "watch the whole market" watched ten percent of it, and
+    the ninety percent it skipped is the part nobody has already bid up.
+
+    What makes a coin untradeable is not its volume, it is OUR POSITION against its volume - so
+    the floor is arithmetic on the account: a position may be at most 0.2% of a day's turnover.
+    A $250 position needs $125,000 a day (260 of the 390 pairs); a $2,500 position needs
+    $1.25M (82 of them). The rule pushes a big account back towards liquid names on its own and
+    lets a small one into coins a big account has no business in.
+    """
+    from trader.market.scanner import volume_floor, MIN_QUOTE_VOLUME, MAX_SHARE_OF_DAY
+
+    assert volume_floor(250) == 125_000, "a $250 position should need $125k a day"
+    assert volume_floor(2_500) == 1_250_000
+    # a position is never allowed to be a big share of the day, whatever the account
+    for cap in (10, 250, 2_500, 25_000, 250_000):
+        assert cap / volume_floor(cap) <= MAX_SHARE_OF_DAY + 1e-12
+
+    # a hard bottom whatever the arithmetic says: below ~$50k a day there is no book to speak of
+    assert volume_floor(1) == 50_000
+    assert volume_floor(0) == MIN_QUOTE_VOLUME      # caller said nothing about its size
+
+    # and it must actually be reaching the scanner
+    import inspect
+    from trader.market import watchlist
+    assert "min_volume" in inspect.signature(watchlist.choose).parameters
+    src = inspect.getsource(__import__("trader.engine", fromlist=["x"]).Engine._maybe_sweep)
+    assert "volume_floor" in src, \
+        "the engine still sweeps on the flat constant - the floor change reaches nothing"
+
+
+def test_the_pool_cap_cannot_quietly_undo_the_floor():
+    """Two cages, and raising one alone changes nothing.
+
+    The floor decides which coins are tradeable; the pool then took only the most liquid N of
+    them. At 40 that was the top sixth of what a $1,000 account can reach, so the sweep went on
+    seeing the same famous names however low the floor went.
+    """
+    s = Settings()
+    s.risk.capital_limit = 1000
+    s.auto_symbols = True
+    s.autopilot = True
+    e = s.effective()
+    assert e.auto_symbols_pool >= 120, (
+        f"autopilot sweeps only {e.auto_symbols_pool} symbols - the mode that was asked to "
+        f"search the whole market is still looking at the top of the volume list")
+    # and the setting must be allowed to go further than it used to
+    s2 = Settings(); s2.auto_symbols = True; s2.auto_symbols_pool = 300
+    s2.risk.capital_limit = 1000; s2.symbols = ["BTC/USDT"]
+    assert not [p for p in s2.validate() if "auto_symbols_pool" in p], \
+        "300 is refused - the ceiling is still the old one"

@@ -227,7 +227,17 @@ class Settings:
     # and there is no way to know in advance which one you picked. See market/watchlist.py.
     auto_symbols: bool = False
     auto_symbols_count: int = 4        # how many to hand the engine at a time
-    auto_symbols_pool: int = 40        # how many of the most liquid pairs to look at each sweep
+    # How many of the pairs that clear the liquidity floor get their charts read each sweep.
+    # This is the SECOND cage and it used to undo the first: the floor decides which coins are
+    # tradeable at all, and then this took only the most liquid 40 of them - so raising the
+    # floor alone changed nothing and the sweep still saw the same famous names. Measured on the
+    # live bybit spot market: 390 active USDT pairs, 260 clear the floor a $1,000 account gets,
+    # and 40 was looking at the top sixth of those.
+    #
+    # The cost is one candle request per symbol, so this is a real trade-off on a home
+    # connection - about a third of a second each, ~40s at 120. The server-side sweep is what
+    # removes the trade-off rather than splitting the difference.
+    auto_symbols_pool: int = 40
     auto_symbols_every_min: int = 60   # a sweep costs ~13s of requests; hourly on a daily chart
                                        # is already far more often than a daily bar changes
 
@@ -269,7 +279,11 @@ class Settings:
         "align_with_leader": False,      # measured: costs return AND drawdown, earns neither
         "auto_symbols": True,            # watch everything rather than a list someone typed
         "auto_symbols_count": 4,
-        "auto_symbols_pool": 40,
+        # Three times what the manual default is. Autopilot is the mode that was asked to
+        # "search the whole market", and the whole market is 390 pairs of which ~260 are
+        # reachable for a small account - 120 is as far as a home connection goes in a sweep
+        # without the requests becoming the thing that breaks.
+        "auto_symbols_pool": 120,
         "auto_symbols_every_min": 60,
     }
     AUTO_RISK = {
@@ -483,8 +497,8 @@ class Settings:
         if self.auto_symbols:
             if not (1 <= self.auto_symbols_count <= 12):
                 problems.append("auto_symbols_count must be between 1 and 12")
-            if not (5 <= self.auto_symbols_pool <= 120):
-                problems.append("auto_symbols_pool must be between 5 and 120")
+            if not (5 <= self.auto_symbols_pool <= 400):
+                problems.append("auto_symbols_pool must be between 5 and 400")
             if self.auto_symbols_every_min < 5:
                 problems.append("auto_symbols_every_min must be at least 5")
         if self.mode == "live" and self.market == "crypto" and not self.computer.enabled:

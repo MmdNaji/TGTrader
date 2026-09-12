@@ -20,7 +20,43 @@ from ..config import Settings
 
 # Coins below this in 24h quote volume are skipped: a position that is a meaningful share of
 # the day's turnover cannot be entered or left at the price on the screen.
+#
+# THIS IS A FALLBACK, NOT THE RULE. A flat $3M floor was doing something nobody chose: measured
+# against the live bybit spot market on 2026-09-12, 390 USDT pairs are active and exactly 39 of
+# them clear $3M - so "watch the whole market" was watching TEN PERCENT of it, and the ninety
+# percent it skipped is the part nobody has already bid up. The owner noticed from the outside:
+# "you only added the famous coins."
+#
+# What actually makes a coin untradeable is not its volume, it is OUR POSITION against its
+# volume - so the floor is computed from the account (see `volume_floor`) and this constant is
+# only what a caller gets when it does not say how much money it has.
 MIN_QUOTE_VOLUME = 3_000_000.0
+
+# The largest share of a day's turnover one position may be. At 0.2% a $250 position needs a
+# coin doing $125,000 a day, which is a real market with real spreads - and it is a number that
+# scales itself: a bigger account is automatically pushed back towards the liquid end, and a
+# small one is allowed into coins a big one has no business in.
+MAX_SHARE_OF_DAY = 0.002
+
+
+def volume_floor(position_cap: float, share: float = MAX_SHARE_OF_DAY,
+                 floor: float = 50_000.0) -> float:
+    """The least daily turnover a coin needs before this account may take a position in it.
+
+    Measured against the live market, this is the difference between watching 39 coins and
+    watching 260:
+
+        capital   position cap   floor       coins that clear it (bybit spot, 390 active)
+          $1,000        $250     $125,000        260
+         $10,000      $2,500     $1,250,000       82
+        the old flat constant    $3,000,000        39
+
+    `floor` is the hard bottom whatever the arithmetic says: below about $50k a day there is
+    usually no book to speak of, and a stop that cannot be filled is not a stop.
+    """
+    if position_cap <= 0:
+        return MIN_QUOTE_VOLUME
+    return max(floor, position_cap / max(share, 1e-9))
 
 # A pair that barely moves cannot pay for the round trip it takes to trade it. The first live
 # run of this scanner put USDC/USDT near the top on volume alone - a stablecoin pair with a

@@ -50,6 +50,7 @@ class Watch:
 def choose(settings: Settings, market_data, want: int = 4, pool: int = 40,
            timeframe: str | None = None, keep: list[str] | tuple[str, ...] = (),
            min_strength: float = 0.0, allow_short: bool = True,
+           min_volume: float | None = None,
            on_progress: Callable[[str], None] | None = None,
            abort: Callable[[], bool] | None = None) -> Watch:
     """One sweep of the market: rank by liquidity, look at the charts, pick where a setup is.
@@ -67,7 +68,13 @@ def choose(settings: Settings, market_data, want: int = 4, pool: int = 40,
     stop = abort or (lambda: False)
     tf = timeframe or settings.timeframe
 
-    rows = scanner.scan(settings, market_data, limit=pool, on_progress=say, abort=stop)
+    # `min_volume` comes from the ACCOUNT, not from a constant - see scanner.volume_floor. The
+    # flat $3M floor meant 39 of the 390 active pairs were ever looked at, which is why the
+    # owner's reading of it was "you only added the famous coins". It was right.
+    rows = scanner.scan(settings, market_data, limit=pool,
+                        min_volume=(scanner.MIN_QUOTE_VOLUME if min_volume is None
+                                    else float(min_volume)),
+                        on_progress=say, abort=stop)
     if stop():
         return Watch(symbols=list(keep), at=time.time(), note="متوقف شد")
     deep = scanner.deepen(settings, market_data, rows, timeframe=tf, on_progress=say, abort=stop)

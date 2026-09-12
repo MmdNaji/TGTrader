@@ -225,12 +225,18 @@ class Engine:
         def run() -> None:
             from .market import watchlist
             try:
+                from .market import scanner as _scanner
+                r = self.settings.risk
+                cap = float(r.capital_limit) * float(r.max_position_frac or 1.0)
                 w = watchlist.choose(
                     self.settings, self.market,
                     want=int(self.settings.auto_symbols_count),
                     pool=int(self.settings.auto_symbols_pool),
                     timeframe=self.settings.timeframe, keep=held,
                     allow_short=self.broker.supports_short(),
+                    # what THIS account can get in and out of, rather than a fixed $3M that
+                    # happened to leave 39 of 390 pairs
+                    min_volume=_scanner.volume_floor(cap),
                     abort=self._stop.is_set)
                 if self._stop.is_set():
                     return
