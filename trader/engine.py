@@ -465,6 +465,21 @@ class Engine:
                 "regime": regime, "signals": signals, "snap": snap, "bar_ts": bar_ts,
                 "strength": max((s.strength for s in signals), default=0.0)}
 
+    def _headlines(self, symbol: str) -> list[dict[str, Any]]:
+        """What was published about this coin, from the server sweep. Never fatal, never slow.
+
+        Read out of the watch the sweep already fetched rather than asking the network here: a
+        decision that waits on an HTTP request is a decision taken at a price that has moved on.
+        """
+        try:
+            data = getattr(self._watch, "feed", None)
+            if not data:
+                return []
+            from .market import feed as _feed
+            return _feed.headlines_for(data, symbol)
+        except Exception:
+            return []
+
     def _rank_candidates(self, candidates: list[dict]) -> list[dict]:
         """Decide which setup gets the money when more want a slot than there are slots.
 
@@ -519,6 +534,7 @@ class Engine:
                     symbol, snap, regime,
                     [{"strategy": s.strategy, "side": s.side, "strength": s.strength, "reason": s.reason} for s in signals],
                     None, skills_prompt_block(self.db), knowledge,
+                    headlines=self._headlines(symbol),
                 )
                 source = "llm"
             except Exception as exc:

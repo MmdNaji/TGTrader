@@ -247,6 +247,63 @@ class MarketData:
             return float(t["last"] or t["close"])
         return self._try_sources(symbol, fetch)
 
+    def prices(self, symbols: list[str]) -> dict[str, float]:
+        """Every one of these in ONE request, where the exchange can do that.
+
+        MEASURED on bybit: `fetch_tickers()` returns all 538 spot symbols in 0.20s, while four
+        individual `fetch_ticker` calls take 1.00s. So the old price loop - one request per
+        symbol, per cycle - was both slower AND the reason it had to rotate: asking for eight
+        symbols every second was eight requests a second, which is what produced "Too Many
+        Requests" and left the bot with no prices at all for the coins it was holding.
+
+        One request means every watched symbol can update every cycle instead of taking turns,
+        which is what the owner asked for: "make the price changes as instant as possible, in
+        everything".
+
+        Falls back to per-symbol on anything that cannot do it, so a source without a bulk
+        endpoint still works exactly as before.
+        """
+        if not symbols:
+            return {}
+        if self.settings.market == "forex":
+            out = {}
+            for sym in symbols:
+                try:
+                    out[sym] = self.price(sym)
+                except Exception:
+                    pass
+            return out
+
+        def fetch(_sym: str) -> dict[str, float]:
+            src = self.active_source or self.settings.exchange.exchange_id
+            if src == "kcex":
+                raise RuntimeError("kcex has no bulk ticker endpoint")
+            ex = self._ex(src)
+            if not getattr(ex, "has", {}).get("fetchTickers"):
+                raise RuntimeError(f"{src} has no fetchTickers")
+            tk = ex.fetch_tickers(list(symbols))
+            out: dict[str, float] = {}
+            for sym in symbols:
+                t = tk.get(sym) or {}
+                px = t.get("last") or t.get("close")
+                if px:
+                    out[sym] = float(px)
+            if not out:
+                raise RuntimeError("the bulk ticker call returned nothing usable")
+            return out
+
+        try:
+            # _try_sources wants a symbol for its messages; the work is over the whole list.
+            return self._try_sources(symbols[0], fetch)
+        except Exception:
+            out = {}
+            for sym in symbols:
+                try:
+                    out[sym] = self.price(sym)
+                except Exception:
+                    pass
+            return out
+
     # ------------------------------------------------------------ forex
     def _mt5_candles(self, symbol: str, tf: str, limit: int) -> pd.DataFrame:
         import MetaTrader5 as mt5  # type: ignore

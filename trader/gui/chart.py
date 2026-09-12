@@ -60,6 +60,15 @@ class CandleChart(QWidget):
         self.timeframe = ""
         self.position: dict[str, Any] | None = None
         self.trades: list[dict[str, Any]] = []
+        # WHERE THE TRADE IS AIMED, drawn past the last candle. The owner asked for this in as
+        # many words: "I clicked the coin with the open trade - you know how they draw a line
+        # continuing the chart, meaning it's going to go like this - show me that."
+        #
+        # It is drawn as a CONE, not a line, and that is the honest shape: the two edges are the
+        # target and the stop, which is the whole of what the bot actually decided. A single
+        # line towards the target would be a forecast this program does not have and cannot
+        # make. The width of the cone IS the risk.
+        self.projection: dict[str, Any] | None = None
         self.visible = 120
         self.offset = 0          # bars hidden on the right (0 = latest bar visible)
         self.live_price: float | None = None   # last streamed price, overrides the closing tick
@@ -75,6 +84,52 @@ class CandleChart(QWidget):
     def set_live_price(self, price: float) -> None:
         """A freshly streamed price; only shown when the newest bar is in view."""
         self.live_price = float(price)
+        self.update()
+
+    def _projection_plan(self, win) -> dict[str, Any] | None:
+        """How far past the last candle to draw, and to what levels.
+
+        The horizon is ARITHMETIC, not a guess: a target that is three ATRs away needs at least
+        three average days to be reached, so the cone is that long. It is labelled as the
+        distance it is, and nothing here claims the price will arrive - only that this is what
+        the trade is aimed at and what it is risking.
+        """
+        pr = self.projection
+        if not pr or self.offset != 0:
+            return None            # only when the newest bar is on screen; it is about the future
+        try:
+            entry = float(pr.get("entry") or 0.0)
+            stop = float(pr.get("stop") or 0.0)
+            target = float(pr.get("target") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if not (entry and stop and target):
+            return None
+        atr = 0.0
+        try:
+            atr = float(pr.get("atr") or 0.0)
+        except (TypeError, ValueError):
+            atr = 0.0
+        if atr <= 0 and "atr14" in win:
+            series = win["atr14"].dropna()
+            atr = float(series.iloc[-1]) if len(series) else 0.0
+        reach = abs(target - entry)
+        bars = int(round(reach / atr)) if atr > 0 else 8
+        bars = max(4, min(28, bars))
+        # HOW FAR IT IS DRAWN is not the same number as how far it is ESTIMATED. At 120 visible
+        # candles a six-bar cone is five percent of the width - technically correct and, on the
+        # rendered picture, a smudge in the corner. The owner asked to SEE where the trade is
+        # aimed. So it is drawn across about a seventh of the view and the ATR estimate is
+        # marked ON it with a tick, rather than the estimate being shrunk to invisibility or
+        # the drawing quietly overstating the horizon.
+        drawn = max(bars, max(8, int(self.visible / 7)))
+        drawn = min(drawn, 40)
+        return {"entry": entry, "stop": stop, "target": target, "bars": bars, "drawn": drawn,
+                "side": str(pr.get("side") or "long"), "atr": atr}
+
+    def set_projection(self, projection: dict[str, Any] | None) -> None:
+        """Entry, stop, target and ATR for the trade being shown - or None to clear it."""
+        self.projection = projection or None
         self.update()
 
     def set_data(self, df: pd.DataFrame, symbol: str, timeframe: str,
@@ -170,9 +225,17 @@ class CandleChart(QWidget):
                 v = self.position.get(k)
                 if v:
                     lo, hi = min(lo, float(v)), max(hi, float(v))
+        # Room on the right for the cone, and the levels it reaches have to be in view or the
+        # chart rescales the moment it is drawn and the candles shrink for no visible reason.
+        proj = self._projection_plan(win)
+        if proj:
+            for v in (proj["target"], proj["stop"]):
+                lo, hi = min(lo, v), max(hi, v)
         pad = (hi - lo) * 0.06 or 1.0
         lo, hi = lo - pad, hi + pad
-        n = len(win); bw = plot.width() / n
+        n = len(win)
+        future = proj["drawn"] if proj else 0
+        bw = plot.width() / (n + future)
         vmax = float(win["volume"].max()) or 1.0
 
         def y(v: float) -> float:
@@ -289,16 +352,22 @@ class CandleChart(QWidget):
             tp = float(self.position.get("take_profit") or 0)
             stop = float(self.position.get("stop_price") or 0)
             zx = plot.left() + plot.width() * 0.55   # start the band partway across, like TV
+            # These bands stop at the LAST CANDLE, not at the edge of the plot. They are about
+            # where price has been against this trade; the cone past that point is about where
+            # it is aimed. Running them to the edge put two different statements on top of each
+            # other in the same colours, and the rendered chart was a muddy block - visible only
+            # by looking at the picture, which is the whole reason this gets rendered.
+            zr = x(n - 1) if proj else plot.right()
             if entry and tp:
                 g = QColor(46, 204, 113, 45)
-                p.fillRect(QRectF(zx, min(y(entry), y(tp)), plot.right() - zx, abs(y(entry) - y(tp))), g)
+                p.fillRect(QRectF(zx, min(y(entry), y(tp)), zr - zx, abs(y(entry) - y(tp))), g)
             if entry and stop:
                 rr = QColor(231, 76, 60, 45)
-                p.fillRect(QRectF(zx, min(y(entry), y(stop)), plot.right() - zx, abs(y(entry) - y(stop))), rr)
+                p.fillRect(QRectF(zx, min(y(entry), y(stop)), zr - zx, abs(y(entry) - y(stop))), rr)
             for v, col in ((tp, UP), (entry, QColor("#8a94a7")), (stop, DOWN)):
                 if v:
                     yy = y(v); p.setPen(QPen(col, 1, Qt.DotLine))
-                    p.drawLine(QPointF(zx, yy), QPointF(plot.right(), yy))
+                    p.drawLine(QPointF(zx, yy), QPointF(zr, yy))
 
         # last price (streamed value when the latest bar is on screen)
         last = float(self.live_price) if (self.live_price and self.offset == 0) else float(win["close"].iloc[-1])
@@ -306,6 +375,62 @@ class CandleChart(QWidget):
         live_col = UP if last >= prev_close else DOWN
         p.setPen(QPen(live_col, 1, Qt.DotLine))
         p.drawLine(QPointF(plot.left(), y(last)), QPointF(plot.right(), y(last)))
+
+        # ---- where this trade is aimed, drawn past the last candle
+        if proj:
+            x0, y0 = x(n - 1), y(last)
+            x1 = x(n - 1 + proj["drawn"])
+            yt, ys = y(proj["target"]), y(proj["stop"])
+
+            # The CONE between the target and the stop. Both edges are real decisions the bot
+            # made and can be argued with; the space between them is the range it has committed
+            # to, and its width is the risk. A single line to the target would be a forecast
+            # this program does not have.
+            wedge = QPainterPath()
+            wedge.moveTo(QPointF(x0, y0))
+            wedge.lineTo(QPointF(x1, yt))
+            wedge.lineTo(QPointF(x1, ys))
+            wedge.closeSubpath()
+            up = proj["side"] == "long"
+            fill = QColor(UP if up else DOWN); fill.setAlpha(26)
+            p.fillPath(wedge, fill)
+
+            good = QColor(UP); good.setAlpha(210)
+            bad = QColor(DOWN); bad.setAlpha(210)
+            p.setPen(QPen(good, 2, Qt.DashLine))
+            p.drawLine(QPointF(x0, y0), QPointF(x1, yt))
+            p.setPen(QPen(bad, 2, Qt.DashLine))
+            p.drawLine(QPointF(x0, y0), QPointF(x1, ys))
+
+            # A dotted spine at the target and the stop, so the eye can carry them back to the
+            # price axis without following the diagonal.
+            p.setPen(QPen(good, 1, Qt.DotLine)); p.drawLine(QPointF(x0, yt), QPointF(x1, yt))
+            p.setPen(QPen(bad, 1, Qt.DotLine)); p.drawLine(QPointF(x0, ys), QPointF(x1, ys))
+
+            # Where the ATR estimate actually lands, marked on the cone. Without this the
+            # drawing would be claiming a horizon it did not compute.
+            xe = x(n - 1 + proj["bars"])
+            p.setPen(QPen(TEXT, 1, Qt.DotLine))
+            p.drawLine(QPointF(xe, min(yt, ys)), QPointF(xe, max(yt, ys)))
+
+            # Say in words what it is, because a dashed line into the future reads as a
+            # prediction and this is not one.
+            move = (proj["target"] - proj["entry"]) / proj["entry"] * 100.0 if proj["entry"] else 0.0
+            risk = (proj["stop"] - proj["entry"]) / proj["entry"] * 100.0 if proj["entry"] else 0.0
+            cap = (f"هدف {move:+.1f}٪ · حد ضرر {risk:+.1f}٪ · "
+                   f"حدود {proj['bars']} کندل تا هدف اگر با سرعت این روزها برود")
+            p.setFont(QFont("Segoe UI", 8))
+            fm = p.fontMetrics()
+            tw = fm.horizontalAdvance(cap)
+            tx = min(x1, plot.right() - tw - 6)
+            # BELOW the cone, not above it: above put it straight through the EMA legend along
+            # the top of the plot, which the rendered picture showed and no measurement would.
+            ty = min(plot.bottom() - 4, max(yt, ys) + fm.height() + 6)
+            box = QRectF(tx - 5, ty - fm.height(), tw + 10, fm.height() + 4)
+            bgc = QColor(BG); bgc.setAlpha(215)
+            p.fillRect(box, bgc)
+            p.setPen(QPen(TEXT))
+            p.drawText(QPointF(tx, ty), cap)
 
         # right-axis pills: TP (green), entry (grey), stop (red), then the live price + countdown
         if self.position:

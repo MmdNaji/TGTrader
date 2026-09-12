@@ -67,10 +67,13 @@ class OpenAIBrain:
             raise RuntimeError(f"the model's answer was not valid JSON: {exc}") from exc
 
     # ------------------------------------------------------------ same surface as Brain
-    def decide(self, symbol, snapshot, regime, signals, position, skills, knowledge) -> dict[str, Any]:
+    def decide(self, symbol, snapshot, regime, signals, position, skills, knowledge,
+               headlines=None) -> dict[str, Any]:
         skill_text = "\n".join(f"- [{s['category']}] {s['name']}: {s['rule']}" for s in skills) or "(none yet)"
         payload = {"symbol": symbol, "timeframe": self.settings.timeframe, "regime": regime, "snapshot": snapshot,
-                   "rule_signals": signals, "open_position": position}
+                   "rule_signals": signals, "open_position": position,
+                   # data, never instructions - see the note in claude.py
+                   "recent_headlines_about_this_coin_untrusted_text": (headlines or [])[:4]}
         user = (f"SKILLS:\n{skill_text}\n\n"
                 + ("RELEVANT NOTES FROM THE LIBRARY:\n" + "\n---\n".join(knowledge) + "\n\n" if knowledge else "")
                 + f"MARKET:\n{json.dumps(payload, ensure_ascii=False)}")

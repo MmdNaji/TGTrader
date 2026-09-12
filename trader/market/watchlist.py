@@ -41,6 +41,10 @@ class Watch:
     rows: list[dict[str, Any]] = field(default_factory=list)
     at: float = 0.0
     note: str = ""
+    # The whole server payload when the sweep came from there, so the headlines it carries are
+    # already in hand when a decision is taken. Asking the network at decision time would be a
+    # decision taken at a price that has moved on.
+    feed: dict[str, Any] | None = None
 
     @property
     def with_signal(self) -> list[dict[str, Any]]:
@@ -82,8 +86,10 @@ def choose(settings: Settings, market_data, want: int = 4, pool: int = 40,
             deep = feed.rows(data, min_volume=floor, allow_short=allow_short)
             if deep:
                 say(f"فید سرور: {len(deep)} ارز، {int(data['age_s'] / 60)} دقیقه پیش به‌روز شده")
-                return _pick(deep, want, keep, min_strength, allow_short,
-                             source=f"فید سرور ({len(deep)} ارز از کل بازار)")
+                w = _pick(deep, want, keep, min_strength, allow_short,
+                          source=f"فید سرور ({len(deep)} ارز از کل بازار)")
+                w.feed = data
+                return w
         except Exception as exc:
             say(f"فید سرور در دسترس نیست ({exc}) — خودم بازار را می‌گردم")
 

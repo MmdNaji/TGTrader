@@ -214,10 +214,16 @@ class Bridge(QObject):
 
 
 class PriceFeed(_Tracked):
-    """Streams the latest price for the watched symbols about once a second, so the chart,
-    the stop/target zones and the floating P&L move live. One second is the fastest that is
-    safe against an exchange's request limits - true millisecond ticks are not possible over
-    a REST price API and the price does not actually change that often."""
+    """Streams the latest price for every watched symbol, so the chart, the stop/target zones
+    and the floating P&L move live.
+
+    ONE request per cycle, not one per symbol - `MarketData.prices` asks the exchange for all
+    of them at once. Measured on bybit that is 0.20s for 538 symbols against 1.00s for four
+    individual calls, which is why the old loop had to rotate: eight coins meant eight requests
+    a second and the exchange answered Too Many Requests. Now nothing waits its turn.
+
+    True millisecond ticks are still not possible over a REST price API, and this does not
+    pretend otherwise: about 0.7s is the honest floor here."""
     tick = Signal(dict)
 
     def __init__(self, settings, split_fn):
@@ -248,24 +254,41 @@ class PriceFeed(_Tracked):
             # turns, one per cycle. Asking for all eight symbols every second was eight requests
             # a second at one exchange, which is what produced "Too Many Requests" and left the
             # bot with no market data at all for the symbols it holds.
-            batch = list(focus)
-            if rest:
-                batch.append(rest[turn % len(rest)])
-                turn += 1
+            # EVERY symbol, every cycle. The rotation existed because this asked one request
+            # per symbol, so eight coins was eight requests a second and the exchange said Too
+            # Many Requests. Measured on bybit, `fetch_tickers` returns all 538 spot symbols in
+            # 0.20s against 1.00s for four individual calls - so asking for everything at once
+            # is both fewer requests AND faster, and the coin the user is not looking at no
+            # longer waits its turn to be priced.
+            batch = list(dict.fromkeys(list(focus) + list(rest)))
             out, failed = {}, False
-            for sym in batch:
-                if self._stop.is_set():
-                    break
+            if batch and not self._stop.is_set():
                 try:
-                    out[sym] = md.price(sym)
+                    out = md.prices(batch)
+                    failed = not out
                 except Exception:
                     failed = True
+            if failed and not out:
+                # the bulk path is gone; keep the old behaviour rather than going dark
+                pick = list(focus)
+                if rest:
+                    pick.append(rest[turn % len(rest)])
+                    turn += 1
+                for sym in pick:
+                    if self._stop.is_set():
+                        break
+                    try:
+                        out[sym] = md.price(sym)
+                    except Exception:
+                        pass
             if out:
                 self.tick.emit(out)
             # Back off when the source is unhappy, so a rate limit is not answered by asking
             # harder. Recovers as soon as a cycle succeeds.
             backoff = min(backoff * 2 + 1.0, 20.0) if failed and not out else 0.0
-            self._stop.wait(1.0 + backoff)
+            # One request a cycle instead of N, so the cycle can be shorter without asking the
+            # exchange any harder than the old one did.
+            self._stop.wait(0.7 + backoff)
 
     def stop(self):
         self._stop.set()
@@ -1028,6 +1051,35 @@ class MainWindow(QMainWindow):
             self._market = MarketData(self.settings, on_notice=lambda m: self.bridge.event.emit("[data] " + m))
         return self._market
 
+    def _projection_for(self, pos: dict | None, df) -> dict | None:
+        """Where this trade is aimed, for the cone the chart draws past the last candle.
+
+        The owner's request, in their words: "I clicked the coin with the open trade - you know
+        how they draw a line continuing the chart, meaning it's going to go like this - show me
+        that." What the bot actually has is a target and a stop, so that is what is drawn, as
+        the two edges of a cone. Anything narrower would be a forecast this program does not
+        make, and drawing one would be the most misleading thing in the window.
+        """
+        if not pos:
+            return None
+        try:
+            entry = float(pos.get("entry_price") or 0)
+            stop = float(pos.get("stop_price") or 0)
+            target = float(pos.get("take_profit") or 0)
+        except (TypeError, ValueError):
+            return None
+        if not (entry and stop and target):
+            return None
+        atr = 0.0
+        try:
+            if df is not None and "atr14" in df:
+                series = df["atr14"].dropna()
+                atr = float(series.iloc[-1]) if len(series) else 0.0
+        except Exception:
+            atr = 0.0
+        return {"entry": entry, "stop": stop, "target": target, "atr": atr,
+                "side": str(pos.get("side") or ("long" if target > entry else "short"))}
+
     def _load_chart(self, widget: CandleChart, sym: str, tf: str, on_fail=None):
         from ..market.indicators import enrich
         md = self.market_data()
@@ -1037,6 +1089,7 @@ class MainWindow(QMainWindow):
             pos = next((dict(r) for r in self.db.open_trades(mode) if r["symbol"] == sym), None)
             trades = [dict(r) for r in self.db.closed_trades(mode, 300) if r["symbol"] == sym]
             widget.set_data(df, sym, tf, pos, trades)
+            widget.set_projection(self._projection_for(pos, df))
         self._run_bg(lambda: enrich(md.candles(sym, tf, limit=500)), done, on_fail or (lambda m: self._on_event("[chart] " + m.splitlines()[0])))
 
     def refresh_chart(self):
@@ -1284,10 +1337,12 @@ class MainWindow(QMainWindow):
             df = pd.DataFrame(bars, columns=["ts", "open", "high", "low", "close", "volume"])
             df["time"] = pd.to_datetime(df["ts"], unit="s", utc=True)
             df = df.set_index("time").drop(columns=["ts"])
-            chart.set_data(enrich(df), tr["symbol"], src["timeframe"] or self.settings.timeframe,
-                           position={"entry_price": tr["entry_price"], "stop_price": tr["init_stop"],
-                                     "take_profit": tr["take_profit"]},
-                           trades=[dict(tr)])
+            edf = enrich(df)
+            pos = {"entry_price": tr["entry_price"], "stop_price": tr["init_stop"],
+                   "take_profit": tr["take_profit"], "side": tr["side"]}
+            chart.set_data(edf, tr["symbol"], src["timeframe"] or self.settings.timeframe,
+                           position=pos, trades=[dict(tr)])
+            chart.set_projection(self._projection_for(pos, edf))
             split.addWidget(chart)
         else:
             # Told apart on purpose: "we never had it" and "it was cleared to keep the file

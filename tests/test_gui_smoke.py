@@ -1948,3 +1948,94 @@ def test_flipping_autopilot_never_leaves_two_engines_on_one_account():
         w.engine = None
         db.close()
         w.close(); w.deleteLater()
+
+
+def test_the_chart_draws_where_an_open_trade_is_aimed():
+    """"You know how they draw a line continuing the chart, meaning it's going to go like this
+    - show me that." Asked for twice, so it is worth a test that looks at the pixels.
+
+    It is drawn as a CONE and not a line, and that is the honest shape: the edges are the target
+    and the stop, which is the whole of what the bot decided. A single line to the target would
+    be a forecast this program does not have and cannot make.
+    """
+    import numpy as np, pandas as pd
+    from PySide6.QtGui import QImage
+    from trader.gui.chart import CandleChart
+    from trader.market.indicators import enrich
+    app = QApplication.instance() or QApplication([])
+
+    n = 200
+    rng = np.random.default_rng(3)
+    close = 100 * np.exp(np.cumsum(rng.normal(0.001, 0.02, n)))
+    df = pd.DataFrame({"open": np.roll(close, 1), "high": close * 1.01, "low": close * 0.99,
+                       "close": close, "volume": rng.uniform(100, 900, n)},
+                      index=pd.date_range("2025-01-01", periods=n, freq="D", tz="UTC"))
+    df.iloc[0, 0] = close[0]
+    df = enrich(df)
+    last = float(df["close"].iloc[-1]); atr = float(df["atr14"].iloc[-1])
+
+    ch = CandleChart(); ch.resize(900, 460)
+    ch.set_data(df, "BTC/USDT", "1d",
+                position={"entry_price": last, "stop_price": last - 2 * atr,
+                          "take_profit": last + 5 * atr, "side": "long"})
+    try:
+        def render():
+            img = QImage(900, 460, QImage.Format_ARGB32)
+            ch.render(img)
+            return img
+
+        def strongest(img, x, want):
+            """y of the strongest pixel of this colour family in one column, or None."""
+            best, besty = 0, None
+            for y in range(10, 320):
+                c = img.pixelColor(x, y)
+                v = c.green() if want == "up" else c.red()
+                other = c.red() if want == "up" else c.green()
+                if v > 120 and v > other + 60 and v > best:
+                    best, besty = v, y
+            return besty
+
+        # MEASURED WHERE THERE ARE NO CANDLES. Two earlier versions of this check counted
+        # coloured pixels in a fixed strip and both went DOWN when the feature was switched on -
+        # the chart already paints a translucent band and a dotted target line there, and part
+        # of the fix was stopping those at the last candle. A third tried to measure slope, and
+        # found one: a green CANDLE BODY is the same colour as the target edge, pixel for pixel.
+        #
+        # The region past the last candle is the only place with nothing else in it. The cone is
+        # the only thing the chart ever draws there, and what makes it a projection rather than
+        # a level is that it SLOPES.
+        plot = ch._plot_rect()
+        ch.set_projection({"entry": last, "stop": last - 2 * atr, "target": last + 5 * atr,
+                           "side": "long", "atr": atr})
+        img = render()
+        plan = ch._projection_plan(df.tail(ch.visible))
+        bw = plot.width() / (ch.visible + plan["drawn"])
+        x_last = plot.left() + (ch.visible - 0.5) * bw
+
+        near = int(x_last + bw * 2)
+        far = int(x_last + bw * (plan["drawn"] - 2))
+        up_near, up_far = strongest(img, near, "up"), strongest(img, far, "up")
+        dn_near, dn_far = strongest(img, near, "down"), strongest(img, far, "down")
+        assert None not in (up_near, up_far, dn_near, dn_far), \
+            "nothing is drawn past the last candle at all"
+        assert up_near - up_far > 20, (
+            f"the target edge does not climb (y {up_near} -> {up_far}) - that is a level, "
+            f"not a projection")
+        assert dn_far - dn_near > 5, (
+            f"the stop edge does not fall away (y {dn_near} -> {dn_far}) - there is no cone, "
+            f"only a line, and a line towards the target is a forecast this bot cannot make")
+
+        # and the plan has to be arithmetic, not a number someone typed
+        plan = ch._projection_plan(df.tail(ch.visible))
+        assert plan and plan["bars"] == round(5 * atr / atr) == 5, plan
+        assert plan["drawn"] >= plan["bars"], "drawn shorter than the estimate it marks"
+
+        # clearing it takes the drawing away again
+        ch.set_projection(None)
+        assert ch.projection is None and ch._projection_plan(df.tail(ch.visible)) is None
+
+        # a position with no target cannot produce a cone - half a cone is a made-up edge
+        ch.set_projection({"entry": last, "stop": last - atr, "target": 0, "side": "long"})
+        assert ch._projection_plan(df.tail(ch.visible)) is None
+    finally:
+        ch.deleteLater()
