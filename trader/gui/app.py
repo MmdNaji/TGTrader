@@ -213,6 +213,25 @@ class Bridge(QObject):
     confirm_request = Signal(str)
 
 
+def _by_profit(opens: list, prices: dict) -> list:
+    """Open positions, most profitable first. Asked for by name.
+
+    "In the open trades show the most profit first, on the dashboard and on the chart page too."
+
+    Sorted on the floating P&L that is about to be DISPLAYED, so the order matches the column
+    the eye lands on. A position with no price sinks to the bottom rather than counting as zero:
+    it is not flat, it is unknown, and dropping it in among the winners hides the one row that
+    actually needs attention. Ties keep the order they arrived in.
+    """
+    def floating(r):
+        px = prices.get(r["symbol"])
+        if not px:
+            return None
+        return ((px - r["entry_price"]) if r["side"] == "long"
+                else (r["entry_price"] - px)) * r["qty"]
+    return sorted(opens, key=lambda r: (floating(r) is None, -(floating(r) or 0.0)))
+
+
 class PriceFeed(_Tracked):
     """Streams the latest price for every watched symbol, so the chart, the stop/target zones
     and the floating P&L move live.
@@ -2204,6 +2223,7 @@ class MainWindow(QMainWindow):
             if st["trades"] else "")
 
         rows = []
+        opens = _by_profit(opens, prices)
         for r in opens:
             px = prices.get(r["symbol"])
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None
@@ -2406,6 +2426,10 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         rows = []
+        # The SAME order as the slow refresh. Both paths write the same two tables, so if only
+        # one of them sorted, every price tick would shuffle the rows back - 0.7 seconds apart,
+        # under the cursor, while someone is trying to click one.
+        opens = _by_profit(opens, self._live)
         for r in opens:
             px = self._live.get(r["symbol"])
             fl = ((px - r["entry_price"]) if r["side"] == "long" else (r["entry_price"] - px)) * r["qty"] if px else None

@@ -2198,3 +2198,76 @@ def test_every_watched_symbol_is_priced_every_cycle_in_one_request():
     # an empty ask is not a request
     calls["bulk"] = calls["single"] = 0
     assert md.prices([]) == {} and calls == {"bulk": 0, "single": 0}
+
+
+def test_conviction_sizing_stays_inside_every_cap_that_already_exists():
+    """The owner asked for bigger positions on better setups. That is the fastest way to lose an
+    account, so the mechanism's shape is what makes it safe: conviction decides how much of the
+    ALLOWANCE one trade takes, never the allowance itself.
+    """
+    s = Settings()
+    s.risk.capital_limit = 1000.0
+    s.risk.risk_per_trade = 0.01
+    s.risk.max_position_frac = 0.25
+    s.risk.max_open_risk = 0.0
+    s.risk.conviction_sizing = True
+    s.risk.conviction_band = 2.0
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_conv.db")
+    try:
+        rm = RiskManager(s.risk, db, "paper")
+
+        # symmetric in log space, and bounded in BOTH directions - a scheme that can only add is
+        # not sizing, it is leverage with extra steps
+        assert rm.conviction_multiplier(0.5) == pytest.approx(1.0)
+        assert rm.conviction_multiplier(1.0) == pytest.approx(2.0)
+        assert rm.conviction_multiplier(0.0) == pytest.approx(0.5)
+        assert rm.conviction_multiplier(99) == pytest.approx(2.0), "the band did not clamp"
+        assert rm.conviction_multiplier(-5) == pytest.approx(0.5)
+
+        base = rm.size("long", 100.0, 10.0, 1000.0, conviction=0.5)
+        hot = rm.size("long", 100.0, 10.0, 1000.0, conviction=1.0)
+        cold = rm.size("long", 100.0, 10.0, 1000.0, conviction=0.0)
+        assert hot.qty == pytest.approx(base.qty * 2, rel=0.01)
+        assert cold.qty == pytest.approx(base.qty / 2, rel=0.01)
+
+        # THE NOTIONAL CAP STILL BINDS. A tight stop makes the risk-based size enormous; doubling
+        # it must not walk past 25% of capital.
+        huge = rm.size("long", 100.0, 0.05, 1000.0, conviction=1.0)
+        assert huge.qty * 100.0 <= s.risk.max_position_frac * s.risk.capital_limit * 1.001
+
+        # and the open-risk budget still binds when it is on
+        s.risk.max_open_risk = 0.02
+        held = [{"symbol": "A/B", "side": "long", "qty": 1.0,
+                 "entry_price": 100.0, "stop_price": 85.0, "init_stop": 85.0}]
+        trimmed = rm.size("long", 100.0, 10.0, 1000.0, conviction=1.0, open_positions=held)
+        if trimmed is not None:
+            assert trimmed.qty * 10.0 <= 0.02 * 1000.0 + 1e-6
+
+        # off by default, and off means EXACTLY the old behaviour
+        s2 = Settings()
+        assert s2.risk.conviction_sizing is False
+        rm2 = RiskManager(s2.risk, db, "paper")
+        assert rm2.conviction_multiplier(1.0) == 1.0
+        assert rm2.size("long", 100.0, 10.0, 1000.0, conviction=1.0).qty == \
+               rm2.size("long", 100.0, 10.0, 1000.0).qty
+    finally:
+        db.close()
+
+
+def test_the_conviction_score_is_arithmetic_on_the_chart_and_cannot_veto_a_trade():
+    """It is averaged, not multiplied: no single input may drive it to zero.
+
+    Deciding whether to take a trade is the entry filter's job. A sizing score that can reach
+    zero is a second entry filter nobody asked for, hidden inside the position sizer.
+    """
+    from trader.strategy.conviction import score
+    strong = score({"adx14": 38, "rsi14": 55}, "long", "trend_up", 8.0, 1.0)
+    weak = score({"adx14": 11, "rsi14": 79}, "long", "range", 3.2, 1.0)
+    assert strong > 0.85 and weak < 0.3, (strong, weak)
+    assert 0.0 < weak, "a poor setup scored zero - that is a veto, not a size"
+
+    # the worst possible reading on every input at once still leaves something
+    worst = score({"adx14": 0, "rsi14": 100}, "long", "trend_down", 3.0, 1.0)
+    assert worst >= 0.0
+    # and with nothing to go on it says "ordinary", not "great"
+    assert score({}, "long", "unknown", 0.0, 0.0) == 0.5

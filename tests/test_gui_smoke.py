@@ -2039,3 +2039,43 @@ def test_the_chart_draws_where_an_open_trade_is_aimed():
         assert ch._projection_plan(df.tail(ch.visible)) is None
     finally:
         ch.deleteLater()
+
+
+def test_open_positions_are_shown_best_first_and_the_row_still_opens_the_right_trade():
+    """"In the open trades show the most profit first, on the dashboard and on the chart page."
+
+    The trap here is not the sort, it is `_pos_data`: clicking row 0 opens `_pos_data[0]`, so
+    the table and that list have to move together. Sorting the rows and leaving the data behind
+    would open the wrong trade from a row that looks right, which is worse than no sort at all.
+    """
+    from trader.gui.app import _by_profit
+    opens = [
+        {"symbol": "LOSS/USDT", "side": "long", "qty": 1.0, "entry_price": 100.0},
+        {"symbol": "BIG/USDT", "side": "long", "qty": 1.0, "entry_price": 100.0},
+        {"symbol": "DARK/USDT", "side": "long", "qty": 1.0, "entry_price": 100.0},
+        {"symbol": "SMALL/USDT", "side": "long", "qty": 1.0, "entry_price": 100.0},
+        {"symbol": "SHORTWIN/USDT", "side": "short", "qty": 1.0, "entry_price": 100.0},
+    ]
+    prices = {"LOSS/USDT": 90.0, "BIG/USDT": 150.0, "SMALL/USDT": 101.0, "SHORTWIN/USDT": 80.0}
+    order = [r["symbol"] for r in _by_profit(opens, prices)]
+    assert order == ["BIG/USDT", "SHORTWIN/USDT", "SMALL/USDT", "LOSS/USDT", "DARK/USDT"], order
+
+    # a short in profit must be read as profit, not as a fallen price
+    assert order.index("SHORTWIN/USDT") < order.index("SMALL/USDT")
+    # unknown is not zero: it goes last, BELOW the loser, because it is the row needing a look
+    assert order[-1] == "DARK/USDT"
+    # no prices at all is not a crash and not a reshuffle
+    assert [r["symbol"] for r in _by_profit(opens, {})] == [r["symbol"] for r in opens]
+
+    # and the table and _pos_data really are built from the same sorted list
+    import inspect
+    from trader.gui.app import MainWindow
+    for fn in (MainWindow.refresh, MainWindow._on_tick):
+        src = inspect.getsource(fn)
+        if "_pos_data" not in src:
+            continue
+        assert "_by_profit(opens" in src, (
+            f"{fn.__name__} fills the table without sorting - the two paths will disagree and "
+            f"the rows will shuffle under the cursor every price tick")
+        assert src.index("_by_profit(opens") < src.index("self._pos_data"), \
+            f"{fn.__name__} sorts after taking _pos_data - clicking a row opens the wrong trade"

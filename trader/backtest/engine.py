@@ -123,7 +123,8 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
     res = BtResult(symbol=symbol, bars=len(data), start_equity=start_equity)
     equity = start_equity
     open_t: BtTrade | None = None
-    pending: tuple[Any, float] | None = None   # (signal, stop_distance) to fill at next open
+    pending: tuple[Any, float, float | None] | None = None   # (signal, stop_distance,
+                                              # conviction) to fill at next open
     strategies = strategies or DEFAULT_STRATEGIES
     rr, atr_mult = risk.reward_risk, risk.atr_stop_mult
     rm = RiskManager(risk, None, "backtest")     # the same sizing code the live loop runs
@@ -135,9 +136,10 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
 
         # 1. fill a pending entry at this bar's open
         if pending and open_t is None:
-            sig, sd = pending
+            sig, sd, conv = pending
             px = o * (1 + slippage) if sig.side == "long" else o * (1 - slippage)
-            sizing = rm.size(sig.side, px, sd, equity, position_pct=position_pct)
+            sizing = rm.size(sig.side, px, sd, equity, position_pct=position_pct,
+                             conviction=conv)
             if sizing:
                 qty = sizing.qty
                 stop = px - sd if sig.side == "long" else px + sd
@@ -238,7 +240,15 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                     sd = max(sd or 0.0, c * fee_rate * 4.0)
                     round_trip = 2.0 * fee_rate * c
                     if sd > 0 and rr * sd > 3.0 * round_trip:
-                        pending = (sig, sd)
+                        # How good this setup looks, for conviction sizing. Computed on the
+                        # SAME closed window the signal was read from, so the backtest cannot
+                        # size on information the live engine would not have had.
+                        conv = None
+                        if getattr(risk, "conviction_sizing", False):
+                            from ..strategy.conviction import score as _conv
+                            from ..market.indicators import snapshot as _snap
+                            conv = _conv(_snap(window), sig.side, regime, rr * sd, round_trip)
+                        pending = (sig, sd, conv)
 
         # mark to market
         mtm = equity

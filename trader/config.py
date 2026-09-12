@@ -110,6 +110,36 @@ class RiskSettings:
     # the same moment if a correlated market takes every stop out together. 0 = no cap.
     max_open_risk: float = 0.06
 
+    # Let the size of a trade depend on how good the setup looks, inside a band. The owner asked
+    # for exactly this: "don't just divide the ceiling up - work out from your own analysis how
+    # much to put on each coin, sometimes more, sometimes less."
+    #
+    # IT IS OFF, AND THAT IS A MEASUREMENT RATHER THAN CAUTION. Built, wired through the
+    # backtest, and walked forward over 32 coins and 1,000 daily bars in MONEY (R cannot see
+    # this - it divides P&L by the risk the trade was opened with, so it normalises position
+    # size out by construction):
+    #
+    #                   flat      x2 band    x3 band
+    #   whole          +561.8     +565.0     +503.1
+    #   half 1         +362.2     +375.1     +319.9
+    #   half 2         +421.0     +395.0     +349.6
+    #   third 1        +173.2     +119.1      +18.3
+    #   third 2        -266.0     -303.0     -347.0
+    #   third 3        +128.4     +102.8      +68.9
+    #
+    # It beat flat sizing in two windows of six and lost in four, and the wider band was worse
+    # in EVERY window - the harm grows with how hard you lean on it, which is what a wrong axis
+    # looks like rather than a mistuned one. The worst of it is `third 2`: in the one stretch
+    # that lost money it made the loss BIGGER (-266 -> -303 -> -347), because the setups this
+    # score likes are the ones that hurt most in a bad market. Sizing up into the bad period is
+    # the single worst property a sizing rule can have.
+    #
+    # The machinery stays because the MODEL's own confidence is a different signal from this
+    # four-input chart score, and that one cannot be backtested here. Turning this on means
+    # accepting the table above.
+    conviction_sizing: bool = False
+    conviction_band: float = 2.0
+
 
 @dataclass
 class ExchangeSettings:

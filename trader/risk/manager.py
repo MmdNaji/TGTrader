@@ -173,14 +173,42 @@ class RiskManager:
             return max(by_risk, len(held)), "سقف ریسک همزمان"
         return cap, "تنظیمات"
 
+    def conviction_multiplier(self, conviction: float | None) -> float:
+        """How much more or less than the usual risk this setup is worth, as a multiplier.
+
+        The owner: "when I say the ceiling is a thousand dollars, don't just divide it up -
+        work out from your own analysis how much to put on each coin; sometimes more, sometimes
+        less." That is a fair thing to want and it is also the classic way to destroy an
+        account, so the shape matters more than the idea:
+
+        - it is a BAND, not a free hand. `conviction_band` is the most it may ever multiply by
+          and 1/band the least, so at the default of 2.0 a trade risks between half and twice
+          the usual amount and never more.
+        - it is symmetric in log space: 0.5 conviction is exactly the normal size, and the
+          distance from normal is the same going up as going down. A scheme that can only add
+          is not sizing, it is leverage with extra steps.
+        - EVERY OTHER CAP STILL BINDS. The notional cap, the total open-risk budget, the daily
+          loss limit and the cash on hand all run afterwards and are not scaled by this. What
+          conviction moves is how much of the allowance one trade takes, never the allowance.
+        """
+        if not getattr(self.risk, "conviction_sizing", False) or conviction is None:
+            return 1.0
+        band = max(1.0, float(getattr(self.risk, "conviction_band", 2.0)))
+        c = max(0.0, min(1.0, float(conviction)))
+        return float(band ** (2.0 * c - 1.0))
+
     def size(self, side: str, price: float, stop_distance: float, equity: float,
              min_qty: float = 0.0, qty_step: float = 0.0, cash: float | None = None,
-             position_pct: float = 0.0, open_positions: list | None = None) -> Sizing | None:
-        """Position size from the money at risk, never from conviction.
+             position_pct: float = 0.0, open_positions: list | None = None,
+             conviction: float | None = None) -> Sizing | None:
+        """Position size from the money at risk, scaled by conviction inside a fixed band.
 
-        risk_amount = risk_per_trade * min(equity, capital_limit)
+        risk_amount = risk_per_trade * min(equity, capital_limit) * conviction_multiplier
         qty         = risk_amount / stop_distance
         capped so the notional never exceeds max_position_frac * capital_limit.
+
+        The multiplier is off unless `conviction_sizing` is on, so the default behaviour of this
+        function is exactly what it was: one fixed fraction per trade.
         """
         if price <= 0 or stop_distance <= 0:
             return None
@@ -203,7 +231,7 @@ class RiskManager:
             max_notional = min(max_notional, qty * price)
         else:
             # automatic: size from the money at risk and the stop distance
-            risk_amount = self.risk.risk_per_trade * base
+            risk_amount = self.risk.risk_per_trade * base * self.conviction_multiplier(conviction)
             qty = risk_amount / stop_distance
             max_notional = hard_cap
         if cash is not None and cash > 0:
