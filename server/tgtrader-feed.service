@@ -1,0 +1,18 @@
+[Unit]
+Description=TGTrader market feed (whole-market sweep + news -> market.json)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/trader-server
+ExecStart=/root/trader/.venv/bin/python /root/trader-server/feed.py
+# This box also runs the live SMM panel, MariaDB, two Redis instances and the owner's VPN in
+# 4 GB. The sweep processes one symbol at a time and peaked at well under this, but a hard cap
+# is what guarantees a bug here can never take the shop down with it.
+MemoryMax=500M
+MemorySwapMax=0
+CPUQuota=60%
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=900

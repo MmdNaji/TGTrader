@@ -225,6 +225,13 @@ class Settings:
     # So it is worth having and it is not free money. What it reliably buys is that nobody has
     # to guess which coins to type in - a fixed list can do better than this and can do -11.3R,
     # and there is no way to know in advance which one you picked. See market/watchlist.py.
+    # The server sweeps the whole market every ten minutes and publishes the result; the app
+    # reads it instead of making 300 requests of its own. See market/feed.py. Falls back to
+    # sweeping locally the moment anything is wrong with it, so this is a shortcut and never a
+    # dependency - and it never carries an instruction, only prices, indicators and headlines.
+    use_market_feed: bool = True
+    market_feed_url: str = "http://91.107.163.109:40002/market.json"
+
     auto_symbols: bool = False
     auto_symbols_count: int = 4        # how many to hand the engine at a time
     # How many of the pairs that clear the liquidity floor get their charts read each sweep.
@@ -278,6 +285,7 @@ class Settings:
         "position_pct": 0.0,             # size from risk and the stop, not a flat percentage
         "align_with_leader": False,      # measured: costs return AND drawdown, earns neither
         "auto_symbols": True,            # watch everything rather than a list someone typed
+        "use_market_feed": True,         # and let the server do the 300 requests
         "auto_symbols_count": 4,
         # Three times what the manual default is. Autopilot is the mode that was asked to
         # "search the whole market", and the whole market is 390 pairs of which ~260 are
@@ -308,7 +316,7 @@ class Settings:
     # out. Listed explicitly rather than left as a silent gap: the window's test compares
     # AUTO_TOP + AUTO_RISK against the fields it locks, and without this a real omission and a
     # setting that was never on screen look identical to it.
-    AUTO_NO_FIELD = ("partial_take_frac", "auto_symbols_pool")
+    AUTO_NO_FIELD = ("partial_take_frac", "auto_symbols_pool", "use_market_feed")
 
     # The two things autopilot must never take. Not because they are hard - because they are
     # not measurements. No backtest can say how much of someone's money they are willing to

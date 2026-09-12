@@ -2013,3 +2013,92 @@ def test_the_pool_cap_cannot_quietly_undo_the_floor():
     s2.risk.capital_limit = 1000; s2.symbols = ["BTC/USDT"]
     assert not [p for p in s2.validate() if "auto_symbols_pool" in p], \
         "300 is refused - the ceiling is still the old one"
+
+
+def test_the_server_feed_is_a_shortcut_and_never_a_dependency():
+    """Anything wrong with the feed must fall back to sweeping locally, silently and safely.
+
+    The server does the 300 requests the app cannot afford on a home connection - but the app
+    has to keep working when the server is down, slow, or answering rubbish. A market feed that
+    can stop the bot trading is worse than no market feed.
+    """
+    from trader.market import feed
+    import json as _json
+
+    # unreachable, wrong shape, and not-a-dict are all FeedUnavailable, never a crash
+    for bad in ("http://127.0.0.1:1/nothing.json",):
+        with pytest.raises(feed.FeedUnavailable):
+            feed.fetch(bad, timeout=1.0)
+    # and TGTRADER_OFFLINE closes it like every other network path in this program - the market
+    # watch test caught this the moment the feed went in, by quietly returning REAL coins from
+    # the live server while it thought it was using its own fake market
+    assert os.environ.get("TGTRADER_OFFLINE"), "this suite is supposed to run offline"
+
+    # STALE IS REFUSED. This is the one that matters: old market data looks exactly like fresh
+    # market data, and acting on last week's prices is worse than not trading at all.
+    import urllib.request
+
+    class FakeResp:
+        def __init__(self, payload): self._p = _json.dumps(payload).encode()
+        def read(self): return self._p
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    real = urllib.request.urlopen
+    was_offline = os.environ.pop("TGTRADER_OFFLINE", None)
+    # Safe to lift here and nowhere else: urlopen is replaced two lines down, so this block
+    # cannot reach the network however the gate is set. The gate itself is checked above by the
+    # unreachable-URL case, which runs with it in force.
+    try:
+        fresh = {"at": time.time(), "coins": [{"symbol": "X/Y", "price": 1.0,
+                                              "volume_usd": 10 ** 9, "signal_strength": 0.6,
+                                              "signal_side": "long"}]}
+        urllib.request.urlopen = lambda *a, **k: FakeResp(fresh)
+        assert len(feed.fetch("http://x")["coins"]) == 1
+
+        stale = dict(fresh, at=time.time() - 5 * 3600)
+        urllib.request.urlopen = lambda *a, **k: FakeResp(stale)
+        with pytest.raises(feed.FeedUnavailable):
+            feed.fetch("http://x")
+
+        urllib.request.urlopen = lambda *a, **k: FakeResp({"at": time.time(), "coins": "nope"})
+        with pytest.raises(feed.FeedUnavailable):
+            feed.fetch("http://x")
+    finally:
+        urllib.request.urlopen = real
+        if was_offline is not None:
+            os.environ["TGTRADER_OFFLINE"] = was_offline
+
+
+def test_the_feed_is_filtered_by_this_accounts_own_floor_not_the_servers():
+    """The server publishes down to $50k so a small account can see what it may trade. A bigger
+    account must not be handed coins it cannot get out of just because they were in the file."""
+    from trader.market import feed
+    from trader.market.scanner import volume_floor
+    data = {"at": time.time(), "coins": [
+        {"symbol": "TINY/USDT", "price": 0.001, "volume_usd": 80_000,
+         "signal_strength": 0.6, "signal_side": "long"},
+        {"symbol": "BIG/USDT", "price": 100.0, "volume_usd": 50_000_000,
+         "signal_strength": 0.6, "signal_side": "long"},
+        {"symbol": "SHORTY/USDT", "price": 5.0, "volume_usd": 50_000_000,
+         "signal_strength": 0.6, "signal_side": "short"},
+    ]}
+    small = [c["symbol"] for c in feed.rows(data, min_volume=volume_floor(100))]
+    assert "TINY/USDT" in small, "a $100 position cannot reach an $80k-a-day coin?"
+    big = [c["symbol"] for c in feed.rows(data, min_volume=volume_floor(2_500))]
+    assert "TINY/USDT" not in big and "BIG/USDT" in big, \
+        "a $2,500 position was handed a coin doing $80k a day"
+
+    # a spot account must never be offered a short it cannot place
+    assert "SHORTY/USDT" not in [c["symbol"] for c in feed.rows(data, allow_short=False)]
+    assert "SHORTY/USDT" in [c["symbol"] for c in feed.rows(data, allow_short=True)]
+
+    # a broken row is skipped, not repaired - guessing at a number in a money path is how a
+    # typo becomes a position
+    broken = {"at": time.time(), "coins": [
+        {"symbol": "OK/USDT", "price": 1.0, "volume_usd": 10 ** 9},
+        {"price": 1.0, "volume_usd": 10 ** 9},                      # no symbol
+        {"symbol": "NOPRICE/USDT", "volume_usd": 10 ** 9},           # no price
+        {"symbol": "JUNK/USDT", "price": "abc", "volume_usd": 10 ** 9},
+    ]}
+    assert [c["symbol"] for c in feed.rows(broken)] == ["OK/USDT"]

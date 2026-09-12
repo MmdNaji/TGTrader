@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..config import Settings
-from . import scanner
+from . import feed, scanner
 
 
 @dataclass
@@ -67,20 +67,46 @@ def choose(settings: Settings, market_data, want: int = 4, pool: int = 40,
     say = on_progress or (lambda m: None)
     stop = abort or (lambda: False)
     tf = timeframe or settings.timeframe
+    floor = scanner.MIN_QUOTE_VOLUME if min_volume is None else float(min_volume)
+
+    # THE SERVER'S SWEEP FIRST. It reads every coin every ten minutes on a stable line; doing
+    # the same here is ~100 seconds of requests per sweep on a home connection, which is why
+    # this only ever looked at the most liquid 40. One request instead of 304, and a connection
+    # that drops costs a refresh rather than a blind spot.
+    #
+    # It is a SHORTCUT, not a dependency: anything wrong with it - unreachable, stale, wrong
+    # shape - falls through to sweeping locally, which is exactly what this did before.
+    if getattr(settings, "use_market_feed", True):
+        try:
+            data = feed.fetch(getattr(settings, "market_feed_url", feed.DEFAULT_URL))
+            deep = feed.rows(data, min_volume=floor, allow_short=allow_short)
+            if deep:
+                say(f"فید سرور: {len(deep)} ارز، {int(data['age_s'] / 60)} دقیقه پیش به‌روز شده")
+                return _pick(deep, want, keep, min_strength, allow_short,
+                             source=f"فید سرور ({len(deep)} ارز از کل بازار)")
+        except Exception as exc:
+            say(f"فید سرور در دسترس نیست ({exc}) — خودم بازار را می‌گردم")
 
     # `min_volume` comes from the ACCOUNT, not from a constant - see scanner.volume_floor. The
     # flat $3M floor meant 39 of the 390 active pairs were ever looked at, which is why the
     # owner's reading of it was "you only added the famous coins". It was right.
-    rows = scanner.scan(settings, market_data, limit=pool,
-                        min_volume=(scanner.MIN_QUOTE_VOLUME if min_volume is None
-                                    else float(min_volume)),
+    rows = scanner.scan(settings, market_data, limit=pool, min_volume=floor,
                         on_progress=say, abort=stop)
     if stop():
         return Watch(symbols=list(keep), at=time.time(), note="متوقف شد")
     deep = scanner.deepen(settings, market_data, rows, timeframe=tf, on_progress=say, abort=stop)
 
-    # Strongest live signal first. Liquidity breaks a tie, because between two identical setups
-    # the one you can actually get in and out of is the better trade.
+    return _pick(deep, want, keep, min_strength, allow_short,
+                 source=f"{len(deep)} ارز بررسی‌شده")
+
+
+def _pick(deep: list[dict[str, Any]], want: int, keep, min_strength: float,
+          allow_short: bool, source: str) -> Watch:
+    """Rank and choose. Shared by the server feed and the local sweep, so the two cannot drift.
+
+    Strongest live signal first; liquidity breaks a tie, because between two identical setups
+    the one you can actually get in and out of is the better trade.
+    """
     def tradeable(r: dict) -> bool:
         if (r.get("signal_strength") or 0) <= min_strength:
             return False
@@ -96,9 +122,9 @@ def choose(settings: Settings, market_data, want: int = 4, pool: int = 40,
         shorts = sum(1 for r in deep if str(r.get("signal", "")).startswith("short"))
         extra = (f" ({shorts} تا ستاپ فروش داشتند که روی حساب نقدی قابل اجرا نیست)"
                  if shorts and not allow_short else "")
-        note = (f"از {len(deep)} ارز بررسی‌شده، هیچ‌کدام همین حالا ستاپ قابل‌معامله ندارند{extra} — "
+        note = (f"از {source}، هیچ‌کدام همین حالا ستاپ قابل‌معامله ندارند{extra} — "
                 f"ربات منتظر می‌ماند و این درست‌ترین کاری است که می‌تواند بکند.")
     else:
         top = "، ".join(f"{r['symbol']} ({r['signal']})" for r in ranked[:3])
-        note = f"از {len(deep)} ارز بررسی‌شده، {len(ranked)} تا ستاپ دارند: {top}"
+        note = f"از {source}، {len(ranked)} تا ستاپ دارند: {top}"
     return Watch(symbols=picked, rows=deep, at=time.time(), note=note)
