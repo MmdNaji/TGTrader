@@ -1683,6 +1683,30 @@ def test_the_scale_out_is_off_unless_asked_for():
         db.close()
 
 
+def test_a_price_exactly_at_the_1r_mark_scales_out():
+    """entry + 1R computed in floats can land one unit in the last place SHORT of 1R, and the exact
+    comparison then refused the scale-out at that very price - the whole position rode on to the
+    target instead. A coarse-tick coin can print exactly that price live. Found by the Windows
+    session's replay, which inserts the exact mark; these are real numbers that trip it."""
+    s = Settings(); s.mode = "paper"; s.use_llm_for_decisions = False
+    s.paper_start_balance = 100000; s.risk.partial_take_r = 1.0; s.risk.partial_take_frac = 0.5
+    db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_scale_ulp.db")
+    try:
+        pb = PaperBroker(100000, allow_short=False); pb.reset(100000)
+        eng = Engine(s, db, broker=pb)
+        eng.log = lambda m, lvl="info": None
+        entry, stop = 1892.76, 1737.49
+        mark = entry + 1.0 * abs(entry - stop)
+        assert (mark - entry) < abs(entry - stop), "precondition: this mark is one ulp short of 1R"
+        pb.market_order("X/Y", "buy", 10.0, entry)
+        tid = db.open_trade("paper", "X/Y", "long", 10.0, entry, stop, entry + 2.5 * (entry - stop),
+                            "t", "r", entry_fee=10.0 * entry * 0.001)
+        assert eng._maybe_scale_out(dict(db.one("SELECT * FROM trades WHERE id=?", (tid,))), mark), \
+            "the price reached exactly entry + 1R and nothing was sold"
+    finally:
+        db.close()
+
+
 def test_a_scaled_trade_reports_exactly_what_the_account_made():
     """The journal's P&L has to equal the money the account actually moved. It did not.
 

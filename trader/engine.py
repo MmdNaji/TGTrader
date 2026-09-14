@@ -733,7 +733,11 @@ class Engine:
         if r_dist <= 0:
             return False
         gain = (price - entry) if side == "long" else (entry - price)
-        if gain < want_r * r_dist:
+        # A relative tolerance, not an exact comparison: entry + 1R computed in floats can land a
+        # unit in the last place short of itself, and a coarse-tick coin can print EXACTLY that
+        # price. Refusing there skipped the scale-out and let the whole position ride to the
+        # target - found by the Windows session's replay, which inserts the exact mark.
+        if gain < want_r * r_dist * (1.0 - 1e-9):
             return False
         frac = float(getattr(self.settings.risk, "partial_take_frac", 0.5) or 0.5)
         qty = float(pos["qty"])
