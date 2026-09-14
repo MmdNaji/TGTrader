@@ -897,9 +897,16 @@ class Engine:
             # Stamped with the BAR this happened on (epoch seconds either way), so the cooldown
             # is measured in market time and behaves identically live and in a replay.
             self._cooldown[pos["symbol"]] = bar_ts if bar_ts else time.time()
+        # Any exit, not only a stop - see the matching check in _scout. Not every close knows its
+        # bar: a stop or target taken while candles are unavailable, the scale-out mismatch and
+        # close_all pass none. Skipping the stamp there reopens the same-day re-entry hole, and
+        # the entry bar in _last_bar is too old to close it, so it falls back to the last CLOSED
+        # bar on the database's clock - market time, which is replay time in a replay.
         if bar_ts:
-            # Any exit, not only a stop - see the matching check in _scout.
             self._exit_bar[pos["symbol"]] = bar_ts
+        else:
+            bs = self.bar_seconds()
+            self._exit_bar[pos["symbol"]] = (self.db.clock() // bs) * bs - bs
         self.db.add_decision(pos["symbol"], "close", None, "risk", why,
                              {"pnl": pnl, "r": r, "fees": fill.fee + entry_fee})
         try:

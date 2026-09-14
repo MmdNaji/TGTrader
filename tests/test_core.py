@@ -384,6 +384,33 @@ def test_no_entry_from_a_bar_that_closed_while_the_position_was_open():
     assert eng._scout("X/Y", df, price) is not None, "the next bar was blocked too"
 
 
+def test_a_close_without_candles_still_blocks_the_same_day_re_entry():
+    """Not every close knows its bar: a target taken on the live price alone, while candles are
+    unavailable, passes none - and skipping the stamp there reopened the re-entry hole. The
+    fallback is the last CLOSED bar on the database clock. Pointed out by the Windows session."""
+    s, db, pb, eng = _engine("t_reentry_dark.db")
+    bs = eng.bar_seconds()
+    now = (1_789_400_000.0 // bs) * bs + bs / 3        # a third of the way into a bar
+    db.clock = lambda: now
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 90.0, 101.0, "t", "r", entry_fee=fill.fee)
+    pos = dict(db.open_trades("paper")[0])
+
+    class Dark:
+        is_kcex = False
+        def candles(self, *a, **k): raise RuntimeError("candles unavailable")
+        def price(self, symbol): return 102.0
+    eng.market = Dark()
+    assert eng._manage_on_price_alone(pos), "precondition: the target is taken on price alone"
+
+    df = enrich(synth(400, seed=13))
+    forming = (now // bs) * bs
+    df.index = pd.date_range(end=pd.Timestamp(forming, unit="s", tz="UTC"), periods=len(df),
+                             freq=pd.Timedelta(seconds=bs))
+    assert eng._scout("X/Y", df, float(df["close"].iloc[-1])) is None, \
+        "re-entered from the bar that closed while the position was open"
+
+
 def test_a_model_failure_holds_instead_of_falling_back_to_the_raw_rules():
     s, db, pb, eng = _engine("t_brain.db")
     s.use_llm_for_decisions = True
