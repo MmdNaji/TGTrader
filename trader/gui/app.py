@@ -1793,8 +1793,10 @@ class MainWindow(QMainWindow):
         self.s_agg = QComboBox()
         self.s_agg.addItems(["normal", "high", "scalp"]); self.s_agg.setCurrentText(getattr(s, "aggressiveness", "normal"))
         self.s_autoupd = QCheckBox("به‌روزرسانی خودکار موقع باز شدن برنامه"); self.s_autoupd.setChecked(s.auto_update)
-        self.s_align = QCheckBox("هم‌جهت با بیت‌کوین (لانگ آلت وقتی BTC ریزشی است، باز نشود) — "
-                                 "در بک‌تست سود را کمی کم کرد؛ فقط برای محافظه‌کاری در ریزش")
+        # Short label, explanation in a wrapping hint below. A QCheckBox cannot wrap: the whole
+        # sentence as its label made it 736px wide on Windows and pushed the settings page ~180px
+        # past a 1320px window, behind a horizontal scrollbar.
+        self.s_align = QCheckBox("هم‌جهت با بیت‌کوین")
         self.s_align.setChecked(getattr(s, "align_with_leader", True))
         c1.add(FormRow("تصمیم‌گیرنده", self.s_provider, "کلید همان را وارد کن. کنترل صفحه همیشه با Claude است."))
         c1.add(FormRow("Claude API key", self.s_key, "از console.anthropic.com"))
@@ -1807,6 +1809,8 @@ class MainWindow(QMainWindow):
                        "normal = صبور، منتظر ستاپ واقعی · high = آستانه پایین‌تر، معامله‌ی بیشتر · "
                        "scalp = فقط قوانین، روی هر مومنتوم وارد می‌شود (برای دیدن فعالیت روی تایم‌فریم کوتاه، نه برای سود)"))
         c1.add(self.s_align)
+        c1.add(hint("لانگ آلت‌کوین وقتی BTC ریزشی است باز نشود. در بک‌تست سود را کمی کم کرد؛ "
+                    "فقط برای محافظه‌کاری در ریزش."))
         c1.add(self.s_autoupd)
         c1.add_action(button("تست اتصال", "", self._test_llm))
         grid.addWidget(c1, 0, 0)

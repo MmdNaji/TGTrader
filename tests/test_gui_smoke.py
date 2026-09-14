@@ -1050,10 +1050,16 @@ def test_every_column_stays_reachable_at_any_width_and_any_row_count(win):
             need = sum(t.columnWidth(c) for c in range(t.columnCount()))
             over = need - t.viewport().width()
             key = (rows, width)
-            if sb.isVisible() and over <= DEAD_SCROLL:
+            # INERT means nothing is actually off screen. It used to mean "under DEAD_SCROLL", which
+            # was only true while fit_columns shaved those few pixels out of the cells' padding -
+            # and under the stylesheet that shave is what elided "3384.77" to "…3384". Columns now
+            # stop at their content hint, so a few pixels of overflow are a few pixels of content
+            # (the front of the last column, in RTL) and a bar for them is not noise.
+            if sb.isVisible() and over <= 0:
                 useless[key] = over
             if over > DEAD_SCROLL:
                 saw_overflow += 1
+            if over > 0:
                 # whatever is off screen has to be REACHABLE. Checking that a column is not
                 # narrower than its contents is the wrong question: these columns are the right
                 # width and simply sit outside the viewport with no way to get to them.
@@ -1603,6 +1609,61 @@ def test_the_reset_button_is_not_a_neighbour_of_the_start_button(win):
         app.processEvents()
     assert len(win.btn_reset.text().split()) > 1
     assert win.btn_reset.objectName() == "dangerGhost"
+
+
+def test_fitting_a_table_never_shaves_a_column_below_its_content(win):
+    """The backtest table drew "3384.77" as "…3384" and "donchian_breakout" as "…donchian_break".
+
+    fit_columns pays for a small overflow - usually the vertical scrollbar it predicts - by shaving
+    a few pixels off every column. Its floor was the text width plus 6px, but under the stylesheet
+    a cell needs its text plus 16px of item padding plus the style's text margin, which is exactly
+    what sizeHintForColumn reports. Shaving 2px below that hint is enough for Qt to elide the cell.
+    This builds that situation - rows taller than the table, so the scrollbar prediction kicks in,
+    and a width a few pixels short of the contents - and checks no data column ends below its hint."""
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+    from trader.gui.widgets import fill, table
+    app = QApplication.instance() or QApplication([])
+    host = QWidget()
+    host.setLayoutDirection(Qt.RightToLeft)
+    lay = QVBoxLayout(host)
+    lay.setContentsMargins(0, 0, 0, 0)
+    t = table(["استراتژی", "جهت", "ورود", "خروج", "سود/زیان", "R", "دلیل"])
+    lay.addWidget(t)
+    rows = [["donchian_breakout", "short", f"{3384.77 - i:.6g}", f"{3296.01 + i:.6g}", f"{(-1) ** i * 1.7101:+.4f}",
+             f"{(-1) ** i * 1.71:+.2f}", f"breakout above 20-bar high {2786 + i} on volume -> target"] for i in range(30)]
+    host.resize(3000, 300)
+    host.show()
+    fill(t, rows)
+    for _ in range(4):
+        app.processEvents()
+    hints = [t.sizeHintForColumn(c) for c in range(t.columnCount())]
+    # a viewport a few pixels short of what the contents want: the shave path, not the scrollbar path
+    frame = t.width() - t.viewport().width()
+    host.resize(sum(hints) + frame - 6, 300)
+    for _ in range(4):
+        app.processEvents()
+    fill(t, rows)
+    for _ in range(4):
+        app.processEvents()
+    cut = {t.horizontalHeaderItem(c).text(): (t.columnWidth(c), t.sizeHintForColumn(c))
+           for c in range(t.columnCount() - 1) if t.columnWidth(c) < t.sizeHintForColumn(c)}
+    host.close()
+    assert not cut, f"columns shaved below their content (width, hint) - their cells elide: {cut}"
+
+
+def test_no_checkbox_on_the_settings_page_carries_a_sentence(win):
+    """A QCheckBox cannot wrap, so its label IS its minimum width. The market-leader checkbox
+    carried a 118-character sentence - label, effect and backtest caveat in one line - and on
+    Windows that single widget asked for 736px, which pushed the whole settings page ~180px past a
+    1320px window, behind a horizontal scrollbar that cut off the market and exchange column.
+
+    Pixel widths cannot pin this here: offscreen fonts draw the same text at about a third of the
+    Windows width, and the page fits either way. The length of the label is the part that does not
+    depend on the font. Explanations belong in hint(), which wraps."""
+    from PySide6.QtWidgets import QCheckBox
+    long_ones = {cb.text(): len(cb.text()) for cb in win.pages["settings"].findChildren(QCheckBox)
+                 if len(cb.text()) > 70}
+    assert not long_ones, f"checkbox labels too long to fit a window - move the explanation into hint(): {long_ones}"
 
 
 def test_the_autopilot_button_never_says_the_opposite_of_its_state(win):

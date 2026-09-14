@@ -359,25 +359,23 @@ def fit_columns(t: QTableWidget) -> None:
     # exactly. That is why this column has been touched three times from measurements that all
     # said "fits, with room to spare" - scripts/probe_positions_table.py measures it in place.
     #
-    # ResizeToContents hands every column its hint, and a hint carries padding the text does not
-    # use. So a small excess is taken back a pixel or two at a time across ALL of them, rather
-    # than let one column lose its front. Below the floor it stops and lets the scrollbar do its
-    # job - at that point the content genuinely does not fit and pretending otherwise would cut
-    # something.
+    # A small excess is taken back a pixel or two at a time across ALL columns, rather than let one
+    # column lose its front - but only from what a column holds beyond its content hint (a header
+    # wider than its cells). Under the stylesheet the hint is exactly what the text needs, so below
+    # it the loop stops and the scrollbar does its job: at that point the content genuinely does not
+    # fit, and pretending otherwise cuts characters.
     widths = [t.columnWidth(c) for c in range(n)]
     room = _room(t)
     over = sum(widths) - room
     if 0 < over <= room * 0.15:
-        # The floor is the TEXT, measured - not a fraction of the hint. A column may give back
-        # the padding it is not using and may never give back a character, so nothing here can
-        # ever elide anything; when the padding runs out the loop stops and the scrollbar takes
-        # over, which is the honest answer to content that genuinely does not fit.
-        # Two floors, and the second one is because the first depends on measuring text with
-        # the font the cells are actually drawn with - which is not reliably the table's under
-        # a stylesheet. Whatever that measure says, a column never gives back more than an
-        # eighth of itself, so a wrong text width can cost a little padding and can never cost
-        # a character.
-        floors = [max(_text_width(t, c) + 6, int(widths[c] * 0.875)) for c in range(n)]
+        # The floor is the column's CONTENT HINT, not the text plus a guess. Under the stylesheet a
+        # cell draws its text inside 16px of item padding plus the style's own text margin, and
+        # sizeHintForColumn already carries exactly that. The old floor - text + 6, or 7/8 of the
+        # width - sat below it, so paying for a predicted vertical scrollbar shaved 2px off every
+        # price column and Qt elided them: "3384.77" drew as "…3384" on the backtest page. A column
+        # can still give back what it holds beyond its hint (a header wider than its cells), and
+        # never a character.
+        floors = [max(t.sizeHintForColumn(c), _text_width(t, c) + 6) for c in range(n)]
         donors = [c for c in range(n) if widths[c] > floors[c]]
         shaved: dict[int, int] = {}
         for _ in range(4):
@@ -399,8 +397,13 @@ def fit_columns(t: QTableWidget) -> None:
     # Recorded so a test can tell "this column gave back padding on purpose" from "this column
     # is too small", without having to measure text in a font it cannot be sure of.
     t._shaved = locals().get("shaved", {})
-    t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff if over <= DEAD_SCROLL
-                                   else Qt.ScrollBarAsNeeded)
+    # Whatever overflow is LEFT after the shave is real: every column is at its content hint, and
+    # in a right-to-left table the excess comes off the front of the last column - on the positions
+    # card that is the sign of the P&L. Hiding a scrollbar with a few pixels of travel used to be
+    # safe only because the shave had already cut those pixels out of the cells' padding, which
+    # under the stylesheet is what elides them. So a remaining overflow gets its scrollbar; only an
+    # overflow the shave fully absorbed goes without one.
+    t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff if over <= 0 else Qt.ScrollBarAsNeeded)
 
 
 def fill(t: QTableWidget, rows: list[list[Any]], tones: dict[int, str] | None = None) -> None:
