@@ -84,9 +84,14 @@ def engine_params(settings) -> dict:
     """
     from ..strategy.builtin import DEFAULT_STRATEGIES, Scalp
     agg = getattr(settings, "aggressiveness", "normal")
+    risk = getattr(settings, "risk", None)
     return {
         "min_confidence": {"high": 0.4, "scalp": 0.0}.get(agg, 0.55),
         "position_pct": getattr(settings, "position_pct", 0.0),
+        # The scale-out is part of the system being run - autopilot turns it on - and a
+        # backtest without it describes a different set of exits from the ones trading.
+        "partial_at_r": float(getattr(risk, "partial_take_r", 0.0) or 0.0),
+        "partial_frac": float(getattr(risk, "partial_take_frac", 0.5) or 0.5),
         "strategies": ([Scalp()] + list(DEFAULT_STRATEGIES)) if agg == "scalp" else list(DEFAULT_STRATEGIES),
     }
 
@@ -96,7 +101,8 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                  warmup: int = 60, allow_short: bool = True,
                  leader_regimes: pd.Series | None = None, min_confidence: float = 0.0,
                  position_pct: float = 0.0, cooldown_bars: float = 2.0,
-                 partial_at_r: float = 0.0, partial_frac: float = 0.5) -> BtResult:
+                 partial_at_r: float = 0.0, partial_frac: float = 0.5,
+                 trail_intrabar: bool = False) -> BtResult:
     """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
     a long is refused while the leader is in ``trend_down`` and a short while it is in
     ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
@@ -153,6 +159,13 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
         # 2. manage the open trade on this bar
         if open_t:
             t = open_t
+            if trail_intrabar:
+                # The live engine trails off the LIVE price every loop, so its stop ratchets up
+                # to the bar's extreme before the bar closes. A daily bar cannot say whether the
+                # high came before the low, so this assumes it did - the pessimistic case - and
+                # then lets this same bar's low hit the tightened stop.
+                t.stop = rm.trail_stop(t.side, t.entry, t.stop, h if t.side == "long" else l,
+                                       t.init_stop or t.stop)
             exit_px, why = None, ""
             if t.side == "long":
                 if l <= t.stop:
@@ -189,6 +202,10 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                     t.stop = t.entry          # the rest cannot lose money from here
                     t.scaled = True
                     equity += t.part_pnl
+                    if trail_intrabar and ((l <= t.entry) if t.side == "long" else (h >= t.entry)):
+                        # The live engine scales out on the live price, and the same day can fall
+                        # straight back to the break-even stop. Pessimistic, like the trail above.
+                        exit_px, why = t.entry, "stop"
             if exit_px is None:
                 # R from the ORIGINAL stop. Measuring it from the already-trailed stop shrinks it
                 # every bar, so the stop walks into the price and closes every winner for nothing.

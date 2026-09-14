@@ -730,6 +730,20 @@ def test_every_backtest_in_the_app_runs_the_same_system():
             assert "engine_params(" in src, f"{mod.__name__} builds its own backtest arguments"
 
 
+def test_the_backtest_carries_the_scale_out_the_engine_trades_with():
+    """Autopilot takes half off at 1R, and engine_params passed nothing about it - so the
+    Backtest page measured exits the trading engine was not using."""
+    from trader.backtest.engine import engine_params
+    s = Settings()
+    s.autopilot = True
+    eff = s.effective()
+    assert eff.risk.partial_take_r > 0, "precondition: autopilot scales out"
+    p = engine_params(eff)
+    assert p["partial_at_r"] == eff.risk.partial_take_r
+    assert p["partial_frac"] == eff.risk.partial_take_frac
+    assert engine_params(Settings())["partial_at_r"] == 0.0
+
+
 def test_profit_factor_is_not_shown_as_infinity_on_a_tiny_sample():
     """The dashboard printed "∞" next to a 100% win rate after one trade. That reads as a
     flawless system; it means there is nothing to divide by yet."""
