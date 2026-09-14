@@ -836,6 +836,18 @@ def test_real_hours_decide_a_day_that_covers_both_the_stop_and_the_target(monkey
     assert hourly.trades[0].reason.endswith("target"), hourly.trades[0].reason
     assert hourly.trades[0].r > 1.0
 
+    # A UTC-aware index (what ohlcv_to_frame builds) with the same naive keys must still find the
+    # hours. Timestamp equality across timezones silently missed every day and fell back to the
+    # daily path - found by the Windows session.
+    aware = df.copy()
+    aware.index = aware.index.tz_localize("UTC")
+    got = bt.run_backtest("X/Y", aware, risk, warmup=60, intraday=hours)
+    assert got.trades[0].reason.endswith("target"), "the hours were not found on a UTC-aware frame"
+
+    # and keys that match no daily bar are refused, never quietly replaced by the daily path
+    with pytest.raises(ValueError):
+        bt.run_backtest("X/Y", df, risk, warmup=60, intraday={pd.Timestamp("1999-01-01"): hours[idx[102]]})
+
 
 def test_the_backtest_carries_the_scale_out_the_engine_trades_with():
     """Autopilot takes half off at 1R, and engine_params passed nothing about it - so the

@@ -134,6 +134,17 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
     strategies = strategies or DEFAULT_STRATEGIES
     rr, atr_mult = risk.reward_risk, risk.atr_stop_mult
     rm = RiskManager(risk, None, "backtest")     # the same sizing code the live loop runs
+    # Real hours are looked up by EPOCH SECONDS, not by Timestamp. A UTC-aware index (what
+    # ohlcv_to_frame builds) never compares equal to naive keys, so every lookup missed and the
+    # backtest silently walked the daily path instead - found by the Windows session, whose
+    # first port showed ETH at 12 trades / +3.78R against the real-hours 13 / +5.49R. A lookup
+    # that matches nothing is refused outright rather than quietly measuring something else.
+    hours_by_ts: dict[int, Any] | None = None
+    if intraday is not None:
+        hours_by_ts = {int(pd.Timestamp(k).timestamp()): v for k, v in intraday.items()}
+        if not any(int(ts.timestamp()) in hours_by_ts for ts in data.index[warmup:]):
+            raise ValueError("intraday keys match no daily bar after warmup - check the timestamps "
+                             "(timezone? milliseconds?)")
     cooldown_until = -1                          # bar index before which no new entry is taken
 
     def _levels(t: BtTrade, hh: float, ll: float) -> tuple[float | None, str]:
@@ -198,7 +209,7 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
         if open_t:
             t = open_t
             exit_px, why = None, ""
-            hours = intraday.get(data.index[i]) if intraday is not None else None
+            hours = hours_by_ts.get(int(data.index[i].timestamp())) if hours_by_ts is not None else None
             if hours:
                 # REAL hourly prices for this day, walked in order - so "which came first, the
                 # stop or the target" is asked of one hour instead of a whole day. The live engine
