@@ -167,24 +167,16 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 t.stop = rm.trail_stop(t.side, t.entry, t.stop, h if t.side == "long" else l,
                                        t.init_stop or t.stop)
             exit_px, why = None, ""
-            if t.side == "long":
-                if l <= t.stop:
-                    exit_px, why = t.stop, "stop"
-                elif h >= t.tp:
-                    exit_px, why = t.tp, "target"
-            else:
-                if h >= t.stop:
-                    exit_px, why = t.stop, "stop"
-                elif l <= t.tp:
-                    exit_px, why = t.tp, "target"
-            if exit_px is None:
-                # The engine closes a trend trade when the regime flips against it, on every
-                # pass. Without it here the backtest models a system that holds every trade to
-                # its stop or its target, which is not the system being run.
-                reg_now = detect_regime(data.iloc[: i + 1])
-                if (t.side == "long" and reg_now == "trend_down") or \
-                   (t.side == "short" and reg_now == "trend_up"):
-                    exit_px, why = c, "regime flipped"
+            # The STOP first: a bar whose range covers the stop and anything else is assumed to
+            # have lost, because the order inside a bar is unknowable.
+            if (l <= t.stop) if t.side == "long" else (h >= t.stop):
+                exit_px, why = t.stop, "stop"
+            # Then the SCALE-OUT, and only then the target. The 1R mark lies between the entry and
+            # a 1.5R target, so a price that reaches the target has passed the mark first - the
+            # live engine sells half there and the rest at the target. Testing the target first
+            # closed the whole position at the target for +1.5R where the engine books ~+1.25R,
+            # and on daily bars with a 1.5R target that bar is common. Found by the Windows
+            # session's engine-replay parity test (7 trades in the first 3 symbols).
             if exit_px is None and partial_at_r > 0 and not t.scaled:
                 r_dist0 = abs(t.entry - (t.init_stop or t.stop))
                 mark = (t.entry + partial_at_r * r_dist0) if t.side == "long" \
@@ -206,6 +198,16 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                         # The live engine scales out on the live price, and the same day can fall
                         # straight back to the break-even stop. Pessimistic, like the trail above.
                         exit_px, why = t.entry, "stop"
+            if exit_px is None and ((h >= t.tp) if t.side == "long" else (l <= t.tp)):
+                exit_px, why = t.tp, "target"
+            if exit_px is None:
+                # The engine closes a trend trade when the regime flips against it, on every
+                # pass. Without it here the backtest models a system that holds every trade to
+                # its stop or its target, which is not the system being run.
+                reg_now = detect_regime(data.iloc[: i + 1])
+                if (t.side == "long" and reg_now == "trend_down") or \
+                   (t.side == "short" and reg_now == "trend_up"):
+                    exit_px, why = c, "regime flipped"
             if exit_px is None:
                 # R from the ORIGINAL stop. Measuring it from the already-trailed stop shrinks it
                 # every bar, so the stop walks into the price and closes every winner for nothing.

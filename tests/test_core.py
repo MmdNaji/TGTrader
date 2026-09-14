@@ -778,6 +778,35 @@ def test_every_backtest_in_the_app_runs_the_same_system():
             assert "engine_params(" in src, f"{mod.__name__} builds its own backtest arguments"
 
 
+def test_a_bar_through_the_1r_mark_and_the_target_books_the_scale_out(monkeypatch):
+    """Price has to pass the 1R mark before it reaches a 1.5R target, so the live engine sells
+    half at 1R and the rest at the target. The backtest tested the target FIRST and closed the
+    whole position there - +1.5R where the engine books about +1.25R - on a bar that is common
+    with daily ranges and a 1.5R target. Found by the Windows session's engine-replay parity."""
+    import dataclasses
+    from trader.backtest import engine as bt
+    from trader.strategy.base import Signal
+
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="D", tz="UTC")
+    df = pd.DataFrame({"open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+                       "volume": 1000.0}, index=idx)
+    df.iloc[102, df.columns.get_loc("high")] = 112.0   # one bar through the mark AND the target
+    df.iloc[102, df.columns.get_loc("low")] = 99.9      # ...that never comes near the stop
+
+    def one_signal(symbol, window, regime, strategies=None):
+        return [Signal(symbol, "long", 0.9, "t", "r", stop_distance=5.0)] if len(window) == 101 else []
+    monkeypatch.setattr(bt, "evaluate_all", one_signal)
+    monkeypatch.setattr(bt, "detect_regime", lambda window: "trend_up")
+
+    risk = dataclasses.replace(RiskSettings(), reward_risk=1.5, trail_after_r=0.0, capital_limit=1000.0)
+    res = bt.run_backtest("X/Y", df, risk, warmup=60, partial_at_r=1.0, partial_frac=0.5)
+    assert len(res.trades) == 1, [t.reason for t in res.trades]
+    t = res.trades[0]
+    assert t.scaled, "the bar passed the 1R mark on its way to the target and nothing was sold"
+    assert 1.1 < t.r < 1.35, f"R came out {t.r:.3f}; ~1.25 is half at 1R plus half at 1.5R"
+
+
 def test_the_backtest_carries_the_scale_out_the_engine_trades_with():
     """Autopilot takes half off at 1R, and engine_params passed nothing about it - so the
     Backtest page measured exits the trading engine was not using."""
