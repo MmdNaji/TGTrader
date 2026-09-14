@@ -77,6 +77,7 @@ class Engine:
         self._price_at: dict[str, float] = {}
         self._last_bar: dict[str, float] = {}      # last candle a symbol was evaluated on
         self._entered_bar: dict[str, float] = {}   # last candle a symbol was entered on
+        self._exit_bar: dict[str, float] = {}      # last CLOSED candle when a position was closed
         self._llm_bar: dict[str, float] = {}       # last candle the model was asked about
         self._cooldown: dict[str, float] = {}      # symbol -> "do not re-enter before" timestamp
         self._order_err: dict[str, str] = {}       # symbol -> last order error (de-duplicates the log)
@@ -451,6 +452,15 @@ class Engine:
         # Never take the same bar twice: after a quick stop-out the same closed-bar signal is
         # still sitting there and would be re-entered immediately.
         if self._entered_bar.get(symbol) == bar_ts:
+            return
+        # Nor a bar that closed while the last position was still open. Take a target mid-bar
+        # and the closed bar read here is the one that closed DURING that trade - it can still
+        # carry the breakout, so the engine bought straight back in the same day, higher, on a
+        # signal the trade had already used. The backtest evaluates the exit bar itself and
+        # fills on the next one, which is the system that was measured. Found by the Windows
+        # session's engine-replay parity test on AAVE (an engine-only trade, -1.04R).
+        exited = self._exit_bar.get(symbol)
+        if exited is not None and bar_ts <= exited:
             return
         stopped_at = self._cooldown.get(symbol)
         if stopped_at is not None and bar_ts - stopped_at < COOLDOWN_BARS * self.bar_seconds():
@@ -887,6 +897,9 @@ class Engine:
             # Stamped with the BAR this happened on (epoch seconds either way), so the cooldown
             # is measured in market time and behaves identically live and in a replay.
             self._cooldown[pos["symbol"]] = bar_ts if bar_ts else time.time()
+        if bar_ts:
+            # Any exit, not only a stop - see the matching check in _scout.
+            self._exit_bar[pos["symbol"]] = bar_ts
         self.db.add_decision(pos["symbol"], "close", None, "risk", why,
                              {"pnl": pnl, "r": r, "fees": fill.fee + entry_fee})
         try:

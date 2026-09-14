@@ -365,6 +365,25 @@ def test_no_re_entry_on_the_same_bar_and_a_cooldown_after_a_stop():
     assert len(db.recent_decisions(9999)) == before, "no evaluation at all while cooling down"
 
 
+def test_no_entry_from_a_bar_that_closed_while_the_position_was_open():
+    """A target hit mid-bar left the engine reading the closed bar that closed DURING the trade,
+    which can still carry the breakout - so it bought straight back in the same day, higher, on a
+    signal already used. The backtest never takes that trade. Found by engine-replay parity."""
+    s, db, pb, eng = _engine("t_reentry.db")
+    df = enrich(synth(400, seed=13))
+    read_ts = float(df.index[-2].timestamp())       # the closed bar _scout evaluates
+    price = float(df["close"].iloc[-1])
+    fill = pb.market_order("X/Y", "buy", 1.0, 100.0)
+    db.open_trade("paper", "X/Y", "long", fill.qty, fill.price, 90.0, 101.0, "t", "r", entry_fee=fill.fee)
+    pos = dict(db.open_trades("paper")[0])
+    assert eng.close_position(pos, 101.0, "target", bar_ts=read_ts)
+    assert not eng._cooldown.get("X/Y"), "precondition: a target starts no cooldown"
+    assert eng._scout("X/Y", df, price) is None, "re-entered from the bar the trade closed on"
+    # a bar that closes AFTER the exit is fair game again - that is what the backtest does
+    eng._exit_bar["X/Y"] = read_ts - eng.bar_seconds()
+    assert eng._scout("X/Y", df, price) is not None, "the next bar was blocked too"
+
+
 def test_a_model_failure_holds_instead_of_falling_back_to_the_raw_rules():
     s, db, pb, eng = _engine("t_brain.db")
     s.use_llm_for_decisions = True

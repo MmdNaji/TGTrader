@@ -383,7 +383,7 @@ def test_reset_while_the_engine_is_running_stops_it_wipes_and_restarts(win, monk
     assert win.engine.running(), "an engine that was running must be running again afterwards"
     assert isinstance(win.engine.broker, PaperBroker)
     assert win.engine.broker.cash() == 1000.0, "the restarted engine trades the new balance"
-    assert win.engine._cooldown == {} and win.engine._llm_bar == {}, \
+    assert win.engine._cooldown == {} and win.engine._llm_bar == {} and win.engine._exit_bar == {}, \
         "a reset means start over: no cooldowns or per-bar marks may carry across"
     win.engine.stop(wait=5.0)
     win.engine = None

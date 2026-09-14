@@ -821,6 +821,7 @@ class MainWindow(QMainWindow):
             # just wiped, which reads as "I reset it and it still does nothing".
             self.engine._cooldown.clear()
             self.engine._entered_bar.clear()
+            self.engine._exit_bar.clear()
             self.engine._last_bar.clear()
             self.engine._llm_bar.clear()
             self.engine._order_err.clear()
