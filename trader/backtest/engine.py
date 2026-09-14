@@ -102,7 +102,7 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                  leader_regimes: pd.Series | None = None, min_confidence: float = 0.0,
                  position_pct: float = 0.0, cooldown_bars: float = 2.0,
                  partial_at_r: float = 0.0, partial_frac: float = 0.5,
-                 trail_intrabar: bool = False) -> BtResult:
+                 trail_intrabar: bool = False, intraday: dict | None = None) -> BtResult:
     """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
     a long is refused while the leader is in ``trend_down`` and a short while it is in
     ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
@@ -136,6 +136,44 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
     rm = RiskManager(risk, None, "backtest")     # the same sizing code the live loop runs
     cooldown_until = -1                          # bar index before which no new entry is taken
 
+    def _levels(t: BtTrade, hh: float, ll: float) -> tuple[float | None, str]:
+        """Stop, then scale-out, then target, against one price range - a whole bar, or one real
+        hour of it when ``intraday`` is given. Mutates the trade (and equity) on a scale-out."""
+        nonlocal equity
+        # The STOP first: a range that covers the stop and anything else is assumed to have lost,
+        # because the order inside it is unknowable.
+        if (ll <= t.stop) if t.side == "long" else (hh >= t.stop):
+            return t.stop, "stop"
+        # Then the SCALE-OUT, and only then the target. The 1R mark lies between the entry and a
+        # 1.5R target, so a price that reaches the target has passed the mark first - the live
+        # engine sells half there and the rest at the target. Testing the target first closed the
+        # whole position at the target for +1.5R where the engine books ~+1.25R. Found by the
+        # Windows session's engine-replay parity test (7 trades in the first 3 symbols).
+        if partial_at_r > 0 and not t.scaled:
+            r_dist0 = abs(t.entry - (t.init_stop or t.stop))
+            mark = (t.entry + partial_at_r * r_dist0) if t.side == "long" \
+                else (t.entry - partial_at_r * r_dist0)
+            hit = (hh >= mark) if t.side == "long" else (ll <= mark)
+            if r_dist0 and hit:
+                px_out = mark * (1 - slippage) if t.side == "long" else mark * (1 + slippage)
+                part_qty = t.qty * partial_frac
+                gain = (px_out - t.entry) * part_qty if t.side == "long" \
+                    else (t.entry - px_out) * part_qty
+                # the entry fee was charged on the whole position; this half pays its share
+                t.part_pnl = gain - part_qty * px_out * fee_rate - t.entry_fee * partial_frac
+                t.qty -= part_qty
+                t.entry_fee *= (1 - partial_frac)
+                t.stop = t.entry          # the rest cannot lose money from here
+                t.scaled = True
+                equity += t.part_pnl
+                if trail_intrabar and ((ll <= t.entry) if t.side == "long" else (hh >= t.entry)):
+                    # The live engine scales out on the live price, and the same range can fall
+                    # straight back to the break-even stop. Pessimistic, like the trail.
+                    return t.entry, "stop"
+        if (hh >= t.tp) if t.side == "long" else (ll <= t.tp):
+            return t.tp, "target"
+        return None, ""
+
     for i in range(warmup, len(data)):
         bar = data.iloc[i]
         o, h, l, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
@@ -159,47 +197,30 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
         # 2. manage the open trade on this bar
         if open_t:
             t = open_t
-            if trail_intrabar:
-                # The live engine trails off the LIVE price every loop, so its stop ratchets up
-                # to the bar's extreme before the bar closes. A daily bar cannot say whether the
-                # high came before the low, so this assumes it did - the pessimistic case - and
-                # then lets this same bar's low hit the tightened stop.
-                t.stop = rm.trail_stop(t.side, t.entry, t.stop, h if t.side == "long" else l,
-                                       t.init_stop or t.stop)
             exit_px, why = None, ""
-            # The STOP first: a bar whose range covers the stop and anything else is assumed to
-            # have lost, because the order inside a bar is unknowable.
-            if (l <= t.stop) if t.side == "long" else (h >= t.stop):
-                exit_px, why = t.stop, "stop"
-            # Then the SCALE-OUT, and only then the target. The 1R mark lies between the entry and
-            # a 1.5R target, so a price that reaches the target has passed the mark first - the
-            # live engine sells half there and the rest at the target. Testing the target first
-            # closed the whole position at the target for +1.5R where the engine books ~+1.25R,
-            # and on daily bars with a 1.5R target that bar is common. Found by the Windows
-            # session's engine-replay parity test (7 trades in the first 3 symbols).
-            if exit_px is None and partial_at_r > 0 and not t.scaled:
-                r_dist0 = abs(t.entry - (t.init_stop or t.stop))
-                mark = (t.entry + partial_at_r * r_dist0) if t.side == "long" \
-                    else (t.entry - partial_at_r * r_dist0)
-                hit = (h >= mark) if t.side == "long" else (l <= mark)
-                if r_dist0 and hit:
-                    px_out = mark * (1 - slippage) if t.side == "long" else mark * (1 + slippage)
-                    part_qty = t.qty * partial_frac
-                    gain = (px_out - t.entry) * part_qty if t.side == "long" \
-                        else (t.entry - px_out) * part_qty
-                    # the entry fee was charged on the whole position; this half pays its share
-                    t.part_pnl = gain - part_qty * px_out * fee_rate - t.entry_fee * partial_frac
-                    t.qty -= part_qty
-                    t.entry_fee *= (1 - partial_frac)
-                    t.stop = t.entry          # the rest cannot lose money from here
-                    t.scaled = True
-                    equity += t.part_pnl
-                    if trail_intrabar and ((l <= t.entry) if t.side == "long" else (h >= t.entry)):
-                        # The live engine scales out on the live price, and the same day can fall
-                        # straight back to the break-even stop. Pessimistic, like the trail above.
-                        exit_px, why = t.entry, "stop"
-            if exit_px is None and ((h >= t.tp) if t.side == "long" else (l <= t.tp)):
-                exit_px, why = t.tp, "target"
+            hours = intraday.get(data.index[i]) if intraday is not None else None
+            if hours:
+                # REAL hourly prices for this day, walked in order - so "which came first, the
+                # stop or the target" is asked of one hour instead of a whole day. The live engine
+                # acts on the live price, which is what this approximates; within an hour the
+                # order is conventional, or pessimistic with trail_intrabar, to bound what is left.
+                for hh, ll, cc in hours:
+                    if trail_intrabar:
+                        t.stop = rm.trail_stop(t.side, t.entry, t.stop,
+                                               hh if t.side == "long" else ll, t.init_stop or t.stop)
+                    exit_px, why = _levels(t, hh, ll)
+                    if exit_px is not None:
+                        break
+                    t.stop = rm.trail_stop(t.side, t.entry, t.stop, cc, t.init_stop or t.stop)
+            else:
+                if trail_intrabar:
+                    # The live engine trails off the LIVE price every loop, so its stop ratchets
+                    # up to the bar's extreme before the bar closes. A daily bar cannot say whether
+                    # the high came before the low, so this assumes it did - the pessimistic case -
+                    # and then lets this same bar's low hit the tightened stop.
+                    t.stop = rm.trail_stop(t.side, t.entry, t.stop, h if t.side == "long" else l,
+                                           t.init_stop or t.stop)
+                exit_px, why = _levels(t, h, l)
             if exit_px is None:
                 # The engine closes a trend trade when the regime flips against it, on every
                 # pass. Without it here the backtest models a system that holds every trade to

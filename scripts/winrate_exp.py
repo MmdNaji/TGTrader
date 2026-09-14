@@ -113,7 +113,45 @@ VARIANTS = {
     "V17 V15, pessimistic bar path": dict(rr=1.5, partial_at_r=1.0, drop=("ema_trend",), trail=0.0,
                                           intra=True),
     "V18 V14, pessimistic bar path": dict(trail=0.0, intra=True),
+    # Round 7, same rule. The Windows session's parity test found the backtest tested the target
+    # BEFORE the scale-out, so a bar through both closed the whole trade at the target. Fixed in
+    # run_backtest (6e0d67d) and everything re-run. A run with the harness NOT yet pinned showed
+    # rr1.5 with no scale-out, no trail and no ema_trend at +104R under BOTH bar paths: with no
+    # scale-out and no trail, nothing it does depends on the order of prices inside a bar.
+    "V19 rr1.5, no ema, no partial, no trail": dict(rr=1.5, drop=("ema_trend",), trail=0.0),
+    "V20 V19, pessimistic bar path":           dict(rr=1.5, drop=("ema_trend",), trail=0.0, intra=True),
+    # Round 8, same rule. Every bracket above is an ASSUMPTION about the price path inside a
+    # daily bar, and the engine replay inherits the same assumption - it proves parity, not
+    # reality. These walk each day through its REAL closed hourly bars (.bars_1h), so the
+    # "which came first" question is asked of one hour. Within an hour: conventional, or
+    # pessimistic ("hp"). Where the two agree, the path question is answered by data.
+    "V21 old defaults, real hours":      dict(hourly=True),
+    "V22 old defaults, real hours hp":   dict(hourly=True, intra=True),
+    "V23 V15, real hours":               dict(rr=1.5, partial_at_r=1.0, drop=("ema_trend",), trail=0.0,
+                                              hourly=True),
+    "V24 V15, real hours hp":            dict(rr=1.5, partial_at_r=1.0, drop=("ema_trend",), trail=0.0,
+                                              hourly=True, intra=True),
+    "V25 V19, real hours":               dict(rr=1.5, drop=("ema_trend",), trail=0.0, hourly=True),
+    "V26 V19, real hours hp":            dict(rr=1.5, drop=("ema_trend",), trail=0.0, hourly=True, intra=True),
+    # V16 (rr2.5, half at 1R, no trail, no ema_trend) came out of the pinned corrected run at
+    # 53.2% / +96.9R on the close path and was never put through a pessimistic path.
+    "V27 V16, real hours":               dict(partial_at_r=1.0, drop=("ema_trend",), trail=0.0, hourly=True),
+    "V28 V16, real hours hp":            dict(partial_at_r=1.0, drop=("ema_trend",), trail=0.0, hourly=True,
+                                              intra=True),
 }
+
+
+def _hours_by_day(path: pathlib.Path) -> dict:
+    """{daily bar timestamp: [(high, low, close) per closed hour, in order]}. A day with fewer
+    than 20 hours is left out, so it falls back to the daily path rather than being walked
+    through a gap - the same rule the Windows session's engine replay applies."""
+    import pandas as pd
+    rows = json.loads(path.read_text())
+    days: dict = {}
+    for ms, _o, hh, ll, cc, _v in rows:
+        day = pd.Timestamp((ms // 86_400_000) * 86_400_000, unit="ms")
+        days.setdefault(day, []).append((float(hh), float(ll), float(cc)))
+    return {d: hs for d, hs in days.items() if len(hs) >= 20}
 
 _LEADER: dict = {}
 
@@ -138,14 +176,19 @@ def run_one(job):
     import pandas as pd
     from trader.backtest.engine import run_backtest
     from trader.config import RiskSettings
-    from trader.strategy.builtin import DEFAULT_STRATEGIES
+    from trader.strategy.builtin import EmaTrend, RsiReversion, DonchianBreakout
 
+    # PINNED, not read from the repo. The first run after the 0.15.3 defaults changed built
+    # "baseline" on the NEW defaults, and V0 - which has no scale-out and so cannot be moved by a
+    # scale-out fix - jumped from +53R to +104R. Every variant states everything it runs.
+    DEFAULT_STRATEGIES = [EmaTrend(), RsiReversion(), DonchianBreakout()]   # the pre-0.15.3 list
     v = VARIANTS[vname]
     rows = json.loads(pathlib.Path(path).read_text())
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
     df.index = pd.to_datetime(df["ts"], unit="ms")
     df = df.drop(columns=["ts"])
-    risk = RiskSettings()
+    risk = dataclasses.replace(RiskSettings(), reward_risk=2.5, trail_after_r=1.0,
+                               partial_take_r=0.0, partial_take_frac=0.5)   # pre-0.15.3, pinned
     if "rr" in v:
         risk = dataclasses.replace(risk, reward_risk=v["rr"])
     if "trail" in v:
@@ -153,9 +196,15 @@ def run_one(job):
     strats = _trend_filter(DEFAULT_STRATEGIES) if v.get("filt") else list(DEFAULT_STRATEGIES)
     strats = [s for s in strats if s.name not in v.get("drop", ())]
     leader = _leader_regimes(pathlib.Path(path).parent) if v.get("leader") else None
+    intraday = None
+    if v.get("hourly"):
+        hfile = pathlib.Path(path).parent.parent / ".bars_1h" / pathlib.Path(path).name
+        if not hfile.exists():
+            raise SystemExit(f"{sym}: no hourly bars at {hfile} - fetch them before an hourly round")
+        intraday = _hours_by_day(hfile)
     res = run_backtest(sym, df, risk, strategies=strats, allow_short=False, min_confidence=0.55,
                        partial_at_r=v.get("partial_at_r", 0.0), warmup=200, leader_regimes=leader,
-                       trail_intrabar=v.get("intra", False))
+                       trail_intrabar=v.get("intra", False), intraday=intraday)
     return vname, sym, [(int(df.index[t.entry_i].timestamp()), t.pnl > 0, t.r, t.strategy)
                         for t in res.trades]
 

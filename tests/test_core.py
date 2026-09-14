@@ -807,6 +807,36 @@ def test_a_bar_through_the_1r_mark_and_the_target_books_the_scale_out(monkeypatc
     assert 1.1 < t.r < 1.35, f"R came out {t.r:.3f}; ~1.25 is half at 1R plus half at 1.5R"
 
 
+def test_real_hours_decide_a_day_that_covers_both_the_stop_and_the_target(monkeypatch):
+    """A daily bar cannot say whether its high or its low came first, so a day through both the
+    stop and the target is booked as a loss. Given the day's real hourly bars, the backtest walks
+    them in order - and a day that reached the target in its first hour is a win."""
+    import dataclasses
+    from trader.backtest import engine as bt
+    from trader.strategy.base import Signal
+
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame({"open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+                       "volume": 1000.0}, index=idx)
+    df.iloc[102, df.columns.get_loc("high")] = 112.0    # through the 1.5R target...
+    df.iloc[102, df.columns.get_loc("low")] = 94.0      # ...AND the stop, on the same day
+
+    def one_signal(symbol, window, regime, strategies=None):
+        return [Signal(symbol, "long", 0.9, "t", "r", stop_distance=5.0)] if len(window) == 101 else []
+    monkeypatch.setattr(bt, "evaluate_all", one_signal)
+    monkeypatch.setattr(bt, "detect_regime", lambda window: "trend_up")
+    risk = dataclasses.replace(RiskSettings(), reward_risk=1.5, trail_after_r=0.0, capital_limit=1000.0)
+
+    daily = bt.run_backtest("X/Y", df, risk, warmup=60)
+    assert daily.trades[0].reason.endswith("stop"), "a daily bar through both must stay a loss"
+
+    hours = {idx[102]: [(112.0, 100.0, 108.0), (108.0, 94.0, 95.0)]}   # target hour first
+    hourly = bt.run_backtest("X/Y", df, risk, warmup=60, intraday=hours)
+    assert hourly.trades[0].reason.endswith("target"), hourly.trades[0].reason
+    assert hourly.trades[0].r > 1.0
+
+
 def test_the_backtest_carries_the_scale_out_the_engine_trades_with():
     """Autopilot takes half off at 1R, and engine_params passed nothing about it - so the
     Backtest page measured exits the trading engine was not using."""
