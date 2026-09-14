@@ -2153,7 +2153,10 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "btn_auto"):
             on = bool(s.autopilot)
-            self._btn_label(self.btn_auto, "خاموش کردن" if on else "روشن کردن")
+            # NOT _btn_label. That compacts TOPBAR buttons to their first word, which there is an
+            # icon; this label has no icon, so compaction kept "روشن" - and "روشن" beside a
+            # "خاموش" pill reads as the switch being ON when it is off. It is not in the topbar.
+            self.btn_auto.setText("خاموش کردن" if on else "روشن کردن")
             self.btn_auto.setObjectName("ghost" if on else "primary")
             self.btn_auto.style().unpolish(self.btn_auto); self.btn_auto.style().polish(self.btn_auto)
             set_pill(self.pill_auto, "روشن" if on else "خاموش", "ok" if on else "muted")

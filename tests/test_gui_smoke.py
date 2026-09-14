@@ -1599,6 +1599,26 @@ def test_the_reset_button_is_not_a_neighbour_of_the_start_button(win):
     assert win.btn_reset.objectName() == "dangerGhost"
 
 
+def test_the_autopilot_button_never_says_the_opposite_of_its_state(win):
+    """The dashboard's autopilot button was labelled through _btn_label, the TOPBAR compaction
+    that keeps a label's first word because on the topbar that word is an icon. This label has
+    no icon, so a narrow window turned "روشن کردن" into "روشن" - rendered beside a "خاموش" pill,
+    where it reads as the switch being ON while autopilot is off. Seen on the Windows exe."""
+    from trader.gui.app import COMPACT_W
+    app = QApplication.instance() or QApplication([])
+    win.show()
+    win.resize(COMPACT_W - 200, 800)
+    for _ in range(4):
+        app.processEvents()
+    win.refresh()
+    app.processEvents()
+    want = "خاموش کردن" if win.settings.autopilot else "روشن کردن"
+    assert win.btn_auto.text() == want, f"autopilot button reads {win.btn_auto.text()!r} in a narrow window"
+    win.resize(COMPACT_W + 300, 800)
+    for _ in range(4):
+        app.processEvents()
+
+
 def test_no_geometry_test_drags_the_shared_window_in_with_it():
     """A test that builds its own window must not ALSO take `win`.
 
