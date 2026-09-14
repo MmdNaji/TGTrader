@@ -102,7 +102,8 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                  leader_regimes: pd.Series | None = None, min_confidence: float = 0.0,
                  position_pct: float = 0.0, cooldown_bars: float = 2.0,
                  partial_at_r: float = 0.0, partial_frac: float = 0.5,
-                 trail_intrabar: bool = False, intraday: dict | None = None) -> BtResult:
+                 trail_intrabar: bool = False, intraday: dict | None = None,
+                 time_stop_bars: int = 0) -> BtResult:
     """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
     a long is refused while the leader is in ``trend_down`` and a short while it is in
     ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
@@ -240,6 +241,11 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 if (t.side == "long" and reg_now == "trend_down") or \
                    (t.side == "short" and reg_now == "trend_up"):
                     exit_px, why = c, "regime flipped"
+            if exit_px is None and time_stop_bars > 0 and not t.scaled and i - t.entry_i >= time_stop_bars:
+                # A breakout that has not reached its 1R scale-out this many bars after the fill is
+                # treated as failed and closed at the close. OFF by default; here to be MEASURED
+                # (scripts/time_exp.py) against the bear-market loss, not assumed to help.
+                exit_px, why = c, "time stop"
             if exit_px is None:
                 # R from the ORIGINAL stop. Measuring it from the already-trailed stop shrinks it
                 # every bar, so the stop walks into the price and closes every winner for nothing.

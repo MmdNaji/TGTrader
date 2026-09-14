@@ -849,6 +849,33 @@ def test_real_hours_decide_a_day_that_covers_both_the_stop_and_the_target(monkey
         bt.run_backtest("X/Y", df, risk, warmup=60, intraday={pd.Timestamp("1999-01-01"): hours[idx[102]]})
 
 
+def test_a_time_stop_closes_a_trade_that_goes_nowhere(monkeypatch):
+    """time_stop_bars closes a trade that has not reached its 1R scale-out N bars after the fill,
+    at that bar's close - and does nothing when it is 0, the default."""
+    import dataclasses
+    from trader.backtest import engine as bt
+    from trader.strategy.base import Signal
+
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame({"open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+                       "volume": 1000.0}, index=idx)
+
+    def one_signal(symbol, window, regime, strategies=None):
+        return [Signal(symbol, "long", 0.9, "t", "r", stop_distance=5.0)] if len(window) == 101 else []
+    monkeypatch.setattr(bt, "evaluate_all", one_signal)
+    monkeypatch.setattr(bt, "detect_regime", lambda window: "trend_up")
+    risk = dataclasses.replace(RiskSettings(), reward_risk=2.5, trail_after_r=0.0, capital_limit=1000.0)
+
+    held = bt.run_backtest("X/Y", df, risk, warmup=60, partial_at_r=1.0)
+    assert held.trades == [], "with no time stop a flat trade stays open to the end"
+
+    stopped = bt.run_backtest("X/Y", df, risk, warmup=60, partial_at_r=1.0, time_stop_bars=5)
+    assert len(stopped.trades) == 1 and stopped.trades[0].reason.endswith("time stop")
+    t = stopped.trades[0]
+    assert t.exit_i - t.entry_i == 5, (t.entry_i, t.exit_i)
+
+
 def test_the_backtest_carries_the_scale_out_the_engine_trades_with():
     """Autopilot takes half off at 1R, and engine_params passed nothing about it - so the
     Backtest page measured exits the trading engine was not using."""
