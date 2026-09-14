@@ -103,7 +103,11 @@ class Scalp(Strategy):
         return None
 
 
-DEFAULT_STRATEGIES: list[Strategy] = [EmaTrend(), RsiReversion(), DonchianBreakout()]
+# EmaTrend is NOT in the default list. Measured over 32 symbols and Bybit daily history since
+# 2021 (scripts/winrate_exp.py), it lost money in every one of eight splits - both halves, all
+# three thirds, the main and the held-out symbols - win 31.7%, -0.25R a trade, while
+# DonchianBreakout carried all of the profit. The class stays so old trades still have a name.
+DEFAULT_STRATEGIES: list[Strategy] = [RsiReversion(), DonchianBreakout()]
 
 
 def evaluate_all(symbol: str, df: pd.DataFrame, regime: str, strategies: list[Strategy] | None = None) -> list[Signal]:

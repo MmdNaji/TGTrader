@@ -81,7 +81,9 @@ def test_risk_sizing_and_limits():
     rm.set_kill_switch(True)
     assert "kill" in rm.check("Z/Z", [], 100)
     rm.set_kill_switch(False)
-    # trailing: 1R in profit moves the stop to price - R
+    # trailing: 1R in profit moves the stop to price - R (off by default since 0.15.3, so the
+    # mechanics are tested with it switched on)
+    rm.risk.trail_after_r = 1.0
     assert rm.trail_stop("long", entry=100, stop=98, price=102.5) == 100.5
     assert rm.trail_stop("long", entry=100, stop=98, price=101) == 98
 
@@ -741,7 +743,9 @@ def test_the_backtest_carries_the_scale_out_the_engine_trades_with():
     p = engine_params(eff)
     assert p["partial_at_r"] == eff.risk.partial_take_r
     assert p["partial_frac"] == eff.risk.partial_take_frac
-    assert engine_params(Settings())["partial_at_r"] == 0.0
+    off = Settings()
+    off.risk.partial_take_r = 0.0
+    assert engine_params(off)["partial_at_r"] == 0.0
 
 
 def test_profit_factor_is_not_shown_as_infinity_on_a_tiny_sample():
@@ -1560,10 +1564,10 @@ def test_taking_half_off_banks_it_and_does_not_inflate_R():
 
 
 def test_the_scale_out_is_off_unless_asked_for():
-    """It is a trade-off, not an improvement: it buys a better win rate and a shallower
-    drawdown and pays about 12% of the return. Nothing turns that on for the owner."""
+    """Switched off, it must do nothing. It is ON by default since 0.15.3 - the owner chose the
+    win-rate side of the trade-off - so the off case is set explicitly here."""
     s = Settings()
-    assert s.risk.partial_take_r == 0.0
+    s.risk.partial_take_r = 0.0
     db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_scale_off.db")
     try:
         eng = Engine(s, db, broker=PaperBroker(1000))
@@ -1811,7 +1815,7 @@ def test_autopilot_decides_everything_it_has_evidence_for_and_nothing_else():
     s.autopilot = True
     e = s.effective()
     assert e is not s, "effective() must be a copy - the owner's own numbers have to survive"
-    assert e.risk.reward_risk == 2.5
+    assert e.risk.reward_risk == Settings.AUTO_RISK["reward_risk"] != 2.0
     assert e.risk.partial_take_r == 1.0        # the win-rate side of the trade-off
     assert e.timeframe == "1d"
     assert e.aggressiveness == "normal"
@@ -1851,8 +1855,10 @@ def test_the_engine_runs_on_the_settings_actually_in_force():
     db = Database(Path(os.environ["TGTRADER_HOME"]) / "t_auto_engine.db")
     try:
         eng = Engine(s, db, broker=PaperBroker(1000, allow_short=False))
-        assert eng.settings.risk.reward_risk == 2.5, "the engine is running the typed-in number"
-        assert eng.risk.risk.reward_risk == 2.5, "the risk layer got the un-effective settings"
+        want = Settings.AUTO_RISK["reward_risk"]
+        assert want != 2.0, "precondition: the typed-in number must differ from autopilot's"
+        assert eng.settings.risk.reward_risk == want, "the engine is running the typed-in number"
+        assert eng.risk.risk.reward_risk == want, "the risk layer got the un-effective settings"
         assert s.risk.reward_risk == 2.0, "the engine wrote over the owner's settings"
     finally:
         db.close()

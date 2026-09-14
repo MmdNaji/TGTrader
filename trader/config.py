@@ -43,6 +43,9 @@ LABELS = {
     "max_daily_loss": "حداکثر زیان روزانه",
     "max_open_positions": "حداکثر پوزیشن باز",
     "max_position_frac": "بزرگ‌ترین پوزیشن (٪ سرمایه)",
+    "reward_risk": "نسبت سود به ضرر",
+    "partial_take_r": "برداشت نصف پوزیشن در (R)",
+    "trail_after_r": "تریل بعد از (R)",
     "symbols": "نمادها",
 }
 
@@ -80,7 +83,13 @@ class RiskSettings:
     # Widening the STOP is not the same lever and does not work: scaling each strategy's own
     # stop x3 lifted the first half's win rate to 50% and took the second half to +20 from
     # +218. That is a rule fitted to a date, and it is the shape to watch for here.
-    reward_risk: float = 2.5
+    #
+    # 1.5 since 0.15.3, and the table above is superseded - it was 1,000 bars with no bear
+    # market in them, EmaTrend in the list, and a trail measured on the close only. Remeasured
+    # over 32 symbols from 2021 (scripts/winrate_exp.py), together with half at 1R, no trail
+    # and no EmaTrend: win 53% vs 42%, +132R vs +53R, and +70R vs -65R under the worst intraday
+    # bar path. Still slightly negative in the 2022 bear market, less so than 2.5 was.
+    reward_risk: float = 1.5
     # Sell part of a position once it is this many R in profit and move the stop to break-even,
     # letting the rest run. 0 = off, and off is the default because it is a TRADE-OFF, not an
     # improvement. Measured on 21 liquid pairs and ~1,000 daily bars, four independent splits,
@@ -95,11 +104,17 @@ class RiskSettings:
     # about 12% of the return for it. 1.5R doubles the worst split's return and leaves the win
     # rate alone. Neither is free and neither is wrong - which one is right depends on what the
     # owner is actually trying to avoid, so the app states the numbers and does not choose.
-    partial_take_r: float = 0.0
+    # The owner chose on 2026-09-14: most trades should close in profit. So it is ON by
+    # default now, as part of the 1.5R design above.
+    partial_take_r: float = 1.0
     partial_take_frac: float = 0.5     # how much of the position to sell at that point
 
     # Trailing stop kicks in once the trade is this many R in profit (0 = off).
-    trail_after_r: float = 1.0
+    # OFF. The engine trails off the LIVE price, so on daily bars the stop ratchets to the
+    # intraday high and ordinary noise takes it out: under the worst bar path the old defaults
+    # went from +53R to -65R. With a 1.5R target and half at 1R the trail added nothing
+    # (+133R on, +132R off), and off there is no bar path for it to depend on.
+    trail_after_r: float = 0.0
     # Largest single position as a fraction of the capital limit. 25%, not 50%: at a half the
     # account per trade only two positions fit however many the other settings allow, and the
     # mismatch is invisible until the bot has one trade open and refuses every other.
@@ -331,8 +346,8 @@ class Settings:
         "max_position_frac": 0.25,       # 4 x 25% - the two numbers have to agree or the bot
         "max_open_risk": 0.06,           #   opens one trade and refuses every other
         "atr_stop_mult": 2.0,
-        "reward_risk": 2.5,              # 2.0 is the only value that LOSES on a third of history
-        "trail_after_r": 1.0,
+        "reward_risk": 1.5,              # with half at 1R and no trail - see RiskSettings
+        "trail_after_r": 0.0,            # a live-price trail loses on daily bars - see RiskSettings
         # Take half off at 1R. The default is OFF because, stated as a choice, it is a genuine
         # trade-off and the app refuses to make the owner's mind up for them. Autopilot's whole
         # job is to make it up: measured over four splits it raised the win rate in EVERY one
@@ -469,11 +484,13 @@ class Settings:
         # the old number - and the most important trading change of the day never arrives at the
         # person it was measured for. Their settings are theirs and nothing here rewrites them;
         # saying nothing is not the alternative when the number is on hand.
-        if r.reward_risk < 2.4:
+        # The exit design measured in 0.15.3 (scripts/winrate_exp.py, 32 coins since 2021) is the
+        # three numbers TOGETHER - 1.5R target, half at 1R, no trail - so one line names all three.
+        if abs(r.reward_risk - 1.5) > 0.05 or r.partial_take_r <= 0 or r.trail_after_r > 0:
             out.append(
-                f"«نسبت سود به ضرر» شما {r.reward_risk:.1f} است. روی ۲۱ جفت و ~۱۰۰۰ کندل روزانه، "
-                f"۲.۰ تنها مقداری بود که در یک‌سوم تاریخ ضرر داد؛ ۲.۵ در همان بازه سود داد. "
-                f"(تنظیمات ← ریسک)")
+                f"خروج اندازه‌گیری‌شده: «{LABELS['reward_risk']}» ۱.۵، «{LABELS['partial_take_r']}» ۱، "
+                f"«{LABELS['trail_after_r']}» ۰ — روی ۳۲ ارز از ۲۰۲۱ برد ۵۳٪ در برابر ۴۲٪. "
+                f"(الان: {r.reward_risk:.1f} / {r.partial_take_r:g} / {r.trail_after_r:g})")
         # The same shape, the other way round: a setting someone has deliberately turned up,
         # which does nothing at all for the built-in strategies.
         if abs(r.atr_stop_mult - 2.0) > 0.01:

@@ -1165,9 +1165,15 @@ def test_the_trade_analysis_view_draws_the_chart_as_it_was(win):
     s.risk.capital_limit = 1000; s.paper_start_balance = 1000
     import pathlib
     db = Database(pathlib.Path(tempfile.mkdtemp(prefix="tg-analysis-")) / "a.db")
+    keep_db, keep_settings = win.db, win.settings
     try:
         pb = PaperBroker(1000); pb.reset(1000)
         eng = Engine(s, db, broker=pb)
+        # This test is about the analysis VIEW, not about which rule trades. Its synthetic market
+        # has flat volume, so the default breakout rule never fires; EmaTrend, dropped from the
+        # defaults in 0.15.3, is the rule that trades a smooth trend like this one.
+        from trader.strategy.builtin import EmaTrend, DEFAULT_STRATEGIES
+        eng.strategies = [EmaTrend(), *DEFAULT_STRATEGIES]
         eng.market = FakeMarket(df)
         for _ in range(550):
             eng.loop_once()
@@ -1177,8 +1183,8 @@ def test_the_trade_analysis_view_draws_the_chart_as_it_was(win):
         # The `win` fixture is MODULE-scoped: whatever this test points it at, the next test
         # inherits. An earlier version left win.db pointing at the database closed in the
         # finally below, and the settings test after it died on "Cannot operate on a closed
-        # database" - a failure with nothing to do with the code it was testing.
-        keep_db, keep_settings = win.db, win.settings
+        # database" - a failure with nothing to do with the code it was testing. The originals are
+        # taken BEFORE the try, or a failed assertion above turns into an UnboundLocalError here.
         win.db, win.settings = db, s
         win._closed_rows = [dict(r) for r in closed]
         dlg = win._show_trade_analysis(0, show=False)
