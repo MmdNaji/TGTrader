@@ -72,13 +72,22 @@ class DonchianBreakout(Strategy):
         if not _ok(cur["dc_hi"], cur["dc_lo"], cur["atr14"], cur["vol_sma20"]):
             return None
         vol_ok = cur["volume"] > 1.2 * cur["vol_sma20"]
-        stop = 2.0 * float(cur["atr14"])
+        atr = float(cur["atr14"])
+        stop = 2.0 * atr
+        # The CLOSE and how far past the channel it is, not just the level. Printing only the
+        # 20-bar high made a single +50% candle read like an entry that chased 51% past the
+        # breakout: on the forward test BR's reason said "above 0.35" while it closed at 0.534 -
+        # about 3.3 ATR above - and the engine had filled within 1% of that close.
         if cur["close"] > cur["dc_hi"] and vol_ok and regime != "trend_down":
+            past = (float(cur["close"]) - float(cur["dc_hi"])) / atr
             return Signal(symbol, "long", 0.55, self.name,
-                          f"breakout above 20-bar high {cur['dc_hi']:.4g} on volume", stop_distance=stop)
+                          f"breakout: close {cur['close']:.4g}, {past:.1f} ATR above 20-bar high "
+                          f"{cur['dc_hi']:.4g}, on volume", stop_distance=stop)
         if cur["close"] < cur["dc_lo"] and vol_ok and regime != "trend_up":
+            past = (float(cur["dc_lo"]) - float(cur["close"])) / atr
             return Signal(symbol, "short", 0.55, self.name,
-                          f"breakdown below 20-bar low {cur['dc_lo']:.4g} on volume", stop_distance=stop)
+                          f"breakdown: close {cur['close']:.4g}, {past:.1f} ATR below 20-bar low "
+                          f"{cur['dc_lo']:.4g}, on volume", stop_distance=stop)
         return None
 
 

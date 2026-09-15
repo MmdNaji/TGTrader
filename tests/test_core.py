@@ -2483,3 +2483,22 @@ def test_the_conviction_score_is_arithmetic_on_the_chart_and_cannot_veto_a_trade
     assert worst >= 0.0
     # and with nothing to go on it says "ordinary", not "great"
     assert score({}, "long", "unknown", 0.0, 0.0) == 0.5
+
+
+def test_a_breakout_reason_says_where_it_closed_not_only_the_level():
+    """The forward paper test opened BR/USDT with the reason "breakout above 20-bar high 0.35".
+    It had closed at 0.534 - about 3.3 ATR past that level, on one candle - and the engine filled within
+    1% of the close. Read against the level alone the entry looked like a 51% chase, and that
+    misreading nearly became an engine guard that would have refused none of the four entries.
+    The reason has to carry the close and how far past the channel it is."""
+    from trader.strategy.builtin import DonchianBreakout
+    df = enrich(synth(300, seed=3))
+    last = df.index[-1]
+    atr, hi = float(df.at[last, "atr14"]), float(df.at[last, "dc_hi"])
+    df.at[last, "close"] = hi + 5.0 * atr
+    df.at[last, "volume"] = 2.0 * float(df.at[last, "vol_sma20"])
+    sig = DonchianBreakout().evaluate("X/Y", df, "range")
+    assert sig is not None and sig.side == "long"
+    assert f"{hi + 5.0 * atr:.4g}" in sig.reason, f"the close is not in the reason: {sig.reason!r}"
+    assert "5.0 ATR" in sig.reason, f"the distance past the channel is not in the reason: {sig.reason!r}"
+    assert f"{hi:.4g}" in sig.reason, "and the level itself is still named"
