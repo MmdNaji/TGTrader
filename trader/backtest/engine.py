@@ -103,7 +103,7 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                  position_pct: float = 0.0, cooldown_bars: float = 2.0,
                  partial_at_r: float = 0.0, partial_frac: float = 0.5,
                  trail_intrabar: bool = False, intraday: dict | None = None,
-                 time_stop_bars: int = 0) -> BtResult:
+                 time_stop_bars: int = 0, close_exit=None) -> BtResult:
     """``leader_regimes`` is the market leader's (Bitcoin's) regime per timestamp. When given,
     a long is refused while the leader is in ``trend_down`` and a short while it is in
     ``trend_up`` - the same filter the live engine applies, so it can be measured rather than
@@ -241,6 +241,10 @@ def run_backtest(symbol: str, df: pd.DataFrame, risk: RiskSettings, start_equity
                 if (t.side == "long" and reg_now == "trend_down") or \
                    (t.side == "short" and reg_now == "trend_up"):
                     exit_px, why = c, "regime flipped"
+            if exit_px is None and close_exit is not None and close_exit(data.iloc[: i + 1]):
+                # A strategy-owned exit read off the CLOSED bar (e.g. "close back above SMA5" for a
+                # dip buy). Filled at the close here; the engine would act at the next price.
+                exit_px, why = c, "rule exit"
             if exit_px is None and time_stop_bars > 0 and not t.scaled and i - t.entry_i >= time_stop_bars:
                 # A breakout that has not reached its 1R scale-out this many bars after the fill is
                 # treated as failed and closed at the close. OFF by default; here to be MEASURED

@@ -876,6 +876,30 @@ def test_a_time_stop_closes_a_trade_that_goes_nowhere(monkeypatch):
     assert t.exit_i - t.entry_i == 5, (t.entry_i, t.exit_i)
 
 
+def test_a_strategy_exit_rule_closes_the_trade_at_the_close(monkeypatch):
+    """close_exit is a strategy-owned exit evaluated on the closed window (a dip buy that sells when
+    the close is back above its SMA5). It closes at that bar's close, and does nothing when unset."""
+    import dataclasses
+    from trader.backtest import engine as bt
+    from trader.strategy.base import Signal
+
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    df = pd.DataFrame({"open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0,
+                       "volume": 1000.0}, index=idx)
+
+    def one_signal(symbol, window, regime, strategies=None):
+        return [Signal(symbol, "long", 0.9, "t", "r", stop_distance=5.0)] if len(window) == 101 else []
+    monkeypatch.setattr(bt, "evaluate_all", one_signal)
+    monkeypatch.setattr(bt, "detect_regime", lambda window: "trend_up")
+    risk = dataclasses.replace(RiskSettings(), reward_risk=2.5, trail_after_r=0.0, capital_limit=1000.0)
+
+    assert bt.run_backtest("X/Y", df, risk, warmup=60).trades == [], "no exit rule: the flat trade stays open"
+    res = bt.run_backtest("X/Y", df, risk, warmup=60, close_exit=lambda w: len(w) >= 106)
+    assert len(res.trades) == 1 and res.trades[0].reason.endswith("rule exit")
+    assert res.trades[0].exit_i == 105
+
+
 def test_the_backtest_carries_the_scale_out_the_engine_trades_with():
     """Autopilot takes half off at 1R, and engine_params passed nothing about it - so the
     Backtest page measured exits the trading engine was not using."""
